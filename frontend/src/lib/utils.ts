@@ -1,8 +1,16 @@
-export function formatCurrency(value: number | string, currency = 'GHS'): string {
+export function formatCurrency(value: number | string, currency = 'NGN'): string {
   const num = typeof value === 'string' ? parseFloat(value) : value
-  return new Intl.NumberFormat('en-GH', {
+  const localeByCurrency: Record<string, string> = {
+    NGN: 'en-NG',
+    GHS: 'en-GH',
+    USD: 'en-US',
+    EUR: 'en-IE',
+    GBP: 'en-GB',
+  }
+  const normalized = (currency || 'NGN').toUpperCase()
+  return new Intl.NumberFormat(localeByCurrency[normalized] || 'en-NG', {
     style: 'currency',
-    currency,
+    currency: normalized,
     minimumFractionDigits: 2,
   }).format(isNaN(num) ? 0 : num)
 }

@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, EmailStr
 from typing import Optional
+import uuid
 from app.db.supabase_client import get_supabase
 from app.core.auth import get_current_user
 
@@ -8,9 +9,11 @@ router = APIRouter()
 
 
 class ClientCreate(BaseModel):
-    name: str
+    name: Optional[str] = None
+    client_name: Optional[str] = None
     email: Optional[EmailStr] = None
     phone: Optional[str] = None
+    phone_number: Optional[str] = None
     address: Optional[str] = None
     company: Optional[str] = None
     notes: Optional[str] = None
@@ -19,8 +22,10 @@ class ClientCreate(BaseModel):
 
 class ClientUpdate(BaseModel):
     name: Optional[str] = None
+    client_name: Optional[str] = None
     email: Optional[EmailStr] = None
     phone: Optional[str] = None
+    phone_number: Optional[str] = None
     address: Optional[str] = None
     company: Optional[str] = None
     notes: Optional[str] = None
@@ -44,7 +49,25 @@ def list_clients(
     if search:
         query = query.ilike("name", f"%{search}%")
     result = query.execute()
-    return {"data": result.data, "total": result.count, "page": page, "page_size": page_size}
+    items = [
+        {
+            **row,
+            "client_name": row.get("name"),
+            "phone_number": row.get("phone"),
+        }
+        for row in (result.data or [])
+    ]
+    total = int(result.count or 0)
+    total_pages = max(1, (total + page_size - 1) // page_size)
+    print(f"[clients] rows={len(items)} total={total} page={page} page_size={page_size}")
+    return {
+        "items": items,
+        "data": items,
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "total_pages": total_pages,
+    }
 
 
 @router.get("/{client_id}")
@@ -59,7 +82,24 @@ def get_client(client_id: str, _user=Depends(get_current_user)):
 @router.post("", status_code=201)
 def create_client(payload: ClientCreate, _user=Depends(get_current_user)):
     sb = get_supabase()
-    result = sb.table("clients").insert(payload.model_dump(exclude_none=True)).execute()
+    data = payload.model_dump(exclude_none=True)
+    name = (data.get("name") or data.get("client_name") or "").strip()
+    phone = (data.get("phone") or data.get("phone_number") or "").strip()
+    if not name:
+        raise HTTPException(422, "client_name is required")
+    if not phone:
+        raise HTTPException(422, "phone_number is required")
+
+    mapped = {
+        "id": str(uuid.uuid4()),
+        "name": name,
+        "phone": phone,
+        "email": data.get("email"),
+        "address": data.get("address"),
+        "company": data.get("company"),
+        "notes": data.get("notes"),
+    }
+    result = sb.table("clients").insert(mapped).execute()
     return result.data[0]
 
 
@@ -69,6 +109,10 @@ def update_client(client_id: str, payload: ClientUpdate, _user=Depends(get_curre
     data = payload.model_dump(exclude_none=True)
     if not data:
         raise HTTPException(400, "No fields to update")
+    if "client_name" in data:
+        data["name"] = data.pop("client_name")
+    if "phone_number" in data:
+        data["phone"] = data.pop("phone_number")
     result = sb.table("clients").update(data).eq("id", client_id).execute()
     return result.data[0]
 

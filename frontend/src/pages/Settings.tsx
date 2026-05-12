@@ -32,7 +32,11 @@ export default function Settings() {
     },
     onSuccess: () => {
       toast.success('Settings saved')
+      if (data?.currency) {
+        localStorage.setItem('currency', data.currency)
+      }
       qc.invalidateQueries({ queryKey: ['settings'] })
+      qc.invalidateQueries({ queryKey: ['system-status'] })
     },
     onError: () => toast.error('Save failed'),
   })
@@ -44,6 +48,10 @@ export default function Settings() {
   })
 
   if (isLoading) return <LoadingSpinner />
+
+  if (data?.currency) {
+    localStorage.setItem('currency', data.currency)
+  }
 
   return (
     <div className="p-8 space-y-6">
@@ -74,11 +82,11 @@ export default function Settings() {
           <div>
             <label className="form-label">Currency</label>
             <select className="form-input" {...register('currency')}>
+              <option value="NGN">NGN – Nigerian Naira</option>
               <option value="GHS">GHS – Ghana Cedi</option>
               <option value="USD">USD – US Dollar</option>
               <option value="EUR">EUR – Euro</option>
               <option value="GBP">GBP – British Pound</option>
-              <option value="NGN">NGN – Nigerian Naira</option>
             </select>
           </div>
           <div>

@@ -36,10 +36,15 @@ export default function Dashboard() {
     refetchInterval: 60_000,
   })
 
+  const { data: status } = useQuery<{ currency?: string }>({
+    queryKey: ['system-status'],
+    queryFn: () => api.get('/settings/status').then((r) => r.data),
+  })
+
   if (isLoading) return <LoadingSpinner />
 
   const s = data!
-  const currency = localStorage.getItem('currency') ?? 'GHS'
+  const currency = status?.currency ?? localStorage.getItem('currency') ?? 'NGN'
 
   return (
     <div className="p-8 space-y-6">

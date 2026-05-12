@@ -11,8 +11,10 @@ import toast from 'react-hot-toast'
 interface Client {
   id: string
   name: string
+  client_name?: string
   email: string
   phone: string
+  phone_number?: string
   company: string
   address: string
   notes: string
@@ -20,9 +22,9 @@ interface Client {
 }
 
 interface FormValues {
-  name: string
+  client_name: string
   email: string
-  phone: string
+  phone_number: string
   company: string
   address: string
   notes: string
@@ -91,7 +93,14 @@ export default function Clients() {
 
   const openEdit = (row: Client) => {
     setEditRow(row)
-    reset({ name: row.name, email: row.email, phone: row.phone, company: row.company, address: row.address, notes: row.notes })
+    reset({
+      client_name: row.client_name ?? row.name,
+      email: row.email,
+      phone_number: row.phone_number ?? row.phone,
+      company: row.company,
+      address: row.address,
+      notes: row.notes,
+    })
     setShowForm(true)
   }
 
@@ -106,9 +115,9 @@ export default function Clients() {
   }
 
   const columns = [
-    { key: 'name', header: 'Name' },
+    { key: 'client_name', header: 'Name', render: (row: Client) => row.client_name ?? row.name },
     { key: 'email', header: 'Email' },
-    { key: 'phone', header: 'Phone' },
+    { key: 'phone_number', header: 'Phone', render: (row: Client) => row.phone_number ?? row.phone },
     { key: 'company', header: 'Company' },
     { key: 'source', header: 'Source' },
     {
@@ -142,11 +151,11 @@ export default function Clients() {
 
       {isLoading ? <LoadingSpinner /> : (
         <>
-          <Table columns={columns as any} data={data?.data ?? []} />
+          <Table columns={columns as any} data={data?.items ?? data?.data ?? []} />
           <div className="flex gap-2 justify-end">
             <button disabled={page === 1} onClick={() => setPage(p => p - 1)} className="btn-secondary">Prev</button>
-            <span className="text-sm text-gray-500 self-center">Page {page}</span>
-            <button disabled={data?.data?.length < 50} onClick={() => setPage(p => p + 1)} className="btn-secondary">Next</button>
+            <span className="text-sm text-gray-500 self-center">Page {page} of {data?.total_pages ?? 1}</span>
+            <button disabled={page >= (data?.total_pages ?? 1)} onClick={() => setPage(p => p + 1)} className="btn-secondary">Next</button>
           </div>
         </>
       )}
@@ -155,9 +164,9 @@ export default function Clients() {
       <Modal title={editRow ? 'Edit Client' : 'Add Client'} open={showForm} onClose={() => { setShowForm(false); setEditRow(null); reset() }}>
         <form onSubmit={handleSubmit((v) => saveMutation.mutate(v))} className="space-y-4">
           {[
-            { name: 'name', label: 'Name', required: true },
+            { name: 'client_name', label: 'Client Name', required: true },
             { name: 'email', label: 'Email' },
-            { name: 'phone', label: 'Phone' },
+            { name: 'phone_number', label: 'Phone Number', required: true },
             { name: 'company', label: 'Company' },
             { name: 'address', label: 'Address' },
           ].map(({ name, label, required }) => (

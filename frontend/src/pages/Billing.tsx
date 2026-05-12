@@ -48,6 +48,12 @@ export default function Billing() {
       api.get('/billing', { params: { status: statusFilter || undefined, page, page_size: 50 } }).then((r) => r.data),
   })
 
+  const { data: status } = useQuery<{ currency?: string }>({
+    queryKey: ['system-status'],
+    queryFn: () => api.get('/settings/status').then((r) => r.data),
+  })
+  const currency = status?.currency ?? localStorage.getItem('currency') ?? 'NGN'
+
   const { register, handleSubmit, reset, formState: { errors } } = useForm<FormValues>()
 
   const saveMutation = useMutation({
@@ -89,9 +95,9 @@ export default function Billing() {
   const columns = [
     { key: 'client_name',  header: 'Client' },
     { key: 'service_name', header: 'Service' },
-    { key: 'total_amount', header: 'Total', render: (r: BillingRow) => formatCurrency(r.total_amount) },
-    { key: 'amount_paid',  header: 'Paid',  render: (r: BillingRow) => formatCurrency(r.amount_paid) },
-    { key: 'balance',      header: 'Balance', render: (r: BillingRow) => formatCurrency(r.balance) },
+    { key: 'total_amount', header: 'Total', render: (r: BillingRow) => formatCurrency(r.total_amount, currency) },
+    { key: 'amount_paid',  header: 'Paid',  render: (r: BillingRow) => formatCurrency(r.amount_paid, currency) },
+    { key: 'balance',      header: 'Balance', render: (r: BillingRow) => formatCurrency(r.balance, currency) },
     { key: 'status',       header: 'Status', render: (r: BillingRow) => <span className={statusBadgeClass(r.status)}>{r.status}</span> },
     { key: 'invoice_date', header: 'Date', render: (r: BillingRow) => formatDate(r.invoice_date) },
     {

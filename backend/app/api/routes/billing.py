@@ -7,6 +7,24 @@ from app.core.auth import get_current_user
 router = APIRouter()
 
 
+def _best_service_name(row: dict) -> str:
+    candidates = [
+        row.get("service_name"),
+        row.get("service_description"),
+        row.get("fault_description"),
+        row.get("description"),
+        row.get("notes"),
+    ]
+    for value in candidates:
+        text = str(value or "").strip()
+        if text and text.lower() != "unknown service":
+            return text
+    legacy_id = row.get("legacy_source_id")
+    if legacy_id:
+        return f"Service Job {legacy_id}"
+    return "General Service"
+
+
 class BillingCreate(BaseModel):
     client_id: Optional[str] = None
     client_name: str
@@ -61,12 +79,16 @@ def list_billing(
     for row in (result.data or []):
         total = float(row.get("amount_charged") or 0)
         paid = float(row.get("paid_amount") or 0)
+        qty = float(row.get("quantity") or 1)
         row["unit_price"] = total
         row["total_amount"] = total
         row["amount_paid"] = paid
         row["balance"] = total - paid
         row["status"] = str(row.get("payment_status") or "UNPAID").lower()
         row["invoice_date"] = row.get("service_date")
+        row["service_name"] = _best_service_name(row)
+        row["description"] = row.get("description") or row.get("service_name")
+        row["quantity"] = qty
         rows.append(row)
     total = int(result.count or 0)
     total_pages = max(1, (total + page_size - 1) // page_size)
@@ -103,7 +125,42 @@ def list_debtors(_user=Depends(get_current_user)):
         row["amount_paid"] = paid
         row["balance"] = balance
         row["status"] = str(row.get("payment_status") or "UNPAID").lower()
+        row["service_name"] = _best_service_name(row)
+        row["row_type"] = "service"
         rows.append(row)
+
+    # Include unpaid inventory sales as debtors.
+    inv_rows = (
+        sb.table("inventory_items")
+        .select("id,item_name,quantity,selling_price,cost_price,expense_amount,payment_status,paid_date")
+        .neq("payment_status", "PAID")
+        .execute()
+        .data
+        or []
+    )
+    for item in inv_rows:
+        quantity = float(item.get("quantity") or 0)
+        selling_price = float(item.get("selling_price") or 0)
+        cost_price = float(item.get("cost_price") or 0)
+        expense_amount = float(item.get("expense_amount") or 0)
+        computed_total = quantity * selling_price
+        # Fallbacks handle sparse migrated rows where selling/quantity may be zero.
+        total = computed_total if computed_total > 0 else max(selling_price, cost_price, expense_amount, 0.0)
+        rows.append(
+            {
+                "id": f"inventory::{item.get('id')}",
+                "client_name": "Inventory Sale",
+                "service_name": item.get("item_name") or "Inventory Item",
+                "total_amount": total,
+                "amount_paid": 0,
+                "balance": total,
+                "status": "unpaid",
+                "due_date": item.get("paid_date"),
+                "row_type": "inventory",
+            }
+        )
+
+    rows.sort(key=lambda x: x.get("due_date") or "")
     return rows
 
 
@@ -121,6 +178,7 @@ def get_billing(billing_id: str, _user=Depends(get_current_user)):
     row["balance"] = total - paid
     row["status"] = str(row.get("payment_status") or "UNPAID").lower()
     row["invoice_date"] = row.get("service_date")
+    row["service_name"] = _best_service_name(row)
     return row
 
 

@@ -11,6 +11,7 @@ import toast from 'react-hot-toast'
 
 interface Debtor {
   id: string
+  row_type?: string
   client_name: string
   service_name: string
   total_amount: number
@@ -37,6 +38,12 @@ export default function Debtors() {
     queryFn: () => api.get('/billing/debtors').then((r) => r.data),
   })
 
+  const { data: status } = useQuery<{ currency?: string }>({
+    queryKey: ['system-status'],
+    queryFn: () => api.get('/settings/status').then((r) => r.data),
+  })
+  const currency = status?.currency ?? localStorage.getItem('currency') ?? 'NGN'
+
   const { register, handleSubmit, reset, formState: { errors } } = useForm<PaymentForm>()
 
   const applyMutation = useMutation({
@@ -58,9 +65,9 @@ export default function Debtors() {
   const columns = [
     { key: 'client_name',  header: 'Client' },
     { key: 'service_name', header: 'Service' },
-    { key: 'total_amount', header: 'Total',   render: (r: Debtor) => formatCurrency(r.total_amount) },
-    { key: 'amount_paid',  header: 'Paid',    render: (r: Debtor) => formatCurrency(r.amount_paid) },
-    { key: 'balance',      header: 'Balance', render: (r: Debtor) => <span className="font-semibold text-red-600">{formatCurrency(r.balance)}</span> },
+    { key: 'total_amount', header: 'Total',   render: (r: Debtor) => formatCurrency(r.total_amount, currency) },
+    { key: 'amount_paid',  header: 'Paid',    render: (r: Debtor) => formatCurrency(r.amount_paid, currency) },
+    { key: 'balance',      header: 'Balance', render: (r: Debtor) => <span className="font-semibold text-red-600">{formatCurrency(r.balance, currency)}</span> },
     { key: 'status',       header: 'Status',  render: (r: Debtor) => <span className={statusBadgeClass(r.status)}>{r.status}</span> },
     { key: 'due_date',     header: 'Due',     render: (r: Debtor) => r.due_date ? new Date(r.due_date).toLocaleDateString() : '—' },
     {
@@ -68,9 +75,10 @@ export default function Debtors() {
       render: (r: Debtor) => (
         <button
           onClick={() => { setSelectedRow(r); reset({ payment_date: new Date().toISOString().slice(0, 10) }) }}
+          disabled={r.row_type === 'inventory'}
           className="btn-primary py-1 px-2 text-xs"
         >
-          <DollarSign size={13} /> Apply Payment
+          <DollarSign size={13} /> {r.row_type === 'inventory' ? 'Inventory Due' : 'Apply Payment'}
         </button>
       ),
     },
@@ -82,7 +90,7 @@ export default function Debtors() {
         <h1 className="text-2xl font-bold">Debtors</h1>
         <div className="card py-3 px-5 text-right">
           <p className="text-xs text-gray-500">Total Outstanding</p>
-          <p className="text-2xl font-bold text-red-600">{formatCurrency(totalOutstanding)}</p>
+          <p className="text-2xl font-bold text-red-600">{formatCurrency(totalOutstanding, currency)}</p>
         </div>
       </div>
 
@@ -96,7 +104,7 @@ export default function Debtors() {
         >
           <div className="mb-4 p-3 bg-gray-50 rounded-lg text-sm">
             <p><span className="font-medium">Service:</span> {selectedRow.service_name}</p>
-            <p><span className="font-medium">Outstanding:</span> <span className="text-red-600 font-semibold">{formatCurrency(selectedRow.balance)}</span></p>
+            <p><span className="font-medium">Outstanding:</span> <span className="text-red-600 font-semibold">{formatCurrency(selectedRow.balance, currency)}</span></p>
           </div>
           <form onSubmit={handleSubmit((v) => applyMutation.mutate(v))} className="space-y-4">
             <div>

@@ -9,7 +9,9 @@ router = APIRouter()
 def get_settings(_user=Depends(get_current_user)):
     sb = get_supabase()
     result = sb.table("app_settings").select("*").execute()
-    return {row["key"]: row["value"] for row in result.data}
+    settings_map = {row["key"]: row["value"] for row in result.data}
+    settings_map.setdefault("currency", "NGN")
+    return settings_map
 
 
 @router.put("/{key}")
@@ -30,5 +32,5 @@ def system_status(_user=Depends(get_current_user)):
         "last_sync_at": settings_map.get("last_sync_at"),
         "last_workspace_refresh": settings_map.get("last_workspace_refresh"),
         "business_name": settings_map.get("business_name"),
-        "currency": settings_map.get("currency"),
+        "currency": settings_map.get("currency") or "NGN",
     }

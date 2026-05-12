@@ -26,6 +26,12 @@ export default function CashFlow() {
     queryFn: () => api.get('/cashflow', { params: { year } }).then((r) => r.data),
   })
 
+  const { data: status } = useQuery<{ currency?: string }>({
+    queryKey: ['system-status'],
+    queryFn: () => api.get('/settings/status').then((r) => r.data),
+  })
+  const currency = status?.currency ?? localStorage.getItem('currency') ?? 'NGN'
+
   const refreshMutation = useMutation({
     mutationFn: () => api.post('/cashflow/refresh'),
     onSuccess: () => {
@@ -82,7 +88,7 @@ export default function CashFlow() {
         ].map(({ label, value, color }) => (
           <div key={label} className="card text-center">
             <p className="text-xs text-gray-500">{label}</p>
-            <p className={`text-xl font-bold ${color}`}>{formatCurrency(value)}</p>
+            <p className={`text-xl font-bold ${color}`}>{formatCurrency(value, currency)}</p>
           </div>
         ))}
       </div>
@@ -95,7 +101,7 @@ export default function CashFlow() {
                 <CartesianGrid strokeDasharray="3 3" />
                 <XAxis dataKey="month" />
                 <YAxis />
-                <Tooltip formatter={(v: number) => formatCurrency(v)} />
+                <Tooltip formatter={(v: number) => formatCurrency(v, currency)} />
                 <Legend />
                 <Bar dataKey="Revenue"    fill="#22c55e" />
                 <Bar dataKey="Expenses"   fill="#ef4444" />
@@ -119,11 +125,11 @@ export default function CashFlow() {
                 {(data ?? []).map((r) => (
                   <tr key={r.period_month} className="hover:bg-gray-50">
                     <td className="px-4 py-3 font-medium">{r.period_month}</td>
-                    <td className="px-4 py-3 text-green-700">{formatCurrency(r.total_revenue)}</td>
-                    <td className="px-4 py-3 text-red-700">{formatCurrency(r.total_expenses)}</td>
-                    <td className="px-4 py-3 text-orange-700">{formatCurrency(r.total_allowances)}</td>
+                    <td className="px-4 py-3 text-green-700">{formatCurrency(r.total_revenue, currency)}</td>
+                    <td className="px-4 py-3 text-red-700">{formatCurrency(r.total_expenses, currency)}</td>
+                    <td className="px-4 py-3 text-orange-700">{formatCurrency(r.total_allowances, currency)}</td>
                     <td className={`px-4 py-3 font-semibold ${Number(r.gross_profit) >= 0 ? 'text-blue-700' : 'text-red-700'}`}>
-                      {formatCurrency(r.gross_profit)}
+                      {formatCurrency(r.gross_profit, currency)}
                     </td>
                   </tr>
                 ))}

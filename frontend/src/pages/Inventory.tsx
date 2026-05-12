@@ -5,6 +5,7 @@ import api from '@/lib/api'
 import Table from '@/components/Table'
 import Modal from '@/components/Modal'
 import LoadingSpinner from '@/components/LoadingSpinner'
+import { formatCurrency } from '@/lib/utils'
 import { Plus, Pencil, Trash2 } from 'lucide-react'
 import toast from 'react-hot-toast'
 
@@ -49,6 +50,12 @@ export default function Inventory() {
       api.get('/inventory', { params: { search, low_stock: lowStock, page, page_size: 50 } }).then((r) => r.data),
   })
 
+  const { data: status } = useQuery<{ currency?: string }>({
+    queryKey: ['system-status'],
+    queryFn: () => api.get('/settings/status').then((r) => r.data),
+  })
+  const currency = status?.currency ?? localStorage.getItem('currency') ?? 'NGN'
+
   const { register, handleSubmit, reset } = useForm<FormValues>()
 
   const saveMutation = useMutation({
@@ -88,7 +95,7 @@ export default function Inventory() {
         </span>
       )
     },
-    { key: 'unit_price',   header: 'Price',  render: (r: StockItem) => `GH₵ ${Number(r.unit_price).toFixed(2)}` },
+    { key: 'unit_price',   header: 'Price',  render: (r: StockItem) => formatCurrency(r.unit_price, currency) },
     { key: 'reorder_level', header: 'Reorder' },
     { key: 'supplier',     header: 'Supplier' },
     {
