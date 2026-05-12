@@ -39,7 +39,7 @@ export default function Inventory() {
   const qc = useQueryClient()
   const [search, setSearch] = useState('')
   const [lowStock, setLowStock] = useState(false)
-  const page = 1
+  const [page, setPage] = useState(1)
   const [showForm, setShowForm] = useState(false)
   const [editRow, setEditRow] = useState<StockItem | null>(null)
 
@@ -117,7 +117,16 @@ export default function Inventory() {
         </label>
       </div>
 
-      {isLoading ? <LoadingSpinner /> : <Table columns={columns as any} data={data?.data ?? []} />}
+      {isLoading ? <LoadingSpinner /> : (
+        <>
+          <Table columns={columns as any} data={data?.items ?? data?.data ?? []} />
+          <div className="flex gap-2 justify-end">
+            <button disabled={page === 1} onClick={() => setPage((p) => p - 1)} className="btn-secondary">Prev</button>
+            <span className="text-sm text-gray-500 self-center">Page {page} of {data?.total_pages ?? 1}</span>
+            <button disabled={page >= (data?.total_pages ?? 1)} onClick={() => setPage((p) => p + 1)} className="btn-secondary">Next</button>
+          </div>
+        </>
+      )}
 
       <Modal title={editRow ? 'Edit Item' : 'Add Item'} open={showForm} onClose={() => { setShowForm(false); reset() }} size="lg">
         <form onSubmit={handleSubmit((v) => saveMutation.mutate(v))} className="grid grid-cols-2 gap-4">

@@ -68,7 +68,17 @@ def list_billing(
         row["status"] = str(row.get("payment_status") or "UNPAID").lower()
         row["invoice_date"] = row.get("service_date")
         rows.append(row)
-    return {"data": rows, "total": result.count, "page": page, "page_size": page_size}
+    total = int(result.count or 0)
+    total_pages = max(1, (total + page_size - 1) // page_size)
+    print(f"[billing] rows={len(rows)} total={total} page={page} page_size={page_size}")
+    return {
+        "items": rows,
+        "data": rows,
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "total_pages": total_pages,
+    }
 
 
 @router.get("/debtors")

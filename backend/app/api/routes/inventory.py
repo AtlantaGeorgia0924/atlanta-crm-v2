@@ -73,7 +73,17 @@ def list_inventory(
     ]
     if low_stock:
         data = [r for r in data if float(r["quantity"]) <= float(r["reorder_level"])]
-    return {"data": data, "total": result.count, "page": page, "page_size": page_size}
+    total = int(result.count or 0)
+    total_pages = max(1, (total + page_size - 1) // page_size)
+    print(f"[inventory] rows={len(data)} total={total} page={page} page_size={page_size}")
+    return {
+        "items": data,
+        "data": data,
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "total_pages": total_pages,
+    }
 
 
 @router.get("/{item_id}")

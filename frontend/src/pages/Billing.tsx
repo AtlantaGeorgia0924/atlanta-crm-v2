@@ -126,11 +126,11 @@ export default function Billing() {
 
       {isLoading ? <LoadingSpinner /> : (
         <>
-          <Table columns={columns as any} data={data?.data ?? []} />
+          <Table columns={columns as any} data={data?.items ?? data?.data ?? []} />
           <div className="flex gap-2 justify-end">
             <button disabled={page === 1} onClick={() => setPage(p => p - 1)} className="btn-secondary">Prev</button>
-            <span className="text-sm text-gray-500 self-center">Page {page}</span>
-            <button disabled={data?.data?.length < 50} onClick={() => setPage(p => p + 1)} className="btn-secondary">Next</button>
+            <span className="text-sm text-gray-500 self-center">Page {page} of {data?.total_pages ?? 1}</span>
+            <button disabled={page >= (data?.total_pages ?? 1)} onClick={() => setPage(p => p + 1)} className="btn-secondary">Next</button>
           </div>
         </>
       )}
