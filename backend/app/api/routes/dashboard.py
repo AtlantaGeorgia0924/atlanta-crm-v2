@@ -1,12 +1,9 @@
-"""Dashboard sourced from Google Sheet Cash Flow summary mirrored into Supabase."""
+"""Dashboard sourced from manually refreshed snapshot persisted in Supabase."""
 from fastapi import APIRouter, Depends
 from app.db.supabase_client import get_supabase
 from app.core.auth import get_current_user
 from app.core.financials import to_number
-from app.core.cashflow_sheet_sync import (
-    CASHFLOW_SUMMARY_ID,
-    sync_cashflow_summary_from_sheet,
-)
+from app.core.cashflow_sheet_sync import CASHFLOW_SUMMARY_ID
 
 router = APIRouter()
 
@@ -56,15 +53,34 @@ def _read_dashboard_cashflow_values(sb):
 
 
 def _compute_dashboard_totals(sb):
-    clients_count = sb.table("clients").select("id", count="exact").limit(1).execute().count or 0
     stock_rows = _read_all(sb, "inventory_items", "*")
-    invoice_count = sb.table("service_jobs").select("id", count="exact").limit(1).execute().count or 0
     cashflow_values = _read_dashboard_cashflow_values(sb)
-    low_stock_count = sum(
+    fallback_low_stock_count = sum(
         1
         for r in stock_rows
         if to_number(r.get("quantity")) <= to_number(r.get("reorder_level"))
     )
+
+    settings_rows = (
+        sb.table("app_settings")
+        .select("key,value")
+        .in_("key", ["dashboard_total_clients", "dashboard_total_invoices", "dashboard_low_stock_count"])
+        .execute()
+        .data
+        or []
+    )
+    settings_map = {row.get("key"): row.get("value") for row in settings_rows}
+
+    clients_count = int(to_number(settings_map.get("dashboard_total_clients")))
+    invoice_count = int(to_number(settings_map.get("dashboard_total_invoices")))
+    low_stock_count = int(to_number(settings_map.get("dashboard_low_stock_count")))
+
+    if clients_count <= 0:
+        clients_count = sb.table("clients").select("id", count="exact").limit(1).execute().count or 0
+    if invoice_count <= 0:
+        invoice_count = sb.table("service_jobs").select("id", count="exact").limit(1).execute().count or 0
+    if low_stock_count <= 0:
+        low_stock_count = fallback_low_stock_count
 
     return {
         "total_service_rows_included": invoice_count,
@@ -83,13 +99,6 @@ def _compute_dashboard_totals(sb):
 @router.get("")
 def get_dashboard(_user=Depends(get_current_user)):
     sb = get_supabase()
-    # On dashboard load, mirror trusted Google Sheet Cash Flow totals into Supabase.
-    try:
-        sync_cashflow_summary_from_sheet(sb)
-    except Exception as e:
-        # If sheet sync fails, return last saved snapshot from cashflow_summary.
-        print(f"[dashboard] cashflow sheet sync skipped: {e}")
-
     totals = _compute_dashboard_totals(sb)
     return {
         "total_clients": totals["total_clients"],
@@ -107,12 +116,10 @@ def get_dashboard(_user=Depends(get_current_user)):
 @router.get("/validation")
 def dashboard_validation(_user=Depends(get_current_user)):
     sb = get_supabase()
-    sync_details = sync_cashflow_summary_from_sheet(sb)
+    cashflow_values = _read_dashboard_cashflow_values(sb)
     totals = _compute_dashboard_totals(sb)
     return {
-        "values_read_from_google_sheets": sync_details["values_read_from_google_sheets"],
-        "values_saved_to_cashflow_summary": sync_details["values_saved_to_cashflow_summary"],
-        "values_displayed_on_dashboard": sync_details["values_displayed_on_dashboard"],
+        "values_displayed_on_dashboard": cashflow_values,
         "total_service_rows_included": totals["total_service_rows_included"],
         "total_billed": totals["total_billed"],
         "total_paid": totals["total_collected"],

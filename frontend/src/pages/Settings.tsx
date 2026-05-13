@@ -1,7 +1,9 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useForm } from 'react-hook-form'
+import { useEffect, useState } from 'react'
 import api from '@/lib/api'
 import LoadingSpinner from '@/components/LoadingSpinner'
+import Modal from '@/components/Modal'
 import toast from 'react-hot-toast'
 import { Save } from 'lucide-react'
 
@@ -17,6 +19,17 @@ interface SettingsMap {
 
 export default function Settings() {
   const qc = useQueryClient()
+  const [confirmSyncOpen, setConfirmSyncOpen] = useState(false)
+  const [countdown, setCountdown] = useState(5)
+
+  useEffect(() => {
+    if (!confirmSyncOpen) return
+    setCountdown(5)
+    const timer = setInterval(() => {
+      setCountdown((prev) => (prev > 0 ? prev - 1 : 0))
+    }, 1000)
+    return () => clearInterval(timer)
+  }, [confirmSyncOpen])
   const { data, isLoading } = useQuery<SettingsMap>({
     queryKey: ['settings'],
     queryFn: () => api.get('/settings').then((r) => r.data),
@@ -142,13 +155,47 @@ export default function Settings() {
           <button
             type="button"
             className="btn-secondary"
-            onClick={() => syncMutation.mutate()}
+            onClick={() => setConfirmSyncOpen(true)}
             disabled={syncMutation.isPending}
           >
             {syncMutation.isPending ? 'Syncing…' : 'Sync to Google Sheets'}
           </button>
         </form>
       </div>
+
+      <Modal
+        title="Please Confirm"
+        open={confirmSyncOpen}
+        onClose={() => {
+          if (!syncMutation.isPending) setConfirmSyncOpen(false)
+        }}
+      >
+        <div className="space-y-4">
+          <p className="text-sm text-gray-700">This will overwrite the selected Google Sheets with the latest Supabase data. Continue?</p>
+          <p className="text-xs text-gray-500">Confirm enabled in {countdown}s</p>
+          <div className="flex gap-2 justify-end">
+            <button
+              type="button"
+              className="btn-secondary"
+              disabled={syncMutation.isPending}
+              onClick={() => setConfirmSyncOpen(false)}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="btn-primary"
+              disabled={countdown > 0 || syncMutation.isPending}
+              onClick={() => {
+                syncMutation.mutate()
+                setConfirmSyncOpen(false)
+              }}
+            >
+              {syncMutation.isPending ? 'Syncing…' : 'Confirm'}
+            </button>
+          </div>
+        </div>
+      </Modal>
     </div>
   )
 }

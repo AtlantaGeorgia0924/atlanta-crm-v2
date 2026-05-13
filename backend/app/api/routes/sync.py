@@ -7,7 +7,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from app.db.supabase_client import get_supabase
 from app.core.auth import get_current_user
 from app.core.config import settings as app_settings
-from app.core.cashflow_sheet_sync import read_sheet_id, sync_cashflow_summary_from_sheet
+from app.core.cashflow_sheet_sync import read_sheet_id
+from app.core.dashboard_sheet_sync import sync_dashboard_metrics_from_sheets
 
 router = APIRouter()
 def _overwrite_worksheet(spreadsheet, tab_name: str, data: list[dict]) -> int:
@@ -60,17 +61,10 @@ def _sync_to_google_sheets(sb, services_sheet_id: str, stocks_sheet_id: str) -> 
         {"key": "last_sync_at", "value": sync_timestamp}
     ).execute()
 
-    cashflow_sync_details = None
-    try:
-        cashflow_sync_details = sync_cashflow_summary_from_sheet(sb)
-    except Exception as e:
-        print(f"[sync] cashflow sheet refresh skipped: {e}")
-
     return {
-        "sheets_updated": [tab_name for tab_name, _ in sheet_mapping],
+        "sheets_updated": [tab_name for _, tab_name, _ in sheet_mapping],
         "rows_written": rows_written,
         "sync_timestamp": sync_timestamp,
-        "cashflow_summary_refresh": cashflow_sync_details,
     }
 
 
@@ -94,19 +88,21 @@ def sync_to_sheets(_user=Depends(get_current_user)):
 
 @router.post("/refresh-workspace")
 def refresh_workspace(_user=Depends(get_current_user)):
-    """Update last_workspace_refresh timestamp – client re-fetches all data."""
+    """Manually refresh dashboard metrics from Google Sheets."""
     sb = get_supabase()
-    cashflow_sync_details = None
     try:
-        cashflow_sync_details = sync_cashflow_summary_from_sheet(sb)
+        refresh_result = sync_dashboard_metrics_from_sheets(sb)
     except Exception as e:
-        print(f"[refresh-workspace] cashflow sheet refresh skipped: {e}")
+        raise HTTPException(500, f"Refresh failed: {str(e)}")
 
+    refreshed_at = datetime.utcnow().isoformat()
     sb.table("app_settings").upsert(
-        {"key": "last_workspace_refresh", "value": datetime.utcnow().isoformat()}
+        {"key": "last_workspace_refresh", "value": refreshed_at}
     ).execute()
     return {
         "message": "Workspace refreshed.",
-        "refreshed_at": datetime.utcnow().isoformat(),
-        "cashflow_summary_refresh": cashflow_sync_details,
+        "refreshed_at": refreshed_at,
+        "sheets_read": refresh_result.get("sheets_read", []),
+        "rows_processed": refresh_result.get("rows_processed", {}),
+        "values_calculated": refresh_result.get("values_calculated", {}),
     }
