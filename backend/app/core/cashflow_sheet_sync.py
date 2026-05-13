@@ -9,18 +9,43 @@ from app.core.financials import to_number
 CASHFLOW_SUMMARY_ID = "dashboard_totals"
 
 
-def _read_sheet_id(sb) -> str:
-    if app_settings.GOOGLE_SHEET_ID:
-        return app_settings.GOOGLE_SHEET_ID
+def read_sheet_id(sb, purpose: str = "services") -> str:
+    """
+    Resolve Google Sheet ID by purpose with backward compatibility.
+
+    Priority:
+      1) purpose-specific env var
+      2) purpose-specific app_settings key
+      3) legacy single env var
+      4) legacy single app_settings key
+    """
+    purpose = str(purpose or "services").strip().lower()
+
+    if purpose == "stocks":
+        if app_settings.GOOGLE_SHEET_ID_STOCKS:
+            return app_settings.GOOGLE_SHEET_ID_STOCKS
+        purpose_key = "google_sheet_id_stocks"
+    else:
+        if app_settings.GOOGLE_SHEET_ID_SERVICES:
+            return app_settings.GOOGLE_SHEET_ID_SERVICES
+        purpose_key = "google_sheet_id_services"
+
     local_settings = (
         sb.table("app_settings")
         .select("key,value")
-        .in_("key", ["google_sheet_id"])
+        .in_("key", [purpose_key, "google_sheet_id"])
         .execute()
         .data
         or []
     )
     settings_map = {row.get("key"): row.get("value") for row in local_settings}
+
+    purpose_value = str(settings_map.get(purpose_key) or "").strip()
+    if purpose_value:
+        return purpose_value
+
+    if app_settings.GOOGLE_SHEET_ID:
+        return app_settings.GOOGLE_SHEET_ID
     return str(settings_map.get("google_sheet_id") or "").strip()
 
 
@@ -97,7 +122,7 @@ def _parse_cashflow_summary(rows: List[List[str]]) -> Dict[str, float]:
 
 
 def sync_cashflow_summary_from_sheet(sb) -> Dict[str, Dict]:
-    sheet_id = _read_sheet_id(sb)
+    sheet_id = read_sheet_id(sb, purpose="services")
     service_account_json = app_settings.GOOGLE_SERVICE_ACCOUNT_JSON
 
     if not sheet_id:

@@ -12,6 +12,8 @@ class Settings(BaseSettings):
     # Google Sheets
     GOOGLE_SERVICE_ACCOUNT_JSON: str = ""   # path to service account JSON file
     GOOGLE_SHEET_ID: str = ""
+    GOOGLE_SHEET_ID_STOCKS: str = ""
+    GOOGLE_SHEET_ID_SERVICES: str = ""
 
     # App
     ALLOWED_ORIGINS: str = "http://localhost:5173,https://your-vercel-app.vercel.app"
