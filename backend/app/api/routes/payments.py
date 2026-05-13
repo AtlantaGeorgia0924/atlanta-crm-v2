@@ -9,21 +9,9 @@ from typing import Optional
 from datetime import date
 from app.db.supabase_client import get_supabase
 from app.core.auth import get_current_user
+from app.core.financials import compute_outstanding, compute_payment_status, to_number
 
 router = APIRouter()
-
-
-def _compute_outstanding(total: float, amount_paid: float) -> float:
-    return total - amount_paid
-
-
-def _compute_payment_status(total: float, amount_paid: float) -> str:
-    outstanding = _compute_outstanding(total, amount_paid)
-    if outstanding <= 0:
-        return "PAID"
-    if amount_paid > 0:
-        return "PARTIAL"
-    return "UNPAID"
 
 
 class PaymentCreate(BaseModel):
@@ -70,15 +58,15 @@ def apply_payment(payload: PaymentCreate, _user=Depends(get_current_user)):
         raise HTTPException(404, "Billing row not found")
 
     row = row_res.data
-    total       = float(row["amount_charged"])
-    current_paid = float(row["paid_amount"])
-    new_paid    = current_paid + payload.amount
-    outstanding = _compute_outstanding(total, new_paid)
+    total = to_number(row.get("amount_charged"))
+    current_paid = to_number(row.get("paid_amount"))
+    new_paid = current_paid + to_number(payload.amount)
+    outstanding = compute_outstanding(total, new_paid)
 
     if outstanding < 0:
         raise HTTPException(400, f"Payment amount exceeds outstanding balance ({total - current_paid:.2f})")
 
-    new_status = _compute_payment_status(total, new_paid)
+    new_status = compute_payment_status(total, new_paid)
     pay_date   = payload.payment_date or str(date.today())
 
     # 2. Insert payment record

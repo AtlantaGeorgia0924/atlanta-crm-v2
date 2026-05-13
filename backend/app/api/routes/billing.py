@@ -3,6 +3,11 @@ from pydantic import BaseModel
 from typing import Optional
 from app.db.supabase_client import get_supabase
 from app.core.auth import get_current_user
+from app.core.financials import (
+    compute_outstanding,
+    compute_payment_status,
+    to_number,
+)
 
 router = APIRouter()
 
@@ -23,19 +28,6 @@ def _best_service_name(row: dict) -> str:
     if legacy_id:
         return f"Service Job {legacy_id}"
     return "General Service"
-
-
-def _compute_outstanding(total: float, amount_paid: float) -> float:
-    return total - amount_paid
-
-
-def _compute_payment_status(total: float, amount_paid: float) -> str:
-    outstanding = _compute_outstanding(total, amount_paid)
-    if outstanding <= 0:
-        return "PAID"
-    if amount_paid > 0:
-        return "PARTIAL"
-    return "UNPAID"
 
 
 class BillingCreate(BaseModel):
@@ -90,15 +82,15 @@ def list_billing(
     result = query.execute()
     rows = []
     for row in (result.data or []):
-        total = float(row.get("amount_charged") or 0)
-        paid = float(row.get("paid_amount") or 0)
-        qty = float(row.get("quantity") or 1)
-        outstanding = _compute_outstanding(total, paid)
-        status_value = _compute_payment_status(total, paid)
+        total = to_number(row.get("amount_charged"))
+        paid = to_number(row.get("paid_amount"))
+        qty = to_number(row.get("quantity")) or 1
+        outstanding = compute_outstanding(total, paid)
+        status_value = compute_payment_status(total, paid)
         row["unit_price"] = total
         row["total_amount"] = total
         row["amount_paid"] = paid
-        row["balance"] = max(0.0, outstanding)
+        row["balance"] = outstanding
         row["status"] = status_value.lower()
         row["invoice_date"] = row.get("service_date")
         row["service_name"] = _best_service_name(row)
@@ -130,15 +122,15 @@ def list_debtors(_user=Depends(get_current_user)):
     )
     rows = []
     for row in (result.data or []):
-        total = float(row.get("amount_charged") or 0)
-        paid = float(row.get("paid_amount") or 0)
-        outstanding = _compute_outstanding(total, paid)
-        status_value = _compute_payment_status(total, paid)
+        total = to_number(row.get("amount_charged"))
+        paid = to_number(row.get("paid_amount"))
+        outstanding = compute_outstanding(total, paid)
+        status_value = compute_payment_status(total, paid)
         if not (outstanding > 0 or status_value in {"UNPAID", "PARTIAL"}):
             continue
         row["total_amount"] = total
         row["amount_paid"] = paid
-        row["balance"] = max(0.0, outstanding)
+        row["balance"] = outstanding
         row["status"] = status_value.lower()
         row["service_name"] = _best_service_name(row)
         row["row_type"] = "service"
@@ -155,13 +147,13 @@ def get_billing(billing_id: str, _user=Depends(get_current_user)):
     if not result.data:
         raise HTTPException(404, "Billing row not found")
     row = result.data
-    total = float(row.get("amount_charged") or 0)
-    paid = float(row.get("paid_amount") or 0)
-    outstanding = _compute_outstanding(total, paid)
-    status_value = _compute_payment_status(total, paid)
+    total = to_number(row.get("amount_charged"))
+    paid = to_number(row.get("paid_amount"))
+    outstanding = compute_outstanding(total, paid)
+    status_value = compute_payment_status(total, paid)
     row["total_amount"] = total
     row["amount_paid"] = paid
-    row["balance"] = max(0.0, outstanding)
+    row["balance"] = outstanding
     row["status"] = status_value.lower()
     row["invoice_date"] = row.get("service_date")
     row["service_name"] = _best_service_name(row)
@@ -173,11 +165,11 @@ def create_billing(payload: BillingCreate, _user=Depends(get_current_user)):
     sb = get_supabase()
     data = payload.model_dump(exclude_none=True)
     # Determine status
-    amount_paid = data.get("amount_paid", 0)
-    unit_price  = data.get("unit_price", 0)
-    quantity    = data.get("quantity", 1)
+    amount_paid = to_number(data.get("amount_paid", 0))
+    unit_price = to_number(data.get("unit_price", 0))
+    quantity = to_number(data.get("quantity", 1)) or 1
     total       = unit_price * quantity
-    payment_status = _compute_payment_status(total, amount_paid)
+    payment_status = compute_payment_status(total, amount_paid)
 
     mapped = {
         "client_id": data.get("client_id"),
@@ -215,17 +207,18 @@ def update_billing(billing_id: str, payload: BillingUpdate, _user=Depends(get_cu
 
     if "unit_price" in data or "quantity" in data:
         existing = sb.table("service_jobs").select("amount_charged,quantity").eq("id", billing_id).single().execute().data
-        qty = float(data.get("quantity", existing.get("quantity") or 1))
-        current_total = float(existing.get("amount_charged") or 0)
-        inferred_unit = current_total / float(existing.get("quantity") or 1)
-        unit = float(data.pop("unit_price", inferred_unit))
+        qty = to_number(data.get("quantity", existing.get("quantity") or 1)) or 1
+        current_total = to_number(existing.get("amount_charged") or 0)
+        existing_qty = to_number(existing.get("quantity") or 1) or 1
+        inferred_unit = current_total / existing_qty
+        unit = to_number(data.pop("unit_price", inferred_unit))
         data["amount_charged"] = qty * unit
 
     if any(field in data for field in ["amount_charged", "paid_amount", "payment_status"]):
         existing = sb.table("service_jobs").select("amount_charged,paid_amount").eq("id", billing_id).single().execute().data
-        total = float(data.get("amount_charged", existing.get("amount_charged") or 0))
-        paid = float(data.get("paid_amount", existing.get("paid_amount") or 0))
-        data["payment_status"] = _compute_payment_status(total, paid)
+        total = to_number(data.get("amount_charged", existing.get("amount_charged") or 0))
+        paid = to_number(data.get("paid_amount", existing.get("paid_amount") or 0))
+        data["payment_status"] = compute_payment_status(total, paid)
         data["paid_date"] = data.get("paid_date") if data["payment_status"] == "PAID" else None
 
     result = sb.table("service_jobs").update(data).eq("id", billing_id).execute()
