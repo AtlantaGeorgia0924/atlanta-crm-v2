@@ -5,7 +5,7 @@ import api from '@/lib/api'
 import LoadingSpinner from '@/components/LoadingSpinner'
 import Modal from '@/components/Modal'
 import toast from 'react-hot-toast'
-import { Save } from 'lucide-react'
+import { Save, Copy, Bug } from 'lucide-react'
 
 interface SettingsMap {
   business_name?: string
@@ -21,6 +21,8 @@ export default function Settings() {
   const qc = useQueryClient()
   const [confirmSyncOpen, setConfirmSyncOpen] = useState(false)
   const [countdown, setCountdown] = useState(5)
+  const [debugModalOpen, setDebugModalOpen] = useState(false)
+  const [debugData, setDebugData] = useState<Record<string, any> | null>(null)
 
   useEffect(() => {
     if (!confirmSyncOpen) return
@@ -84,6 +86,16 @@ export default function Settings() {
       qc.invalidateQueries({ queryKey: ['system-status'] })
     },
     onError: (e: any) => toast.error(e?.response?.data?.detail ?? 'Sync failed'),
+  })
+
+  const debugMutation = useMutation({
+    mutationFn: () => api.get('/debug/google-sheets').then((r) => r.data),
+    onSuccess: (res: any) => {
+      setDebugData(res)
+      setDebugModalOpen(true)
+      toast.success('Debug data loaded')
+    },
+    onError: (e: any) => toast.error(e?.response?.data?.detail ?? 'Debug request failed'),
   })
 
   const { data: status } = useQuery({
@@ -160,6 +172,14 @@ export default function Settings() {
           >
             {syncMutation.isPending ? 'Syncing…' : 'Sync to Google Sheets'}
           </button>
+          <button
+            type="button"
+            className="btn-secondary"
+            onClick={() => debugMutation.mutate()}
+            disabled={debugMutation.isPending}
+          >
+            <Bug size={15} /> {debugMutation.isPending ? 'Loading…' : 'Debug Google Sheets'}
+          </button>
         </form>
       </div>
 
@@ -194,6 +214,43 @@ export default function Settings() {
               {syncMutation.isPending ? 'Syncing…' : 'Confirm'}
             </button>
           </div>
+        </div>
+      </Modal>
+
+      <Modal
+        title="Google Sheets Debug Information"
+        open={debugModalOpen}
+        onClose={() => setDebugModalOpen(false)}
+      >
+        <div className="space-y-4">
+          {debugData && (
+            <>
+              <div className="bg-gray-100 rounded p-4 max-h-96 overflow-y-auto">
+                <pre className="text-xs font-mono text-gray-800 whitespace-pre-wrap break-words">
+                  {JSON.stringify(debugData, null, 2)}
+                </pre>
+              </div>
+              <div className="flex gap-2 justify-end">
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  onClick={() => {
+                    navigator.clipboard.writeText(JSON.stringify(debugData, null, 2))
+                    toast.success('Copied to clipboard')
+                  }}
+                >
+                  <Copy size={15} /> Copy JSON
+                </button>
+                <button
+                  type="button"
+                  className="btn-primary"
+                  onClick={() => setDebugModalOpen(false)}
+                >
+                  Close
+                </button>
+              </div>
+            </>
+          )}
         </div>
       </Modal>
     </div>
