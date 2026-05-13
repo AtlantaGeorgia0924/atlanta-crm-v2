@@ -7,6 +7,15 @@ from app.core.auth import get_current_user
 router = APIRouter()
 
 
+def _extract_supplier(description: Optional[str]) -> Optional[str]:
+    text = str(description or "")
+    marker = "Supplier:"
+    if marker not in text:
+        return None
+    part = text.split(marker, 1)[1].strip()
+    return part.split("|", 1)[0].strip() if part else None
+
+
 class StockCreate(BaseModel):
     item_name: str
     sku: Optional[str] = None
@@ -65,7 +74,7 @@ def list_inventory(
             "unit_cost": r.get("cost_price", 0),
             "unit_price": r.get("selling_price", 0),
             "reorder_level": r.get("reorder_level", 0),
-            "supplier": r.get("supplier"),
+            "supplier": r.get("supplier") or _extract_supplier(r.get("description")),
             "location": r.get("location"),
             "is_active": True,
         }
@@ -96,7 +105,7 @@ def get_item(item_id: str, _user=Depends(get_current_user)):
     row["unit_cost"] = row.get("cost_price", 0)
     row["unit_price"] = row.get("selling_price", 0)
     row["reorder_level"] = row.get("reorder_level", 0)
-    row["supplier"] = row.get("supplier")
+    row["supplier"] = row.get("supplier") or _extract_supplier(row.get("description"))
     row["location"] = row.get("location")
     row["is_active"] = True
     return row
