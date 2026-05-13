@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel
 from typing import Optional
 import uuid
 from app.db.supabase_client import get_supabase
@@ -11,7 +11,7 @@ router = APIRouter()
 class ClientCreate(BaseModel):
     name: Optional[str] = None
     client_name: Optional[str] = None
-    email: Optional[EmailStr] = None
+    email: Optional[str] = None
     phone: Optional[str] = None
     phone_number: Optional[str] = None
     address: Optional[str] = None
@@ -23,7 +23,7 @@ class ClientCreate(BaseModel):
 class ClientUpdate(BaseModel):
     name: Optional[str] = None
     client_name: Optional[str] = None
-    email: Optional[EmailStr] = None
+    email: Optional[str] = None
     phone: Optional[str] = None
     phone_number: Optional[str] = None
     address: Optional[str] = None
@@ -86,15 +86,17 @@ def create_client(payload: ClientCreate, _user=Depends(get_current_user)):
     name = (data.get("name") or data.get("client_name") or "").strip()
     phone = (data.get("phone") or data.get("phone_number") or "").strip()
     if not name:
-        raise HTTPException(422, "client_name is required")
+        raise HTTPException(422, "name is required")
     if not phone:
-        raise HTTPException(422, "phone_number is required")
+        raise HTTPException(422, "phone is required")
+
+    email = (data.get("email") or "").strip() or None
 
     mapped = {
         "id": str(uuid.uuid4()),
         "name": name,
         "phone": phone,
-        "email": data.get("email"),
+        "email": email,
         "address": data.get("address"),
         "company": data.get("company"),
         "notes": data.get("notes"),
@@ -113,6 +115,12 @@ def update_client(client_id: str, payload: ClientUpdate, _user=Depends(get_curre
         data["name"] = data.pop("client_name")
     if "phone_number" in data:
         data["phone"] = data.pop("phone_number")
+    if "email" in data:
+        data["email"] = (data.get("email") or "").strip() or None
+    if "name" in data:
+        data["name"] = str(data.get("name") or "").strip()
+    if "phone" in data:
+        data["phone"] = str(data.get("phone") or "").strip()
     result = sb.table("clients").update(data).eq("id", client_id).execute()
     return result.data[0]
 

@@ -13,6 +13,19 @@ from app.core.auth import get_current_user
 router = APIRouter()
 
 
+def _compute_outstanding(total: float, amount_paid: float) -> float:
+    return total - amount_paid
+
+
+def _compute_payment_status(total: float, amount_paid: float) -> str:
+    outstanding = _compute_outstanding(total, amount_paid)
+    if outstanding <= 0:
+        return "PAID"
+    if amount_paid > 0:
+        return "PARTIAL"
+    return "UNPAID"
+
+
 class PaymentCreate(BaseModel):
     billing_row_id: str
     amount: float
@@ -60,11 +73,12 @@ def apply_payment(payload: PaymentCreate, _user=Depends(get_current_user)):
     total       = float(row["amount_charged"])
     current_paid = float(row["paid_amount"])
     new_paid    = current_paid + payload.amount
+    outstanding = _compute_outstanding(total, new_paid)
 
-    if new_paid > total:
+    if outstanding < 0:
         raise HTTPException(400, f"Payment amount exceeds outstanding balance ({total - current_paid:.2f})")
 
-    new_status = "PAID" if new_paid >= total else "PARTIAL"
+    new_status = _compute_payment_status(total, new_paid)
     pay_date   = payload.payment_date or str(date.today())
 
     # 2. Insert payment record

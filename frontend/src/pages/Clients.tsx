@@ -23,11 +23,11 @@ interface Client {
 
 interface FormValues {
   client_name: string
-  email: string
+  email?: string
   phone_number: string
-  company: string
-  address: string
-  notes: string
+  company?: string
+  address?: string
+  notes?: string
 }
 
 interface ImportRow {
@@ -57,10 +57,19 @@ export default function Clients() {
   const { register, handleSubmit, reset, formState: { errors } } = useForm<FormValues>()
 
   const saveMutation = useMutation({
-    mutationFn: (values: FormValues) =>
-      editRow
-        ? api.put(`/clients/${editRow.id}`, values)
-        : api.post('/clients', values),
+    mutationFn: (values: FormValues) => {
+      const payload = {
+        client_name: values.client_name?.trim(),
+        phone_number: values.phone_number?.trim(),
+        email: values.email?.trim() || undefined,
+        company: values.company?.trim() || undefined,
+        address: values.address?.trim() || undefined,
+        notes: values.notes?.trim() || undefined,
+      }
+      return editRow
+        ? api.put(`/clients/${editRow.id}`, payload)
+        : api.post('/clients', payload)
+    },
     onSuccess: () => {
       toast.success(editRow ? 'Client updated' : 'Client added')
       qc.invalidateQueries({ queryKey: ['clients'] })
@@ -68,7 +77,7 @@ export default function Clients() {
       setEditRow(null)
       reset()
     },
-    onError: () => toast.error('Save failed'),
+    onError: (e: any) => toast.error(e?.response?.data?.detail ?? 'Save failed'),
   })
 
   const deleteMutation = useMutation({
@@ -164,9 +173,9 @@ export default function Clients() {
       <Modal title={editRow ? 'Edit Client' : 'Add Client'} open={showForm} onClose={() => { setShowForm(false); setEditRow(null); reset() }}>
         <form onSubmit={handleSubmit((v) => saveMutation.mutate(v))} className="space-y-4">
           {[
-            { name: 'client_name', label: 'Client Name', required: true },
+            { name: 'client_name', label: 'Name', required: true },
             { name: 'email', label: 'Email' },
-            { name: 'phone_number', label: 'Phone Number', required: true },
+            { name: 'phone_number', label: 'Phone', required: true },
             { name: 'company', label: 'Company' },
             { name: 'address', label: 'Address' },
           ].map(({ name, label, required }) => (
