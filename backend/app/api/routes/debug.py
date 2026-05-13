@@ -56,7 +56,7 @@ def _sum_column(records: List[Dict[str, str]], aliases: List[str]) -> float:
 @router.get("/google-sheets")
 def debug_google_sheets(_user=Depends(get_current_user)):
     sb = get_supabase()
-    errors: List[str] = []
+    parsing_errors: List[str] = []
 
     services_sheet_id = read_sheet_id(sb, purpose="services")
     stocks_sheet_id = read_sheet_id(sb, purpose="stocks")
@@ -68,8 +68,8 @@ def debug_google_sheets(_user=Depends(get_current_user)):
         },
         "worksheet_names_found": {"services": [], "stocks": []},
         "headers_detected": {"services": {}, "stocks": {}},
-        "first_3_rows": {"services": {}, "stocks": {}},
-        "parsed_dashboard_totals": {
+        "first_5_rows": {"services": {}, "stocks": {}},
+        "calculated_dashboard_totals": {
             "total_billed": 0.0,
             "total_collected": 0.0,
             "total_outstanding": 0.0,
@@ -80,12 +80,12 @@ def debug_google_sheets(_user=Depends(get_current_user)):
             "total_invoices": 0,
             "low_stock_count": 0,
         },
-        "errors": errors,
+        "parsing_errors": parsing_errors,
     }
 
     service_account_json = app_settings.GOOGLE_SERVICE_ACCOUNT_JSON
     if not service_account_json or not os.path.exists(service_account_json):
-        errors.append("Service account JSON missing or invalid path")
+        parsing_errors.append("Service account JSON missing or invalid path")
         return result
 
     try:
@@ -96,7 +96,7 @@ def debug_google_sheets(_user=Depends(get_current_user)):
         creds = Credentials.from_service_account_file(service_account_json, scopes=scopes)
         gc = gspread.authorize(creds)
     except Exception as exc:
-        errors.append(f"Failed to initialize Google Sheets client: {exc}")
+        parsing_errors.append(f"Failed to initialize Google Sheets client: {exc}")
         return result
 
     services_book = None
@@ -106,17 +106,17 @@ def debug_google_sheets(_user=Depends(get_current_user)):
         try:
             services_book = gc.open_by_key(services_sheet_id)
         except Exception as exc:
-            errors.append(f"Failed to open services spreadsheet: {exc}")
+            parsing_errors.append(f"Failed to open services spreadsheet: {exc}")
     else:
-        errors.append("Missing services spreadsheet ID")
+        parsing_errors.append("Missing services spreadsheet ID")
 
     if stocks_sheet_id:
         try:
             stocks_book = gc.open_by_key(stocks_sheet_id)
         except Exception as exc:
-            errors.append(f"Failed to open stocks spreadsheet: {exc}")
+            parsing_errors.append(f"Failed to open stocks spreadsheet: {exc}")
     else:
-        errors.append("Missing stocks spreadsheet ID")
+        parsing_errors.append("Missing stocks spreadsheet ID")
 
     workbook_cache: Dict[str, Dict[str, List[List[str]]]] = {"services": {}, "stocks": {}}
 
@@ -133,13 +133,13 @@ def debug_google_sheets(_user=Depends(get_current_user)):
                     values = ws.get_all_values()
                     workbook_cache[purpose][ws.title] = values
                     headers = values[0] if values else []
-                    first_three = values[1:4] if len(values) > 1 else []
+                    first_five = values[1:6] if len(values) > 1 else []
                     result["headers_detected"][purpose][ws.title] = headers
-                    result["first_3_rows"][purpose][ws.title] = first_three
+                    result["first_5_rows"][purpose][ws.title] = first_five
                 except Exception as exc:
-                    errors.append(f"Failed reading worksheet '{ws.title}' in {purpose}: {exc}")
+                    parsing_errors.append(f"Failed reading worksheet '{ws.title}' in {purpose}: {exc}")
         except Exception as exc:
-            errors.append(f"Failed listing worksheets in {purpose}: {exc}")
+            parsing_errors.append(f"Failed listing worksheets in {purpose}: {exc}")
 
     services_values = workbook_cache["services"].get("Services", [])
     clients_values = workbook_cache["services"].get("Clients", [])
@@ -148,15 +148,15 @@ def debug_google_sheets(_user=Depends(get_current_user)):
     inventory_values = workbook_cache["stocks"].get("Inventory", [])
 
     if not services_values:
-        errors.append("Services worksheet not found or empty")
+        parsing_errors.append("Services worksheet not found or empty")
     if not clients_values:
-        errors.append("Clients worksheet not found or empty")
+        parsing_errors.append("Clients worksheet not found or empty")
     if not expenses_values:
-        errors.append("Expenses worksheet not found or empty")
+        parsing_errors.append("Expenses worksheet not found or empty")
     if not allowances_values:
-        errors.append("Allowance Withdrawals worksheet not found or empty")
+        parsing_errors.append("Allowance Withdrawals worksheet not found or empty")
     if not inventory_values:
-        errors.append("Inventory worksheet not found or empty")
+        parsing_errors.append("Inventory worksheet not found or empty")
 
     service_records = _rows_as_records(services_values)
     client_records = _rows_as_records(clients_values)
@@ -205,7 +205,7 @@ def debug_google_sheets(_user=Depends(get_current_user)):
             if to_number(r.get(qty_header)) <= to_number(r.get(reorder_header))
         )
 
-    result["parsed_dashboard_totals"] = {
+    result["calculated_dashboard_totals"] = {
         "total_billed": total_billed,
         "total_collected": total_collected,
         "total_outstanding": max(0.0, total_outstanding),
