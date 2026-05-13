@@ -17,6 +17,44 @@ def get_cashflow(
 ):
     """Read cash flow figures from cashflow_summary row synced from Google Sheets."""
     sb = get_supabase()
+    settings_rows = (
+        sb.table("app_settings")
+        .select("key,value")
+        .in_(
+            "key",
+            [
+                "dashboard_total_billed",
+                "dashboard_total_expenses",
+                "dashboard_total_allowances",
+                "dashboard_net_profit",
+            ],
+        )
+        .execute()
+        .data
+        or []
+    )
+    settings_map = {row.get("key"): row.get("value") for row in settings_rows}
+    if any(key in settings_map for key in [
+        "dashboard_total_billed",
+        "dashboard_total_expenses",
+        "dashboard_total_allowances",
+        "dashboard_net_profit",
+    ]):
+        period_label = month or year or "sheet_summary"
+        if month and period_label != "sheet_summary" and month != period_label:
+            return []
+        if year and period_label != "sheet_summary" and not str(period_label).startswith(str(year)):
+            return []
+        return [
+            {
+                "period_month": period_label,
+                "total_revenue": to_number(settings_map.get("dashboard_total_billed")),
+                "total_expenses": to_number(settings_map.get("dashboard_total_expenses")),
+                "total_allowances": to_number(settings_map.get("dashboard_total_allowances")),
+                "gross_profit": to_number(settings_map.get("dashboard_net_profit")),
+            }
+        ]
+
     row = (
         sb.table("cashflow_summary")
         .select("*")

@@ -172,20 +172,16 @@ def sync_dashboard_metrics_from_sheets(sb) -> Dict:
         "low_stock_count": low_stock_count,
     }
 
-    sb.table("cashflow_summary").upsert(
-        {
-            "id": CASHFLOW_SUMMARY_ID,
-            "period_key": "sheet_rows_summary",
-            "weekly_paid_profits": values["total_collected"],
-            "weekly_expenses": values["total_expenses"],
-            "weekly_net_profit": values["net_profit"],
-            "next_week_allowance": 0,
-            "monthly_net_profit": values["total_billed"],
-            "allowances_withdrawn": values["total_allowances"],
-            "monthly_net_profit_left": values["total_outstanding"],
-            "source_updated_at": datetime.utcnow().isoformat(),
-        },
-        on_conflict="id",
+    sb.table("app_settings").upsert(
+        [
+            {"key": "dashboard_total_billed", "value": str(values["total_billed"])},
+            {"key": "dashboard_total_collected", "value": str(values["total_collected"])},
+            {"key": "dashboard_total_outstanding", "value": str(values["total_outstanding"])},
+            {"key": "dashboard_total_expenses", "value": str(values["total_expenses"])},
+            {"key": "dashboard_total_allowances", "value": str(values["total_allowances"])},
+            {"key": "dashboard_net_profit", "value": str(values["net_profit"])},
+        ],
+        on_conflict="key",
     ).execute()
 
     now_iso = datetime.utcnow().isoformat()

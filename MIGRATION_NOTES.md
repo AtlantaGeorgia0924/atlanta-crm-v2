@@ -7,16 +7,13 @@ The `cashflow_summary` table monetary columns are defined as `numeric(12,2)` whi
 Expand all monetary columns from `numeric(12,2)` to `numeric(18,2)` to support values up to **₦999,999,999,999,999.99**.
 
 ## Columns to Alter
-- total_billed
-- total_collected
-- total_outstanding
-- total_expenses
-- total_allowances
-- net_profit
-- profit_seen
-- expenses_total
-- allowance_amount
-- profit_left
+- weekly_paid_profits
+- weekly_expenses
+- weekly_net_profit
+- next_week_allowance
+- monthly_net_profit
+- allowances_withdrawn
+- monthly_net_profit_left
 
 ## SQL Command
 See: `/database/migrations/005_expand_cashflow_numeric_precision.sql`
@@ -51,9 +48,9 @@ FROM information_schema.columns
 WHERE table_name = 'cashflow_summary' 
   AND table_schema = 'public'
   AND column_name IN (
-    'total_billed', 'total_collected', 'total_outstanding',
-    'total_expenses', 'total_allowances', 'net_profit',
-    'profit_seen', 'expenses_total', 'allowance_amount', 'profit_left'
+    'weekly_paid_profits', 'weekly_expenses', 'weekly_net_profit',
+    'next_week_allowance', 'monthly_net_profit', 'allowances_withdrawn',
+    'monthly_net_profit_left'
   )
 ORDER BY column_name;
 

@@ -147,14 +147,17 @@ def sync_cashflow_summary_from_sheet(sb) -> Dict[str, Dict]:
         "source_updated_at": datetime.utcnow().isoformat(),
     }
 
-    upsert_res = (
-        sb.table("cashflow_summary")
-        .upsert(saved_row, on_conflict="id")
-        .execute()
-        .data
-        or []
-    )
-    persisted = upsert_res[0] if upsert_res else saved_row
+    settings_payload = [
+        {"key": "dashboard_total_billed", "value": str(saved_row["monthly_net_profit"])},
+        {"key": "dashboard_total_collected", "value": str(saved_row["weekly_paid_profits"])},
+        {"key": "dashboard_total_outstanding", "value": str(saved_row["monthly_net_profit_left"])},
+        {"key": "dashboard_total_expenses", "value": str(saved_row["weekly_expenses"])},
+        {"key": "dashboard_total_allowances", "value": str(saved_row["allowances_withdrawn"])},
+        {"key": "dashboard_net_profit", "value": str(saved_row["weekly_net_profit"])},
+    ]
+    sb.table("app_settings").upsert(settings_payload, on_conflict="key").execute()
+
+    persisted = saved_row
 
     displayed_values = {
         "total_billed": to_number(persisted.get("monthly_net_profit")),
