@@ -6,11 +6,13 @@ import toast from 'react-hot-toast'
 import { Save } from 'lucide-react'
 
 interface SettingsMap {
-  business_name: string
-  currency: string
-  google_sheet_id: string
-  last_sync_at: string
-  last_workspace_refresh: string
+  business_name?: string
+  currency?: string
+  google_sheet_id?: string
+  google_sheet_id_stocks?: string
+  google_sheet_id_services?: string
+  last_sync_at?: string
+  last_workspace_refresh?: string
 }
 
 export default function Settings() {
@@ -24,9 +26,17 @@ export default function Settings() {
 
   const saveMutation = useMutation({
     mutationFn: async (values: SettingsMap) => {
+      const editableEntries: Array<[keyof SettingsMap, string]> = [
+        ['business_name', values.business_name ?? ''],
+        ['currency', values.currency ?? 'NGN'],
+        ['google_sheet_id_stocks', values.google_sheet_id_stocks ?? ''],
+        ['google_sheet_id_services', values.google_sheet_id_services ?? ''],
+        // Legacy single-sheet key retained for backward compatibility.
+        ['google_sheet_id', values.google_sheet_id ?? ''],
+      ]
       await Promise.all(
-        Object.entries(values).map(([key, value]) =>
-          api.put(`/settings/${key}`, undefined, { params: { value } })
+        editableEntries.map(([key, value]) =>
+          api.put(`/settings/${key}`, undefined, { params: { value: String(value ?? '') } })
         )
       )
     },
@@ -112,9 +122,19 @@ export default function Settings() {
             </select>
           </div>
           <div>
-            <label className="form-label">Google Sheet ID</label>
-            <input className="form-input font-mono text-xs" {...register('google_sheet_id')} placeholder="1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2upms" />
-            <p className="text-xs text-gray-400 mt-1">The ID from your Google Sheet URL (between /d/ and /edit).</p>
+            <label className="form-label">Stocks Sheet ID</label>
+            <input className="form-input font-mono text-xs" {...register('google_sheet_id_stocks')} placeholder="Spreadsheet ID for Stocks workbook" />
+            <p className="text-xs text-gray-400 mt-1">Used for Inventory tab sync.</p>
+          </div>
+          <div>
+            <label className="form-label">Services Sheet ID</label>
+            <input className="form-input font-mono text-xs" {...register('google_sheet_id_services')} placeholder="Spreadsheet ID for Services workbook" />
+            <p className="text-xs text-gray-400 mt-1">Used for Services, Clients, Expenses, Cash Flow, and Allowance tabs.</p>
+          </div>
+          <div>
+            <label className="form-label">Legacy Single Sheet ID (Optional)</label>
+            <input className="form-input font-mono text-xs" {...register('google_sheet_id')} placeholder="Only for backward compatibility" />
+            <p className="text-xs text-gray-400 mt-1">Only needed if you still run a single-sheet setup.</p>
           </div>
           <button type="submit" className="btn-primary" disabled={saveMutation.isPending}>
             <Save size={15} /> {saveMutation.isPending ? 'Saving…' : 'Save Settings'}
