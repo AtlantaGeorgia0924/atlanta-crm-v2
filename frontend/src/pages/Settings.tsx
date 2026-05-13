@@ -41,6 +41,28 @@ export default function Settings() {
     onError: () => toast.error('Save failed'),
   })
 
+  const syncMutation = useMutation({
+    mutationFn: () => api.post('/sync/to-sheets').then((r) => r.data),
+    onSuccess: (res: any) => {
+      const sheetCount = Array.isArray(res?.sheets_updated) ? res.sheets_updated.length : 0
+      const rowsWritten = res?.rows_written && typeof res.rows_written === 'object'
+        ? Object.entries(res.rows_written)
+            .map(([name, count]) => `${name}: ${count}`)
+            .join(' | ')
+        : ''
+      const syncTime = res?.sync_timestamp ? new Date(res.sync_timestamp).toLocaleString() : ''
+      const detailParts = [
+        sheetCount ? `${sheetCount} sheets updated` : '',
+        rowsWritten,
+        syncTime ? `at ${syncTime}` : '',
+      ].filter(Boolean)
+      toast.success(detailParts.join(' • ') || 'Sync completed')
+      qc.invalidateQueries({ queryKey: ['settings'] })
+      qc.invalidateQueries({ queryKey: ['system-status'] })
+    },
+    onError: (e: any) => toast.error(e?.response?.data?.detail ?? 'Sync failed'),
+  })
+
   const { data: status } = useQuery({
     queryKey: ['system-status'],
     queryFn: () => api.get('/settings/status').then((r) => r.data),
@@ -96,6 +118,14 @@ export default function Settings() {
           </div>
           <button type="submit" className="btn-primary" disabled={saveMutation.isPending}>
             <Save size={15} /> {saveMutation.isPending ? 'Saving…' : 'Save Settings'}
+          </button>
+          <button
+            type="button"
+            className="btn-secondary"
+            onClick={() => syncMutation.mutate()}
+            disabled={syncMutation.isPending}
+          >
+            {syncMutation.isPending ? 'Syncing…' : 'Sync to Google Sheets'}
           </button>
         </form>
       </div>

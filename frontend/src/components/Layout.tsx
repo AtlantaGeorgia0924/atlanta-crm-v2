@@ -41,8 +41,20 @@ export default function Layout() {
 
   const handleSync = async () => {
     try {
-      await api.post('/sync/to-sheets')
-      toast.success('Sync to Google Sheets started…')
+      const res = await api.post('/sync/to-sheets')
+      const payload = res?.data || {}
+      const sheetCount = Array.isArray(payload.sheets_updated) ? payload.sheets_updated.length : 0
+      const rowsWritten = payload.rows_written && typeof payload.rows_written === 'object'
+        ? Object.entries(payload.rows_written)
+            .map(([name, count]) => `${name}: ${count}`)
+            .join(' | ')
+        : ''
+      const syncTime = payload.sync_timestamp ? new Date(payload.sync_timestamp).toLocaleString() : ''
+      toast.success([
+        sheetCount ? `${sheetCount} sheets updated` : '',
+        rowsWritten,
+        syncTime ? `at ${syncTime}` : '',
+      ].filter(Boolean).join(' • ') || 'Sync completed')
     } catch (e: any) {
       toast.error(e?.response?.data?.detail ?? 'Sync failed')
     }
@@ -81,7 +93,7 @@ export default function Layout() {
             <RefreshCw size={16} /> Refresh Workspace
           </button>
           <button onClick={handleSync} className="flex items-center gap-3 w-full rounded-lg px-3 py-2 text-sm text-gray-300 hover:bg-gray-800 hover:text-white transition-colors">
-            <Sheet size={16} /> Sync to Sheets
+            <Sheet size={16} /> Sync to Google Sheets
           </button>
           <button onClick={handleLogout} className="flex items-center gap-3 w-full rounded-lg px-3 py-2 text-sm text-gray-300 hover:bg-gray-800 hover:text-white transition-colors">
             <LogOut size={16} /> Logout
