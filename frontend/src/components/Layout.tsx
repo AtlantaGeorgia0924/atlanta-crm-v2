@@ -117,10 +117,10 @@ export default function Layout() {
   return (
     <div className="flex h-full">
       {/* Sidebar */}
-      <aside className="w-56 shrink-0 bg-gray-900 text-gray-100 flex flex-col">
-        <div className="px-4 py-5 border-b border-gray-700">
+      <aside className="w-56 shrink-0 text-white flex flex-col" style={{ background: '#000000' }}>
+        <div className="px-4 py-5 border-b" style={{ borderColor: '#3b3b3b' }}>
           <h1 className="font-bold text-lg">CRM</h1>
-          <p className="text-xs text-gray-400 truncate">{user?.email}</p>
+          <p className="text-xs text-gray-300 truncate">{user?.email}</p>
         </div>
 
         <nav className="flex-1 overflow-y-auto py-3 space-y-0.5 px-2">
@@ -131,10 +131,11 @@ export default function Layout() {
               className={({ isActive }) =>
                 `flex items-center gap-3 rounded-lg px-3 py-2 text-sm transition-colors ${
                   isActive
-                    ? 'bg-primary-600 text-white'
-                    : 'text-gray-300 hover:bg-gray-800 hover:text-white'
+                    ? 'text-black'
+                    : 'text-gray-200 hover:text-black'
                 }`
               }
+              style={({ isActive }) => ({ background: isActive ? '#D4AF37' : 'transparent' })}
             >
               <Icon size={16} />
               {label}
@@ -142,14 +143,14 @@ export default function Layout() {
           ))}
         </nav>
 
-        <div className="px-2 pb-4 space-y-1 border-t border-gray-700 pt-3">
-          <button onClick={() => setPendingAction('refresh')} className="flex items-center gap-3 w-full rounded-lg px-3 py-2 text-sm text-gray-300 hover:bg-gray-800 hover:text-white transition-colors">
+        <div className="px-2 pb-4 space-y-1 border-t pt-3" style={{ borderColor: '#3b3b3b' }}>
+          <button onClick={() => setPendingAction('refresh')} className="flex items-center gap-3 w-full rounded-lg px-3 py-2 text-sm text-gray-200 hover:text-black transition-colors hover:bg-[#D4AF37]">
             <RefreshCw size={16} /> Refresh Workspace
           </button>
-          <button onClick={() => setPendingAction('sync')} className="flex items-center gap-3 w-full rounded-lg px-3 py-2 text-sm text-gray-300 hover:bg-gray-800 hover:text-white transition-colors">
+          <button onClick={() => setPendingAction('sync')} className="flex items-center gap-3 w-full rounded-lg px-3 py-2 text-sm text-gray-200 hover:text-black transition-colors hover:bg-[#D4AF37]">
             <Sheet size={16} /> Sync to Google Sheets
           </button>
-          <button onClick={handleLogout} className="flex items-center gap-3 w-full rounded-lg px-3 py-2 text-sm text-gray-300 hover:bg-gray-800 hover:text-white transition-colors">
+          <button onClick={handleLogout} className="flex items-center gap-3 w-full rounded-lg px-3 py-2 text-sm text-gray-200 hover:text-black transition-colors hover:bg-[#D4AF37]">
             <LogOut size={16} /> Logout
           </button>
         </div>

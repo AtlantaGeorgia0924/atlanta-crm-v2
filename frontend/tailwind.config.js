@@ -5,11 +5,11 @@ export default {
     extend: {
       colors: {
         primary: {
-          50:  '#eff6ff',
-          100: '#dbeafe',
-          500: '#3b82f6',
-          600: '#2563eb',
-          700: '#1d4ed8',
+          50:  '#faf6e8',
+          100: '#f3e6b6',
+          500: '#D4AF37',
+          600: '#b9962f',
+          700: '#8f7424',
         },
       },
     },

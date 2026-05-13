@@ -21,6 +21,7 @@ interface StockItem {
   reorder_level: number
   supplier: string
   payment_status?: string
+  product_status?: string
   sold_out?: boolean
 }
 
@@ -36,7 +37,7 @@ interface FormValues {
   reorder_level: number
   supplier?: string
   location?: string
-  payment_status?: string
+  product_status?: string
 }
 
 interface GroupRow {
@@ -44,7 +45,7 @@ interface GroupRow {
   product_count: number
 }
 
-type InventoryView = 'products' | 'groups' | 'out_of_stock'
+type InventoryView = 'products' | 'pending_deals' | 'groups' | 'out_of_stock'
 type CreateMode = 'single' | 'multiple'
 
 export default function Inventory() {
@@ -98,7 +99,7 @@ export default function Inventory() {
         reorder_level: Number(values.reorder_level ?? 0),
         supplier: values.supplier?.trim() || undefined,
         location: values.location?.trim() || undefined,
-        payment_status: values.payment_status?.trim() || undefined,
+        payment_status: values.product_status?.trim() || undefined,
       }
       return editRow ? api.put(`/inventory/${editRow.id}`, payload) : api.post('/inventory', payload)
     },
@@ -171,7 +172,7 @@ export default function Inventory() {
   const openEdit = (row: StockItem) => {
     setEditRow(row)
     setCreateMode('single')
-    reset({ ...row, payment_status: row.payment_status })
+    reset({ ...row, product_status: row.product_status || row.payment_status || 'AVAILABLE' })
     setShowForm(true)
   }
 
@@ -192,7 +193,7 @@ export default function Inventory() {
           unit_cost: Number(item.unit_cost ?? 0),
           unit_price: Number(item.unit_price ?? 0),
           reorder_level: Number(item.reorder_level ?? 0),
-          payment_status: item.payment_status ? String(item.payment_status) : undefined,
+          product_status: item.product_status ? String(item.product_status) : (item.payment_status ? String(item.payment_status) : undefined),
         }))
         .filter((item) => item.item_name)
 
@@ -225,6 +226,11 @@ export default function Inventory() {
     { key: 'unit_price',   header: 'Price',  render: (r: StockItem) => formatCurrency(r.unit_price, currency) },
     { key: 'reorder_level', header: 'Reorder' },
     { key: 'supplier',     header: 'Supplier' },
+    {
+      key: 'product_status',
+      header: 'Status',
+      render: (r: StockItem) => <span className="badge-partial">{r.product_status || 'AVAILABLE'}</span>,
+    },
     {
       key: 'group',
       header: 'Group',
@@ -264,7 +270,7 @@ export default function Inventory() {
           onClick={() => {
             setEditRow(null)
             setCreateMode('single')
-            reset({ quantity: 1, unit: 'pcs', unit_cost: 0, unit_price: 0, reorder_level: 0, payment_status: 'UNPAID' })
+            reset({ quantity: 1, unit: 'pcs', unit_cost: 0, unit_price: 0, reorder_level: 0, product_status: 'AVAILABLE' })
             setShowForm(true)
           }}
           className="btn-primary"
@@ -275,6 +281,7 @@ export default function Inventory() {
 
       <div className="flex gap-2">
         <button className={view === 'products' ? 'btn-primary' : 'btn-secondary'} onClick={() => switchView('products')}>Products</button>
+        <button className={view === 'pending_deals' ? 'btn-primary' : 'btn-secondary'} onClick={() => switchView('pending_deals')}>Pending Deals</button>
         <button className={view === 'groups' ? 'btn-primary' : 'btn-secondary'} onClick={() => switchView('groups')}>Groups</button>
         <button className={view === 'out_of_stock' ? 'btn-primary' : 'btn-secondary'} onClick={() => switchView('out_of_stock')}>Out of Stock</button>
       </div>
@@ -398,11 +405,10 @@ export default function Inventory() {
               </div>
             ))}
             <div className="col-span-2">
-              <label className="form-label">Payment Status</label>
-              <select className="form-input" {...register('payment_status')}>
-                <option value="UNPAID">UNPAID</option>
-                <option value="PARTIAL">PARTIAL</option>
-                <option value="PAID">PAID</option>
+              <label className="form-label">Product Status</label>
+              <select className="form-input" {...register('product_status')}>
+                <option value="AVAILABLE">AVAILABLE</option>
+                <option value="PENDING DEAL">PENDING DEAL</option>
                 <option value="SOLD">SOLD</option>
               </select>
             </div>

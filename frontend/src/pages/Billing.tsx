@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useForm } from 'react-hook-form'
 import api from '@/lib/api'
@@ -24,7 +24,13 @@ interface BillingRow {
 }
 
 interface FormValues {
+  client_id?: string
   client_name: string
+  client_phone?: string
+  client_email?: string
+  client_address?: string
+  client_company?: string
+  client_notes?: string
   service_name: string
   description: string
   quantity: number
@@ -35,12 +41,25 @@ interface FormValues {
   notes: string
 }
 
+interface ClientSuggestion {
+  id: string
+  name: string
+  email?: string
+  phone?: string
+  address?: string
+  company?: string
+  notes?: string
+}
+
 export default function Billing() {
   const qc = useQueryClient()
   const [statusFilter, setStatusFilter] = useState('')
   const [page, setPage] = useState(1)
   const [showForm, setShowForm] = useState(false)
   const [editRow, setEditRow] = useState<BillingRow | null>(null)
+  const [clientSearch, setClientSearch] = useState('')
+  const [showClientDropdown, setShowClientDropdown] = useState(false)
+  const [selectedClientId, setSelectedClientId] = useState<string>('')
 
   const { data, isLoading } = useQuery({
     queryKey: ['billing', statusFilter, page],
@@ -54,20 +73,74 @@ export default function Billing() {
   })
   const currency = status?.currency ?? localStorage.getItem('currency') ?? 'NGN'
 
-  const { register, handleSubmit, reset, formState: { errors } } = useForm<FormValues>()
+  const { register, handleSubmit, reset, setValue, formState: { errors } } = useForm<FormValues>()
+
+  const { data: clientSearchResults } = useQuery({
+    queryKey: ['billing-client-suggestions', clientSearch],
+    queryFn: () => api.get('/clients', { params: { search: clientSearch, page: 1, page_size: 8 } }).then((r) => r.data),
+    enabled: showForm && clientSearch.trim().length > 0,
+  })
+
+  const suggestions: ClientSuggestion[] = useMemo(
+    () => (clientSearchResults?.items ?? []).map((c: any) => ({
+      id: String(c.id),
+      name: c.client_name ?? c.name ?? '',
+      email: c.email ?? '',
+      phone: c.phone_number ?? c.phone ?? '',
+      address: c.address ?? '',
+      company: c.company ?? '',
+      notes: c.notes ?? '',
+    })),
+    [clientSearchResults]
+  )
+
+  useEffect(() => {
+    if (!showForm) return
+    const timer = setTimeout(() => setClientSearch((v) => v.trim()), 200)
+    return () => clearTimeout(timer)
+  }, [clientSearch, showForm])
 
   const saveMutation = useMutation({
-    mutationFn: (values: FormValues) =>
-      editRow
-        ? api.put(`/billing/${editRow.id}`, values)
-        : api.post('/billing', values),
+    mutationFn: async (values: FormValues) => {
+      let clientId = selectedClientId || values.client_id || ''
+
+      if (!editRow && !clientId) {
+        const maybeExisting = suggestions.find(
+          (s) => s.name.toLowerCase() === String(values.client_name || '').trim().toLowerCase()
+        )
+        if (maybeExisting) {
+          clientId = maybeExisting.id
+        }
+      }
+
+      if (!editRow && !clientId && values.client_name?.trim() && values.client_phone?.trim()) {
+        const createClientRes = await api.post('/clients', {
+          client_name: values.client_name,
+          phone_number: values.client_phone,
+          email: values.client_email || undefined,
+          address: values.client_address || undefined,
+          company: values.client_company || undefined,
+          notes: values.client_notes || undefined,
+        })
+        clientId = createClientRes?.data?.id || ''
+      }
+
+      const payload = {
+        ...values,
+        client_id: clientId || undefined,
+      }
+
+      return editRow
+        ? api.put(`/billing/${editRow.id}`, payload)
+        : api.post('/billing', payload)
+    },
     onSuccess: () => {
       toast.success('Saved')
       qc.invalidateQueries({ queryKey: ['billing'] })
       qc.invalidateQueries({ queryKey: ['dashboard'] })
-      setShowForm(false); setEditRow(null); reset()
+      setShowForm(false); setEditRow(null); setSelectedClientId(''); setClientSearch(''); setShowClientDropdown(false); reset()
     },
-    onError: () => toast.error('Save failed'),
+    onError: (e: any) => toast.error(e?.response?.data?.detail ?? 'Save failed'),
   })
 
   const deleteMutation = useMutation({
@@ -80,6 +153,8 @@ export default function Billing() {
 
   const openEdit = (row: BillingRow) => {
     setEditRow(row)
+    setClientSearch(row.client_name)
+    setSelectedClientId('')
     reset({
       client_name: row.client_name,
       service_name: row.service_name,
@@ -90,6 +165,19 @@ export default function Billing() {
       due_date: row.due_date?.slice(0, 10),
     })
     setShowForm(true)
+  }
+
+  const selectClient = (client: ClientSuggestion) => {
+    setSelectedClientId(client.id)
+    setClientSearch(client.name)
+    setValue('client_id', client.id)
+    setValue('client_name', client.name)
+    setValue('client_phone', client.phone || '')
+    setValue('client_email', client.email || '')
+    setValue('client_address', client.address || '')
+    setValue('client_company', client.company || '')
+    setValue('client_notes', client.notes || '')
+    setShowClientDropdown(false)
   }
 
   const columns = [
@@ -115,7 +203,7 @@ export default function Billing() {
     <div className="p-8 space-y-5">
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-bold">Service / Billing</h1>
-        <button onClick={() => { setEditRow(null); reset(); setShowForm(true) }} className="btn-primary"><Plus size={15} /> New Invoice</button>
+        <button onClick={() => { setEditRow(null); setClientSearch(''); setSelectedClientId(''); setShowClientDropdown(false); reset(); setShowForm(true) }} className="btn-primary"><Plus size={15} /> New Invoice</button>
       </div>
 
       <div className="flex gap-2">
@@ -141,12 +229,63 @@ export default function Billing() {
         </>
       )}
 
-      <Modal title={editRow ? 'Edit Invoice' : 'New Invoice'} open={showForm} onClose={() => { setShowForm(false); setEditRow(null); reset() }} size="lg">
+      <Modal title={editRow ? 'Edit Invoice' : 'New Invoice'} open={showForm} onClose={() => { setShowForm(false); setEditRow(null); setSelectedClientId(''); setClientSearch(''); setShowClientDropdown(false); reset() }} size="lg">
         <form onSubmit={handleSubmit((v) => saveMutation.mutate(v))} className="grid grid-cols-2 gap-4">
-          <div className="col-span-2">
+          <input type="hidden" {...register('client_id')} />
+          <div className="col-span-2 relative">
             <label className="form-label">Client Name</label>
-            <input className="form-input" {...register('client_name', { required: 'Required' })} />
+            <input
+              className="form-input"
+              {...register('client_name', { required: 'Required' })}
+              value={clientSearch}
+              onChange={(e) => {
+                setClientSearch(e.target.value)
+                setSelectedClientId('')
+                setShowClientDropdown(true)
+                setValue('client_name', e.target.value)
+                setValue('client_id', '')
+              }}
+              onFocus={() => setShowClientDropdown(true)}
+            />
+            {showClientDropdown && clientSearch.trim() && suggestions.length > 0 && (
+              <div className="absolute z-20 mt-1 w-full rounded-lg border bg-white shadow" style={{ borderColor: '#d4af37' }}>
+                {suggestions.map((s) => (
+                  <button
+                    type="button"
+                    key={s.id}
+                    className="block w-full px-3 py-2 text-left text-sm hover:bg-[#fff9e7]"
+                    onClick={() => selectClient(s)}
+                  >
+                    <div className="font-medium">{s.name}</div>
+                    <div className="text-xs text-gray-500">{s.phone || 'No phone'} • {s.email || 'No email'}</div>
+                  </button>
+                ))}
+              </div>
+            )}
+            {showClientDropdown && clientSearch.trim() && suggestions.length === 0 && (
+              <p className="text-xs text-gray-500 mt-1">No existing client match. You can continue and create a new client from this form.</p>
+            )}
             {errors.client_name && <p className="text-xs text-red-500">{errors.client_name.message}</p>}
+          </div>
+          <div>
+            <label className="form-label">Client Phone</label>
+            <input className="form-input" {...register('client_phone')} />
+          </div>
+          <div>
+            <label className="form-label">Client Email</label>
+            <input className="form-input" {...register('client_email')} />
+          </div>
+          <div>
+            <label className="form-label">Client Company</label>
+            <input className="form-input" {...register('client_company')} />
+          </div>
+          <div>
+            <label className="form-label">Client Address</label>
+            <input className="form-input" {...register('client_address')} />
+          </div>
+          <div className="col-span-2">
+            <label className="form-label">Client Notes</label>
+            <textarea className="form-input" rows={2} {...register('client_notes')} />
           </div>
           <div className="col-span-2">
             <label className="form-label">Service Name</label>

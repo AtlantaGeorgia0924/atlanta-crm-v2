@@ -27,17 +27,45 @@ def _as_float(value: object) -> float:
 
 
 def _normalize_group_name(value: Optional[str]) -> str:
-    return str(value or "").strip()
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    upper = raw.upper()
+    canonical_rules = [
+        ("IPHONE", "IPHONE"),
+        ("SAMSUNG", "SAMSUNG GALAXY"),
+        ("GALAXY", "SAMSUNG GALAXY"),
+        ("IPAD", "IPAD"),
+        ("IWATCH", "IWATCH"),
+        ("APPLE WATCH", "IWATCH"),
+        ("MACBOOK", "MACBOOK"),
+        ("AIRPODS", "AIRPODS"),
+    ]
+    for token, canonical in canonical_rules:
+        if token in upper:
+            return canonical
+    return upper
+
+
+def _product_status(row: dict) -> str:
+    status = str(row.get("product_status") or row.get("payment_status") or "").strip().upper()
+    if status:
+        return status
+    quantity = _as_float(row.get("quantity"))
+    if quantity <= 0:
+        return "SOLD"
+    return "AVAILABLE"
 
 
 def _is_sold_out(row: dict) -> bool:
     quantity = _as_float(row.get("quantity"))
     sold_flag = bool(row.get("sold_out"))
-    status = str(row.get("payment_status") or "").strip().upper()
+    status = _product_status(row)
     return quantity <= 0 or sold_flag or status == "SOLD"
 
 
 def _serialize_item(row: dict) -> dict:
+    product_status = _product_status(row)
     return {
         **row,
         "unit_cost": row.get("cost_price", 0),
@@ -45,8 +73,9 @@ def _serialize_item(row: dict) -> dict:
         "reorder_level": row.get("reorder_level", 0),
         "supplier": row.get("supplier") or _extract_supplier(row.get("description")),
         "location": row.get("location"),
+        "product_status": product_status,
         "is_active": True,
-        "sold_out": _is_sold_out(row),
+        "sold_out": _is_sold_out({**row, "product_status": product_status}),
     }
 
 
@@ -150,9 +179,11 @@ def list_inventory(
 
     mode = str(view or "products").strip().lower()
     if mode == "out_of_stock":
-        data = [r for r in data if _is_sold_out(r)]
+        data = [r for r in data if _product_status(r) == "SOLD" or _as_float(r.get("quantity")) <= 0]
+    elif mode == "pending_deals":
+        data = [r for r in data if _product_status(r) == "PENDING DEAL"]
     else:
-        data = [r for r in data if not _is_sold_out(r)]
+        data = [r for r in data if _product_status(r) == "AVAILABLE" and _as_float(r.get("quantity")) > 0]
 
     if low_stock:
         data = [r for r in data if _as_float(r.get("quantity")) <= _as_float(r.get("reorder_level"))]
@@ -179,7 +210,7 @@ def create_item(payload: StockCreate, _user=Depends(get_current_user)):
     mapped = {
         "item_name": data.get("item_name"),
         "sku": data.get("sku"),
-        "category": data.get("category"),
+        "category": _normalize_group_name(data.get("category")),
         "description": data.get("description"),
         "quantity": data.get("quantity", 0),
         "unit": data.get("unit", "pcs"),
@@ -208,7 +239,7 @@ def create_items_bulk(payload: StockBulkCreate, _user=Depends(get_current_user))
                 "id": str(uuid.uuid4()),
                 "item_name": name,
                 "sku": data.get("sku"),
-                "category": data.get("category"),
+                "category": _normalize_group_name(data.get("category")),
                 "description": data.get("description"),
                 "quantity": data.get("quantity", 0),
                 "unit": data.get("unit", "pcs"),
@@ -328,6 +359,8 @@ def update_item(item_id: str, payload: StockUpdate, _user=Depends(get_current_us
     data.pop("is_active", None)
     if "payment_status" in data and data.get("payment_status") is not None:
         data["payment_status"] = str(data["payment_status"]).upper()
+    if "category" in data:
+        data["category"] = _normalize_group_name(data.get("category"))
     result = sb.table("inventory_items").update(data).eq("id", item_id).execute()
     return result.data[0]
 
