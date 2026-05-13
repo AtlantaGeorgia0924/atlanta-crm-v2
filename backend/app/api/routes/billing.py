@@ -129,37 +129,6 @@ def list_debtors(_user=Depends(get_current_user)):
         row["row_type"] = "service"
         rows.append(row)
 
-    # Include unpaid inventory sales as debtors.
-    inv_rows = (
-        sb.table("inventory_items")
-        .select("id,item_name,quantity,selling_price,cost_price,expense_amount,payment_status,paid_date")
-        .neq("payment_status", "PAID")
-        .execute()
-        .data
-        or []
-    )
-    for item in inv_rows:
-        quantity = float(item.get("quantity") or 0)
-        selling_price = float(item.get("selling_price") or 0)
-        cost_price = float(item.get("cost_price") or 0)
-        expense_amount = float(item.get("expense_amount") or 0)
-        computed_total = quantity * selling_price
-        # Fallbacks handle sparse migrated rows where selling/quantity may be zero.
-        total = computed_total if computed_total > 0 else max(selling_price, cost_price, expense_amount, 0.0)
-        rows.append(
-            {
-                "id": f"inventory::{item.get('id')}",
-                "client_name": "Inventory Sale",
-                "service_name": item.get("item_name") or "Inventory Item",
-                "total_amount": total,
-                "amount_paid": 0,
-                "balance": total,
-                "status": "unpaid",
-                "due_date": item.get("paid_date"),
-                "row_type": "inventory",
-            }
-        )
-
     rows.sort(key=lambda x: x.get("due_date") or "")
     return rows
 
