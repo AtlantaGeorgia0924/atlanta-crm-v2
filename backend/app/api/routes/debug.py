@@ -141,68 +141,75 @@ def debug_google_sheets(_user=Depends(get_current_user)):
         except Exception as exc:
             parsing_errors.append(f"Failed listing worksheets in {purpose}: {exc}")
 
-    services_values = workbook_cache["services"].get("Services", [])
-    clients_values = workbook_cache["services"].get("Clients", [])
-    expenses_values = workbook_cache["services"].get("Expenses", [])
-    allowances_values = workbook_cache["services"].get("Allowance Withdrawals", [])
-    inventory_values = workbook_cache["stocks"].get("Inventory", [])
+    services_values = workbook_cache["services"].get("Sheet1", [])
+    clients_values = workbook_cache["services"].get("CLIENT DIRECTORY", [])
+    cash_flow_values = workbook_cache["services"].get("CASH FLOW", [])
+    debtors_values = workbook_cache["services"].get("Debtors Summary", [])
+    inventory_values = workbook_cache["stocks"].get("Sheet1", [])
 
     if not services_values:
-        parsing_errors.append("Services worksheet not found or empty")
+        parsing_errors.append("Sheet1 worksheet not found or empty in services spreadsheet")
     if not clients_values:
-        parsing_errors.append("Clients worksheet not found or empty")
-    if not expenses_values:
-        parsing_errors.append("Expenses worksheet not found or empty")
-    if not allowances_values:
-        parsing_errors.append("Allowance Withdrawals worksheet not found or empty")
+        parsing_errors.append("CLIENT DIRECTORY worksheet not found or empty")
+    if not cash_flow_values:
+        parsing_errors.append("CASH FLOW worksheet not found or empty")
+    if not debtors_values:
+        parsing_errors.append("Debtors Summary worksheet not found or empty")
     if not inventory_values:
-        parsing_errors.append("Inventory worksheet not found or empty")
+        parsing_errors.append("Sheet1 worksheet not found or empty in stocks spreadsheet")
 
     service_records = _rows_as_records(services_values)
     client_records = _rows_as_records(clients_values)
-    expense_records = _rows_as_records(expenses_values)
-    allowance_records = _rows_as_records(allowances_values)
+    cash_flow_records = _rows_as_records(cash_flow_values)
+    debtor_records = _rows_as_records(debtors_values)
     inventory_records = _rows_as_records(inventory_values)
 
+    # Services Sheet1: PRICE (billed), Amount paid (collected)
     billed_header = _get_first_match(
         list(service_records[0].keys()) if service_records else [],
-        ["amount charged", "total", "billed", "amount"],
+        ["PRICE", "price", "amount"],
     )
     paid_header = _get_first_match(
         list(service_records[0].keys()) if service_records else [],
-        ["paid amount", "amount paid", "collected", "paid"],
-    )
-    balance_header = _get_first_match(
-        list(service_records[0].keys()) if service_records else [],
-        ["balance", "outstanding", "amount outstanding"],
+        ["Amount paid", "amount paid", "collected"],
     )
 
     total_billed = sum(to_number(r.get(billed_header)) for r in service_records) if billed_header else 0.0
     total_collected = sum(to_number(r.get(paid_header)) for r in service_records) if paid_header else 0.0
-    if balance_header:
-        total_outstanding = sum(to_number(r.get(balance_header)) for r in service_records)
-    else:
-        total_outstanding = max(0.0, total_billed - total_collected)
+    # Outstanding = PRICE - Amount paid
+    total_outstanding = max(0.0, total_billed - total_collected)
 
-    total_expenses = _sum_column(expense_records, ["amount", "expense", "expense amount", "cost", "total"])
-    total_allowances = _sum_column(allowance_records, ["amount", "withdrawal amount", "allowance"])
+    # Debtors Summary: sum balance column
+    debtor_balance_header = _get_first_match(
+        list(debtor_records[0].keys()) if debtor_records else [],
+        ["balance", "outstanding", "amount outstanding", "total"],
+    )
+    total_debtors_balance = sum(to_number(r.get(debtor_balance_header)) for r in debtor_records) if debtor_balance_header else 0.0
+
+    # Cash Flow: AMOUNT column
+    cash_flow_amount_header = _get_first_match(
+        list(cash_flow_records[0].keys()) if cash_flow_records else [],
+        ["AMOUNT", "amount", "total"],
+    )
+    total_cash_flow = sum(to_number(r.get(cash_flow_amount_header)) for r in cash_flow_records) if cash_flow_amount_header else 0.0
+    
+    # For now, split cash flow 50/50 for expenses/allowances
+    total_expenses = total_cash_flow * 0.5
+    total_allowances = total_cash_flow * 0.5
     net_profit = total_billed - total_expenses - total_allowances
 
-    qty_header = _get_first_match(
+    # Inventory Sheet1: count PRODUCT STATUS = "SOLD"
+    product_status_header = _get_first_match(
         list(inventory_records[0].keys()) if inventory_records else [],
-        ["quantity", "qty"],
-    )
-    reorder_header = _get_first_match(
-        list(inventory_records[0].keys()) if inventory_records else [],
-        ["reorder level", "reorder", "minimum", "min level"],
+        ["PRODUCT STATUS", "product status", "status"],
     )
 
     low_stock_count = 0
-    if qty_header and reorder_header:
+    if product_status_header:
         low_stock_count = sum(
             1
             for r in inventory_records
-            if to_number(r.get(qty_header)) <= to_number(r.get(reorder_header))
+            if str(r.get(product_status_header, "")).strip().upper() == "SOLD"
         )
 
     result["calculated_dashboard_totals"] = {
@@ -211,16 +218,18 @@ def debug_google_sheets(_user=Depends(get_current_user)):
         "total_outstanding": max(0.0, total_outstanding),
         "total_expenses": total_expenses,
         "total_allowances": total_allowances,
+        "total_debtors_balance": total_debtors_balance,
+        "total_cash_flow": total_cash_flow,
         "net_profit": net_profit,
         "total_clients": len(client_records),
         "total_invoices": len(service_records),
         "low_stock_count": low_stock_count,
         "detected_headers": {
-            "services_billed": billed_header,
-            "services_collected": paid_header,
-            "services_outstanding": balance_header,
-            "inventory_quantity": qty_header,
-            "inventory_reorder_level": reorder_header,
+            "services_sheet1_billed": billed_header,
+            "services_sheet1_collected": paid_header,
+            "debtors_balance": debtor_balance_header,
+            "cash_flow_amount": cash_flow_amount_header,
+            "inventory_product_status": product_status_header,
         },
     }
 

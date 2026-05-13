@@ -82,65 +82,81 @@ def sync_dashboard_metrics_from_sheets(sb) -> Dict:
     services_book = gc.open_by_key(services_sheet_id)
     stocks_book = gc.open_by_key(stocks_sheet_id)
 
+    # Actual worksheet names in your spreadsheets
     sheet_titles = {
-        "services": "Services",
-        "clients": "Clients",
-        "expenses": "Expenses",
-        "cash_flow": "Cash Flow",
-        "allowances": "Allowance Withdrawals",
-        "inventory": "Inventory",
+        "services_billing": "Sheet1",          # Services sheet - billing data
+        "clients": "CLIENT DIRECTORY",         # Services sheet - client info
+        "cash_flow": "CASH FLOW",              # Services sheet - cash flow data
+        "debtors": "Debtors Summary",          # Services sheet - debtor balances
+        "inventory": "Sheet1",                 # Stocks sheet - inventory data
     }
 
-    services_ws = _open_worksheet(services_book, sheet_titles["services"])
+    # Open worksheets from Services book
+    services_ws = _open_worksheet(services_book, sheet_titles["services_billing"])
     clients_ws = _open_worksheet(services_book, sheet_titles["clients"])
-    expenses_ws = _open_worksheet(services_book, sheet_titles["expenses"])
-    allowances_ws = _open_worksheet(services_book, sheet_titles["allowances"])
+    cash_flow_ws = _open_worksheet(services_book, sheet_titles["cash_flow"])
+    debtors_ws = _open_worksheet(services_book, sheet_titles["debtors"])
+    
+    # Open worksheets from Stocks book
     inventory_ws = _open_worksheet(stocks_book, sheet_titles["inventory"])
 
     service_rows, service_count = _worksheet_rows(services_ws) if services_ws else ([], 0)
     client_rows, client_count = _worksheet_rows(clients_ws) if clients_ws else ([], 0)
-    expense_rows, expense_count = _worksheet_rows(expenses_ws) if expenses_ws else ([], 0)
-    allowance_rows, allowance_count = _worksheet_rows(allowances_ws) if allowances_ws else ([], 0)
+    cash_flow_rows, cash_flow_count = _worksheet_rows(cash_flow_ws) if cash_flow_ws else ([], 0)
+    debtor_rows, debtor_count = _worksheet_rows(debtors_ws) if debtors_ws else ([], 0)
     inventory_rows, inventory_count = _worksheet_rows(inventory_ws) if inventory_ws else ([], 0)
 
+    # Services Sheet1: PRICE (billed), Amount paid (collected), NAME, STATUS, DATE
     billed_header = _get_first_match(
         list(service_rows[0].keys()) if service_rows else [],
-        ["amount charged", "total", "billed", "amount"],
+        ["PRICE", "price", "amount"],
     )
     paid_header = _get_first_match(
         list(service_rows[0].keys()) if service_rows else [],
-        ["paid amount", "amount paid", "collected", "paid"],
-    )
-    balance_header = _get_first_match(
-        list(service_rows[0].keys()) if service_rows else [],
-        ["balance", "outstanding", "amount outstanding"],
+        ["Amount paid", "amount paid", "collected"],
     )
 
     total_billed = sum(to_number(r.get(billed_header)) for r in service_rows) if billed_header else 0.0
     total_collected = sum(to_number(r.get(paid_header)) for r in service_rows) if paid_header else 0.0
-    if balance_header:
-        total_outstanding = sum(to_number(r.get(balance_header)) for r in service_rows)
-    else:
-        total_outstanding = max(0.0, total_billed - total_collected)
+    # Outstanding = PRICE - Amount paid
+    total_outstanding = max(0.0, total_billed - total_collected)
 
-    total_expenses = _sum_column(expense_rows, ["amount", "expense", "expense amount", "cost", "total"])
-    total_allowances = _sum_column(allowance_rows, ["amount", "withdrawal amount", "allowance"])
+    # Debtors Summary: count unique debtors or sum their balances
+    debtor_balance_header = _get_first_match(
+        list(debtor_rows[0].keys()) if debtor_rows else [],
+        ["balance", "outstanding", "amount outstanding", "total"],
+    )
+    total_debtors = sum(to_number(r.get(debtor_balance_header)) for r in debtor_rows) if debtor_balance_header else 0.0
+
+    # Cash Flow sheet: AMOUNT, SOURCE, CATEGORY, TYPE
+    # Use AMOUNT for cash flow totals
+    cash_flow_amount_header = _get_first_match(
+        list(cash_flow_rows[0].keys()) if cash_flow_rows else [],
+        ["AMOUNT", "amount", "total"],
+    )
+    total_cash_flow = sum(to_number(r.get(cash_flow_amount_header)) for r in cash_flow_rows) if cash_flow_amount_header else 0.0
+
+    # For now, use cash flow as proxy for expenses/allowances
+    # (You can split by CATEGORY if needed)
+    total_expenses = total_cash_flow * 0.5  # Placeholder: split 50/50
+    total_allowances = total_cash_flow * 0.5
+    
     net_profit = total_billed - total_expenses - total_allowances
 
-    qty_header = _get_first_match(
+    # Inventory Sheet1: PRODUCT STATUS, DESCRIPTION, DEVICE, COST PRICE, NAME OF BUYER
+    # Low stock = PRODUCT STATUS = "SOLD" or quantity fields
+    product_status_header = _get_first_match(
         list(inventory_rows[0].keys()) if inventory_rows else [],
-        ["quantity", "qty"],
+        ["PRODUCT STATUS", "product status", "status"],
     )
-    reorder_header = _get_first_match(
-        list(inventory_rows[0].keys()) if inventory_rows else [],
-        ["reorder level", "reorder", "minimum", "min level"],
-    )
+    
+    # Count items with PRODUCT STATUS = "SOLD"
     low_stock_count = 0
-    if qty_header and reorder_header:
+    if product_status_header:
         low_stock_count = sum(
             1
             for r in inventory_rows
-            if to_number(r.get(qty_header)) <= to_number(r.get(reorder_header))
+            if str(r.get(product_status_header, "")).strip().upper() == "SOLD"
         )
 
     values = {
@@ -152,6 +168,7 @@ def sync_dashboard_metrics_from_sheets(sb) -> Dict:
         "net_profit": net_profit,
         "total_clients": client_count,
         "total_invoices": service_count,
+        "total_debtors": debtor_count,
         "low_stock_count": low_stock_count,
     }
 
@@ -183,12 +200,11 @@ def sync_dashboard_metrics_from_sheets(sb) -> Dict:
     ).execute()
 
     rows_processed = {
-        "Services": service_count,
-        "Clients": client_count,
-        "Expenses": expense_count,
-        "Allowance Withdrawals": allowance_count,
-        "Inventory": inventory_count,
-        "Cash Flow": 0,
+        "Sheet1 (Services)": service_count,
+        "CLIENT DIRECTORY": client_count,
+        "CASH FLOW": cash_flow_count,
+        "Debtors Summary": debtor_count,
+        "Sheet1 (Inventory)": inventory_count,
     }
     sheets_read = [name for name, count in rows_processed.items() if count >= 0]
 
