@@ -35,8 +35,9 @@ export default function CashFlow() {
   const refreshMutation = useMutation({
     mutationFn: () => api.post('/cashflow/refresh'),
     onSuccess: () => {
-      toast.success('Refresh started in background')
-      setTimeout(() => qc.invalidateQueries({ queryKey: ['cashflow'] }), 3000)
+      toast.success('Cash Flow refreshed from Google Sheets')
+      qc.invalidateQueries({ queryKey: ['cashflow'] })
+      qc.invalidateQueries({ queryKey: ['dashboard'] })
     },
   })
 

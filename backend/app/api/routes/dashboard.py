@@ -1,11 +1,11 @@
-"""Dashboard – single DB function call for all metrics."""
+"""Dashboard sourced from Google Sheet Cash Flow summary mirrored into Supabase."""
 from fastapi import APIRouter, Depends
 from app.db.supabase_client import get_supabase
 from app.core.auth import get_current_user
-from app.core.financials import (
-    compute_outstanding,
-    is_valid_service_record,
-    to_number,
+from app.core.financials import to_number
+from app.core.cashflow_sheet_sync import (
+    CASHFLOW_SUMMARY_ID,
+    sync_cashflow_summary_from_sheet,
 )
 
 router = APIRouter()
@@ -24,22 +24,42 @@ def _read_all(sb, table: str, columns: str, batch_size: int = 1000):
     return rows
 
 
+def _read_dashboard_cashflow_values(sb):
+    row = (
+        sb.table("cashflow_summary")
+        .select("*")
+        .eq("id", CASHFLOW_SUMMARY_ID)
+        .limit(1)
+        .execute()
+        .data
+        or []
+    )
+    if not row:
+        return {
+            "total_billed": 0.0,
+            "total_collected": 0.0,
+            "total_outstanding": 0.0,
+            "total_expenses": 0.0,
+            "total_allowances": 0.0,
+            "net_profit": 0.0,
+        }
+
+    item = row[0]
+    return {
+        "total_billed": to_number(item.get("monthly_net_profit")),
+        "total_collected": to_number(item.get("weekly_paid_profits")),
+        "total_outstanding": max(0.0, to_number(item.get("monthly_net_profit_left"))),
+        "total_expenses": to_number(item.get("weekly_expenses")),
+        "total_allowances": to_number(item.get("allowances_withdrawn")),
+        "net_profit": to_number(item.get("weekly_net_profit")),
+    }
+
+
 def _compute_dashboard_totals(sb):
     clients_count = sb.table("clients").select("id", count="exact").limit(1).execute().count or 0
-    billing_rows = _read_all(sb, "service_jobs", "id,service_name,description,amount_charged,paid_amount")
-    expenses_rows = _read_all(sb, "manual_expenses", "amount")
-    allowance_rows = _read_all(sb, "allowance_withdrawals", "amount")
     stock_rows = _read_all(sb, "inventory_items", "*")
-
-    valid_service_rows = [row for row in billing_rows if is_valid_service_record(row)]
-    total_billed = sum(to_number(r.get("amount_charged")) for r in valid_service_rows)
-    total_collected = sum(to_number(r.get("paid_amount")) for r in valid_service_rows)
-    total_outstanding = sum(
-        compute_outstanding(r.get("amount_charged"), r.get("paid_amount"))
-        for r in valid_service_rows
-    )
-    total_expenses = sum(to_number(r.get("amount")) for r in expenses_rows)
-    total_allowances = sum(to_number(r.get("amount")) for r in allowance_rows)
+    invoice_count = sb.table("service_jobs").select("id", count="exact").limit(1).execute().count or 0
+    cashflow_values = _read_dashboard_cashflow_values(sb)
     low_stock_count = sum(
         1
         for r in stock_rows
@@ -47,14 +67,15 @@ def _compute_dashboard_totals(sb):
     )
 
     return {
-        "total_service_rows_included": len(valid_service_rows),
+        "total_service_rows_included": invoice_count,
         "total_clients": clients_count,
-        "total_invoices": len(valid_service_rows),
-        "total_billed": total_billed,
-        "total_collected": total_collected,
-        "total_outstanding": total_outstanding,
-        "total_expenses": total_expenses,
-        "total_allowances": total_allowances,
+        "total_invoices": invoice_count,
+        "total_billed": cashflow_values["total_billed"],
+        "total_collected": cashflow_values["total_collected"],
+        "total_outstanding": cashflow_values["total_outstanding"],
+        "total_expenses": cashflow_values["total_expenses"],
+        "total_allowances": cashflow_values["total_allowances"],
+        "net_profit": cashflow_values["net_profit"],
         "low_stock_count": low_stock_count,
     }
 
@@ -62,6 +83,13 @@ def _compute_dashboard_totals(sb):
 @router.get("")
 def get_dashboard(_user=Depends(get_current_user)):
     sb = get_supabase()
+    # On dashboard load, mirror trusted Google Sheet Cash Flow totals into Supabase.
+    try:
+        sync_cashflow_summary_from_sheet(sb)
+    except Exception as e:
+        # If sheet sync fails, return last saved snapshot from cashflow_summary.
+        print(f"[dashboard] cashflow sheet sync skipped: {e}")
+
     totals = _compute_dashboard_totals(sb)
     return {
         "total_clients": totals["total_clients"],
@@ -71,6 +99,7 @@ def get_dashboard(_user=Depends(get_current_user)):
         "total_outstanding": totals["total_outstanding"],
         "total_expenses": totals["total_expenses"],
         "total_allowances": totals["total_allowances"],
+        "net_profit": totals["net_profit"],
         "low_stock_count": totals["low_stock_count"],
     }
 
@@ -78,14 +107,19 @@ def get_dashboard(_user=Depends(get_current_user)):
 @router.get("/validation")
 def dashboard_validation(_user=Depends(get_current_user)):
     sb = get_supabase()
+    sync_details = sync_cashflow_summary_from_sheet(sb)
     totals = _compute_dashboard_totals(sb)
     return {
+        "values_read_from_google_sheets": sync_details["values_read_from_google_sheets"],
+        "values_saved_to_cashflow_summary": sync_details["values_saved_to_cashflow_summary"],
+        "values_displayed_on_dashboard": sync_details["values_displayed_on_dashboard"],
         "total_service_rows_included": totals["total_service_rows_included"],
         "total_billed": totals["total_billed"],
         "total_paid": totals["total_collected"],
         "total_outstanding": totals["total_outstanding"],
         "total_expenses": totals["total_expenses"],
         "total_allowances": totals["total_allowances"],
+        "net_profit": totals["net_profit"],
         "total_clients": totals["total_clients"],
         "low_stock_count": totals["low_stock_count"],
     }

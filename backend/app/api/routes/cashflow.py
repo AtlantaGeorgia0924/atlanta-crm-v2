@@ -1,24 +1,12 @@
-"""Cash flow totals derived from source tables using shared financial logic."""
+"""Cash flow totals sourced from cached Google Sheet summary in cashflow_summary."""
 from fastapi import APIRouter, Depends, Query
 from typing import Optional
 from app.db.supabase_client import get_supabase
 from app.core.auth import get_current_user
-from app.core.financials import is_valid_service_record, month_key, to_number
+from app.core.financials import to_number
+from app.core.cashflow_sheet_sync import CASHFLOW_SUMMARY_ID, sync_cashflow_summary_from_sheet
 
 router = APIRouter()
-
-
-def _read_all(sb, table: str, columns: str, batch_size: int = 1000):
-    rows = []
-    start = 0
-    while True:
-        end = start + batch_size - 1
-        chunk = sb.table(table).select(columns).range(start, end).execute().data or []
-        rows.extend(chunk)
-        if len(chunk) < batch_size:
-            break
-        start += batch_size
-    return rows
 
 
 @router.get("")
@@ -27,65 +15,45 @@ def get_cashflow(
     year: Optional[str] = Query(None, description="YYYY filter"),
     _user=Depends(get_current_user),
 ):
-    """Compute monthly cash flow directly from source tables."""
+    """Read cash flow figures from cashflow_summary row synced from Google Sheets."""
     sb = get_supabase()
-    billing_rows = _read_all(sb, "service_jobs", "service_name,description,paid_amount,paid_date,service_date")
-    expense_rows = _read_all(sb, "manual_expenses", "amount,expense_date")
-    allowance_rows = _read_all(sb, "allowance_withdrawals", "amount,withdrawal_date")
+    row = (
+        sb.table("cashflow_summary")
+        .select("*")
+        .eq("id", CASHFLOW_SUMMARY_ID)
+        .limit(1)
+        .execute()
+        .data
+        or []
+    )
 
-    month_totals = {}
+    if not row:
+        return []
 
-    def _accept_period(key: Optional[str]) -> bool:
-        if not key:
-            return False
-        if month:
-            return key == month
-        if year:
-            return key.startswith(f"{year}-")
-        return True
+    item = row[0]
+    period_label = item.get("period_key") or "sheet_summary"
+    if month and period_label != "sheet_summary" and month != period_label:
+        return []
+    if year and period_label != "sheet_summary" and not str(period_label).startswith(str(year)):
+        return []
 
-    def _bucket(key: str):
-        if key not in month_totals:
-            month_totals[key] = {
-                "period_month": key,
-                "total_revenue": 0.0,
-                "total_expenses": 0.0,
-                "total_allowances": 0.0,
-                "gross_profit": 0.0,
-            }
-        return month_totals[key]
-
-    for row in billing_rows:
-        if not is_valid_service_record(row):
-            continue
-        key = month_key(row.get("paid_date")) or month_key(row.get("service_date"))
-        if not _accept_period(key):
-            continue
-        bucket = _bucket(key)
-        bucket["total_revenue"] += to_number(row.get("paid_amount"))
-
-    for row in expense_rows:
-        key = month_key(row.get("expense_date"))
-        if not _accept_period(key):
-            continue
-        bucket = _bucket(key)
-        bucket["total_expenses"] += to_number(row.get("amount"))
-
-    for row in allowance_rows:
-        key = month_key(row.get("withdrawal_date"))
-        if not _accept_period(key):
-            continue
-        bucket = _bucket(key)
-        bucket["total_allowances"] += to_number(row.get("amount"))
-
-    rows = list(month_totals.values())
-    for row in rows:
-        row["gross_profit"] = row["total_revenue"] - row["total_expenses"] - row["total_allowances"]
-    rows.sort(key=lambda x: x.get("period_month") or "", reverse=True)
-    return rows
+    return [
+        {
+            "period_month": period_label,
+            "total_revenue": to_number(item.get("weekly_paid_profits")),
+            "total_expenses": to_number(item.get("weekly_expenses")),
+            "total_allowances": to_number(item.get("allowances_withdrawn")),
+            "gross_profit": to_number(item.get("weekly_net_profit")),
+        }
+    ]
 
 
 @router.post("/refresh")
 def trigger_refresh(_user=Depends(get_current_user)):
-    """Refresh endpoint kept for compatibility with existing UI."""
-    return {"message": "Cash flow uses live source-table totals; no background refresh required."}
+    """Refresh cashflow_summary from Google Sheets Cash Flow tab."""
+    sb = get_supabase()
+    details = sync_cashflow_summary_from_sheet(sb)
+    return {
+        "message": "Cash flow summary refreshed from Google Sheets.",
+        **details,
+    }

@@ -12,6 +12,7 @@ interface Summary {
   total_outstanding: number
   total_expenses: number
   total_allowances: number
+  net_profit?: number
   low_stock_count: number
 }
 
@@ -33,7 +34,6 @@ export default function Dashboard() {
   const { data, isLoading } = useQuery<Summary>({
     queryKey: ['dashboard'],
     queryFn: () => api.get('/dashboard').then((r) => r.data),
-    refetchInterval: 60_000,
   })
 
   const { data: status } = useQuery<{ currency?: string }>({
@@ -57,6 +57,7 @@ export default function Dashboard() {
         <StatCard label="Outstanding"      value={formatCurrency(s.total_outstanding, currency)} icon={AlertCircle} color="bg-red-500" />
         <StatCard label="Total Expenses"   value={formatCurrency(s.total_expenses, currency)}   icon={TrendingDown} color="bg-orange-500" />
         <StatCard label="Allowances"       value={formatCurrency(s.total_allowances, currency)} icon={DollarSign} color="bg-purple-500" />
+        <StatCard label="Net Profit"       value={formatCurrency(Number(s.net_profit ?? 0), currency)} icon={DollarSign} color="bg-emerald-600" />
         <StatCard label="Low Stock Items"  value={s.low_stock_count}                     icon={Package}    color="bg-yellow-500" />
       </div>
     </div>
