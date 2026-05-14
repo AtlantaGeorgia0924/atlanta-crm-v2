@@ -10,6 +10,7 @@ from datetime import date, datetime
 from app.db.supabase_client import get_supabase
 from app.core.auth import get_current_user
 from app.core.financials import compute_outstanding, compute_payment_status, to_number
+from app.core.metrics_refresh import recompute_and_persist_metrics
 
 router = APIRouter()
 
@@ -97,4 +98,8 @@ def apply_payment(payload: PaymentCreate, _user=Depends(get_current_user)):
         .eq("id", payload.billing_row_id)
         .execute()
     )
+
+    # Keep dashboard/cashflow cards in sync after payment updates.
+    recompute_and_persist_metrics(sb, source="supabase_after_payment")
+
     return update_res.data[0]

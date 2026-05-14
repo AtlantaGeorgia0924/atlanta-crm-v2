@@ -10,6 +10,7 @@ from app.db.supabase_client import get_supabase
 from app.core.auth import get_current_user
 from app.core.financials import to_number
 from app.core.dashboard_metrics import app_settings_payload, compute_metrics_from_supabase
+from app.core.metrics_refresh import recompute_and_persist_metrics
 
 router = APIRouter()
 
@@ -128,11 +129,7 @@ def get_cashflow(
 def trigger_refresh(_user=Depends(get_current_user)):
     """Recalculate financial statement from Supabase-only data."""
     sb = get_supabase()
-    metrics = compute_metrics_from_supabase(sb)
-    sb.table("app_settings").upsert(
-        app_settings_payload(metrics, source="supabase"),
-        on_conflict="key",
-    ).execute()
+    metrics = recompute_and_persist_metrics(sb, source="supabase")
     return {
         "message": "Cash flow statement refreshed from Supabase.",
         "values_calculated": metrics,
@@ -174,11 +171,7 @@ def create_cashflow_expense(payload: CashflowExpenseCreate, _user=Depends(get_cu
 
     inserted = sb.table("cashflow_expenses").insert(row).execute().data or []
 
-    metrics = compute_metrics_from_supabase(sb)
-    sb.table("app_settings").upsert(
-        app_settings_payload(metrics, source="supabase_after_cashflow_expense"),
-        on_conflict="key",
-    ).execute()
+    recompute_and_persist_metrics(sb, source="supabase_after_cashflow_expense")
     return inserted[0] if inserted else row
 
 
@@ -207,11 +200,7 @@ def reverse_cashflow_expense(expense_id: str, _user=Depends(get_current_user)):
         or []
     )
 
-    metrics = compute_metrics_from_supabase(sb)
-    sb.table("app_settings").upsert(
-        app_settings_payload(metrics, source="supabase_after_expense_reversal"),
-        on_conflict="key",
-    ).execute()
+    recompute_and_persist_metrics(sb, source="supabase_after_expense_reversal")
     return updated[0] if updated else {"id": expense_id, "is_reversed": True}
 
 
@@ -265,9 +254,5 @@ def withdraw_allowance(payload: AllowanceWithdrawRequest, _user=Depends(get_curr
     }
     inserted = sb.table("allowance_withdrawals").insert(row).execute().data or []
 
-    metrics = compute_metrics_from_supabase(sb)
-    sb.table("app_settings").upsert(
-        app_settings_payload(metrics, source="supabase_after_allowance_withdrawal"),
-        on_conflict="key",
-    ).execute()
+    recompute_and_persist_metrics(sb, source="supabase_after_allowance_withdrawal")
     return inserted[0] if inserted else row

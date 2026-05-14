@@ -6,6 +6,7 @@ import uuid
 from datetime import datetime
 from app.db.supabase_client import get_supabase
 from app.core.auth import get_current_user
+from app.core.metrics_refresh import recompute_and_persist_metrics
 
 router = APIRouter()
 INVENTORY_GROUPS_KEY = "inventory_groups"
@@ -231,6 +232,7 @@ def create_item(payload: StockCreate, _user=Depends(get_current_user)):
     if mapped["payment_status"] == "PAID":
         mapped["paid_at"] = datetime.utcnow().isoformat()
     result = sb.table("inventory_items").insert(mapped).execute()
+    recompute_and_persist_metrics(sb, source="supabase_after_inventory_create")
     return result.data[0]
 
 
@@ -269,6 +271,7 @@ def create_items_bulk(payload: StockBulkCreate, _user=Depends(get_current_user))
         raise HTTPException(422, "No valid product rows provided")
 
     result = sb.table("inventory_items").insert(rows).execute()
+    recompute_and_persist_metrics(sb, source="supabase_after_inventory_bulk_create")
     return {
         "inserted": len(result.data or []),
         "items": result.data or [],
@@ -375,9 +378,12 @@ def update_item(item_id: str, payload: StockUpdate, _user=Depends(get_current_us
     data.pop("is_active", None)
     if "payment_status" in data and data.get("payment_status") is not None:
         data["payment_status"] = str(data["payment_status"]).upper()
+        if data["payment_status"] == "PAID":
+            data.setdefault("paid_at", datetime.utcnow().isoformat())
     if "category" in data:
         data["category"] = _normalize_group_name(data.get("category"))
     result = sb.table("inventory_items").update(data).eq("id", item_id).execute()
+    recompute_and_persist_metrics(sb, source="supabase_after_inventory_update")
     return result.data[0]
 
 
@@ -385,3 +391,4 @@ def update_item(item_id: str, payload: StockUpdate, _user=Depends(get_current_us
 def delete_item(item_id: str, _user=Depends(get_current_user)):
     sb = get_supabase()
     sb.table("inventory_items").delete().eq("id", item_id).execute()
+    recompute_and_persist_metrics(sb, source="supabase_after_inventory_delete")

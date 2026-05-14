@@ -10,7 +10,7 @@ from app.db.supabase_client import get_supabase
 from app.core.auth import get_current_user
 from app.core.config import settings as app_settings
 from app.core.cashflow_sheet_sync import read_sheet_id
-from app.core.dashboard_metrics import app_settings_payload, compute_metrics_from_supabase
+from app.core.metrics_refresh import recompute_and_persist_metrics
 from app.core.sheets_import_sync import import_google_sheets_to_supabase
 
 router = APIRouter()
@@ -101,11 +101,7 @@ def refresh_workspace(_user=Depends(get_current_user)):
     """Recalculate dashboard and financial metrics from Supabase only."""
     sb = get_supabase()
     try:
-        metrics = compute_metrics_from_supabase(sb)
-        sb.table("app_settings").upsert(
-            app_settings_payload(metrics, source="supabase"),
-            on_conflict="key",
-        ).execute()
+        metrics = recompute_and_persist_metrics(sb, source="supabase")
     except Exception as e:
         raise HTTPException(500, f"Workspace refresh failed: {str(e)}")
 
@@ -143,11 +139,7 @@ def refresh_from_google_sheets(_user=Depends(get_current_user)):
         raise HTTPException(500, f"Google Sheets refresh failed after 3 attempts (SSL/network error): {str(last_exc)}")
 
     try:
-        metrics = compute_metrics_from_supabase(sb)
-        sb.table("app_settings").upsert(
-            app_settings_payload(metrics, source="supabase_after_sheet_import"),
-            on_conflict="key",
-        ).execute()
+        metrics = recompute_and_persist_metrics(sb, source="supabase_after_sheet_import")
     except Exception as e:
         raise HTTPException(500, f"Metric recalculation failed: {str(e)}")
 

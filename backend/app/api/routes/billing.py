@@ -9,6 +9,7 @@ from app.core.financials import (
     compute_payment_status,
     to_number,
 )
+from app.core.metrics_refresh import recompute_and_persist_metrics
 
 router = APIRouter()
 
@@ -209,6 +210,7 @@ def create_billing(payload: BillingCreate, _user=Depends(get_current_user)):
         "notes": data.get("notes"),
     }
     result = sb.table("service_jobs").insert(mapped).execute()
+    recompute_and_persist_metrics(sb, source="supabase_after_billing_create")
     return result.data[0]
 
 
@@ -249,6 +251,7 @@ def update_billing(billing_id: str, payload: BillingUpdate, _user=Depends(get_cu
             data["paid_date"] = None
 
     result = sb.table("service_jobs").update(data).eq("id", billing_id).execute()
+    recompute_and_persist_metrics(sb, source="supabase_after_billing_update")
     return result.data[0]
 
 
@@ -256,3 +259,4 @@ def update_billing(billing_id: str, payload: BillingUpdate, _user=Depends(get_cu
 def delete_billing(billing_id: str, _user=Depends(get_current_user)):
     sb = get_supabase()
     sb.table("service_jobs").delete().eq("id", billing_id).execute()
+    recompute_and_persist_metrics(sb, source="supabase_after_billing_delete")
