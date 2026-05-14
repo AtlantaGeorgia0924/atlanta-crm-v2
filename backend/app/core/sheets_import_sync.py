@@ -124,6 +124,7 @@ def import_google_sheets_to_supabase(sb) -> dict:
     qty_h = _get_first_match(service_headers, ["QUANTITY", "QTY"])
     expense_h = _get_first_match(service_headers, ["SERVICE EXPENSE", "EXPENSE"])
     notes_h = _get_first_match(service_headers, ["NOTES"])
+    imei_h = _get_first_match(service_headers, ["IMEI", "SERIAL", "SERIAL NUMBER", "DEVICE IMEI", "IMEI NUMBER"])
 
     service_payload = []
     skipped_service_overflow = 0
@@ -143,6 +144,16 @@ def import_google_sheets_to_supabase(sb) -> dict:
             skipped_service_overflow += 1
             continue
 
+        # Preserve IMEI as a clean string; gspread may return numeric-looking values
+        # as floats (e.g. 353956078843009.0) — strip the trailing ".0" so the IMEI
+        # matches what is stored in inventory_items.
+        raw_imei = row.get(imei_h, "") if imei_h else ""
+        imei_str = str(raw_imei).strip()
+        # If gspread returned a float representation, drop the decimal part
+        if imei_str.endswith(".0") and imei_str[:-2].isdigit():
+            imei_str = imei_str[:-2]
+        imei_str = imei_str or None
+
         service_payload.append(
             {
                 "legacy_source_id": f"sheet_import:service:{idx + 1}",
@@ -159,6 +170,7 @@ def import_google_sheets_to_supabase(sb) -> dict:
                 "service_date": _parse_date(row.get(date_h)) if date_h else None,
                 "due_date": _parse_date(row.get(due_h)) if due_h else None,
                 "notes": str(row.get(notes_h) or "").strip() if notes_h else None,
+                "imei": imei_str,
                 "source_updated_at": datetime.utcnow().isoformat(),
             }
         )
@@ -215,11 +227,19 @@ def import_google_sheets_to_supabase(sb) -> dict:
             skipped_inventory_overflow += 1
             continue
 
+        # Same IMEI normalisation for inventory — strip trailing ".0" from floats
+        raw_inv_imei = row.get(sku_h, "") if sku_h else ""
+        inv_imei_str = str(raw_inv_imei).strip()
+        if inv_imei_str.endswith(".0") and inv_imei_str[:-2].isdigit():
+            inv_imei_str = inv_imei_str[:-2]
+        inv_imei_str = inv_imei_str or None
+
         inventory_payload.append(
             {
                 "legacy_source_id": f"sheet_import:inventory:{idx + 1}",
                 "item_name": item_name,
-                "sku": str(row.get(sku_h) or "").strip() if sku_h else None,
+                "sku": inv_imei_str,
+                "imei": inv_imei_str,
                 "category": str(row.get(category_h) or "").strip() if category_h else None,
                 "description": str(row.get(notes_h_inv) or "").strip() if notes_h_inv else None,
                 "quantity": quantity,
