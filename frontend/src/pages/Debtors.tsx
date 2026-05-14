@@ -1,8 +1,7 @@
-import { useState } from 'react'
+import { useState, useDeferredValue } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useForm } from 'react-hook-form'
 import api from '@/lib/api'
-import { useEffect, useDeferredValue } from 'react'
 import Table from '@/components/Table'
 import Modal from '@/components/Modal'
 import LoadingSpinner from '@/components/LoadingSpinner'
@@ -40,8 +39,8 @@ export default function Debtors() {
   const deferredSearch = useDeferredValue(searchInput)
 
   const { data: debtors, isLoading } = useQuery<Debtor[]>({
-    queryKey: ['debtors', search],
-    queryFn: () => api.get('/billing/debtors', { params: { search: search || undefined } }).then((r) => r.data),
+    queryKey: ['debtors', deferredSearch],
+    queryFn: () => api.get('/billing/debtors', { params: { search: deferredSearch || undefined } }).then((r) => r.data),
   })
 
   const { data: status } = useQuery<{ currency?: string }>({
@@ -107,7 +106,7 @@ export default function Debtors() {
           onChange={(e) => setSearchInput(e.target.value)}
           className="form-input w-full"
         />
-        {search && (
+        {searchInput && (
           <p className="text-xs text-gray-500 mt-2">
             Found {debtors?.length ?? 0} result{debtors?.length !== 1 ? 's' : ''}
           </p>
