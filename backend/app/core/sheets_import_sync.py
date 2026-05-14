@@ -1,5 +1,6 @@
 import os
 import re
+import time
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
@@ -48,9 +49,19 @@ def _worksheet_rows(worksheet) -> Tuple[List[Dict[str, str]], int]:
     values = worksheet.get_all_values() if worksheet else []
     if not values:
         return [], 0
-    headers = values[0]
+    # Find the actual header row: first row where the FIRST cell is non-empty
+    # AND at least 5 cells total are non-empty.
+    # This skips title/summary rows that have sparse or right-aligned content.
+    header_idx = 0
+    for i, row in enumerate(values):
+        non_empty = sum(1 for cell in row if str(cell).strip())
+        first_cell_filled = bool(str(row[0]).strip()) if row else False
+        if first_cell_filled and non_empty >= 5:
+            header_idx = i
+            break
+    headers = values[header_idx]
     rows = []
-    for row in values[1:]:
+    for row in values[header_idx + 1:]:
         padded = row + [""] * (len(headers) - len(row))
         record = {headers[i]: padded[i] for i in range(len(headers))}
         if any(str(v).strip() for v in record.values()):
@@ -80,9 +91,24 @@ def _fits_numeric12(value: float) -> bool:
     return abs(float(value)) <= NUMERIC12_MAX
 
 
-def _batch_upsert(sb, table_name: str, rows: List[dict], on_conflict: str, chunk_size: int = 500):
+def _batch_upsert(sb, table_name: str, rows: List[dict], on_conflict: str, chunk_size: int = 200):
     for i in range(0, len(rows), chunk_size):
-        sb.table(table_name).upsert(rows[i : i + chunk_size], on_conflict=on_conflict).execute()
+        chunk = rows[i : i + chunk_size]
+        last_exc = None
+        for attempt in range(3):
+            try:
+                sb.table(table_name).upsert(chunk, on_conflict=on_conflict).execute()
+                break
+            except Exception as e:
+                err_str = str(e)
+                # Retry on transient network/connection errors
+                if any(kw in err_str for kw in ["Broken pipe", "WriteError", "ConnectionError", "SSL", "SSLV3", "reset by peer", "timed out"]):
+                    last_exc = e
+                    time.sleep(1.5 ** attempt)
+                    continue
+                raise
+        else:
+            raise RuntimeError(f"Batch upsert to {table_name} failed after 3 attempts: {last_exc}")
 
 
 def import_google_sheets_to_supabase(sb) -> dict:
@@ -152,6 +178,10 @@ def import_google_sheets_to_supabase(sb) -> dict:
         # If gspread returned a float representation, drop the decimal part
         if imei_str.endswith(".0") and imei_str[:-2].isdigit():
             imei_str = imei_str[:-2]
+        # Reject placeholder values (dots only, dashes only, too short)
+        import re as _re
+        if not _re.search(r'[A-Za-z0-9]', imei_str) or len(imei_str) < 5:
+            imei_str = None
         imei_str = imei_str or None
 
         service_payload.append(
@@ -202,13 +232,13 @@ def import_google_sheets_to_supabase(sb) -> dict:
         )
 
     inventory_headers = list(inventory_rows[0].keys()) if inventory_rows else []
-    item_h = _get_first_match(inventory_headers, ["DESCRIPTION", "DEVICE", "ITEM", "PRODUCT", "MODEL"])
-    sku_h = _get_first_match(inventory_headers, ["IMEI", "SERIAL", "SKU"])
-    category_h = _get_first_match(inventory_headers, ["CATEGORY", "TYPE"])
+    item_h = _get_first_match(inventory_headers, ["DESCRIPTION", "DEVICE", "ITEM", "PRODUCT", "MODEL", "PRODUCT NAME"])
+    sku_h = _get_first_match(inventory_headers, ["IMEI", "SERIAL", "SKU", "SERIAL NUMBER"])
+    category_h = _get_first_match(inventory_headers, ["DEVICE", "CATEGORY", "TYPE"])
     status_h_inv = _get_first_match(inventory_headers, ["PRODUCT STATUS", "STATUS"])
-    cost_h = _get_first_match(inventory_headers, ["COST PRICE", "COST"])
-    sell_h = _get_first_match(inventory_headers, ["SELLING PRICE", "PRICE"])
-    notes_h_inv = _get_first_match(inventory_headers, ["NOTES"])
+    cost_h = _get_first_match(inventory_headers, ["COST PRICE", "COST", "BUY PRICE", "PURCHASE PRICE"])
+    sell_h = _get_first_match(inventory_headers, ["SELLING PRICE", "SELL PRICE", "SALE PRICE", "SOLD PRICE"])
+    notes_h_inv = _get_first_match(inventory_headers, ["INTERNAL NOTE", "NOTES", "NOTE"])
 
     inventory_payload = []
     skipped_inventory_overflow = 0
@@ -232,6 +262,10 @@ def import_google_sheets_to_supabase(sb) -> dict:
         inv_imei_str = str(raw_inv_imei).strip()
         if inv_imei_str.endswith(".0") and inv_imei_str[:-2].isdigit():
             inv_imei_str = inv_imei_str[:-2]
+        # Reject placeholder values
+        import re as _re
+        if not _re.search(r'[A-Za-z0-9]', inv_imei_str) or len(inv_imei_str) < 5:
+            inv_imei_str = None
         inv_imei_str = inv_imei_str or None
 
         inventory_payload.append(
@@ -307,6 +341,7 @@ def import_google_sheets_to_supabase(sb) -> dict:
                 "due_date": due_h,
                 "client": client_h,
                 "service_name": service_h,
+                "imei": imei_h,
             },
             "clients": {
                 "name": client_name_h,
@@ -315,10 +350,11 @@ def import_google_sheets_to_supabase(sb) -> dict:
             },
             "inventory": {
                 "item": item_h,
-                "sku": sku_h,
+                "sku_imei": sku_h,
                 "status": status_h_inv,
                 "cost_price": cost_h,
                 "selling_price": sell_h,
+                "category": category_h,
             },
         },
     }

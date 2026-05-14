@@ -39,7 +39,12 @@ def _is_current_month(value) -> bool:
 
 
 def _norm_imei(value) -> str:
-    return str(value or "").strip().upper()
+    raw = str(value or "").strip().upper()
+    # Reject placeholders that contain no alphanumeric characters or are too short
+    import re as _re
+    if not _re.search(r'[A-Z0-9]', raw) or len(raw) < 5:
+        return ""
+    return raw
 
 
 def compute_metrics_from_supabase(sb) -> dict:
