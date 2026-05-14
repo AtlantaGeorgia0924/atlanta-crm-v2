@@ -144,11 +144,14 @@ def import_google_sheets_to_supabase(sb) -> dict:
     paid_h = _get_first_match(service_headers, ["Amount paid", "PAID", "PAID AMOUNT"])
     status_h = _get_first_match(service_headers, ["STATUS", "PAYMENT STATUS"])
     date_h = _get_first_match(service_headers, ["DATE", "SERVICE DATE", "INVOICE DATE"])
+    paid_date_h = _get_first_match(service_headers, ["PAID DATE"])
     due_h = _get_first_match(service_headers, ["DUE DATE"])
     client_h = _get_first_match(service_headers, ["NAME", "CLIENT", "CLIENT NAME"])
     service_h = _get_first_match(service_headers, ["SERVICE NAME", "DESCRIPTION", "FAULT", "SERVICE"])
     qty_h = _get_first_match(service_headers, ["QUANTITY", "QTY"])
-    expense_h = _get_first_match(service_headers, ["SERVICE EXPENSE", "EXPENSE"])
+    expense_h = _get_first_match(service_headers, ["SERVICE EXPENSE", "EXPENSE", "EXPENSE AMOUNT"])
+    expense_desc_h = _get_first_match(service_headers, ["EXPENSE DESCRIPTION"])
+    expense_date_h = _get_first_match(service_headers, ["EXPENSE DATE"])
     notes_h = _get_first_match(service_headers, ["NOTES"])
     imei_h = _get_first_match(service_headers, ["IMEI", "SERIAL", "SERIAL NUMBER", "DEVICE IMEI", "IMEI NUMBER"])
 
@@ -184,6 +187,14 @@ def import_google_sheets_to_supabase(sb) -> dict:
             imei_str = None
         imei_str = imei_str or None
 
+        # Determine payment status and set paid_at
+        payment_status = _normalized_payment_status(row.get(status_h, "") if status_h else "")
+        paid_date_value = _parse_date(row.get(paid_date_h)) if paid_date_h else None
+        service_date_value = _parse_date(row.get(date_h)) if date_h else None
+        
+        # If status is PAID and we have a paid date, use it; otherwise use service date
+        paid_at_value = paid_date_value if payment_status == "PAID" and paid_date_value else None
+
         service_payload.append(
             {
                 "legacy_source_id": f"sheet_import:service:{idx + 1}",
@@ -192,12 +203,15 @@ def import_google_sheets_to_supabase(sb) -> dict:
                 "description": str(row.get(service_h) or "").strip() if service_h else None,
                 "quantity": quantity or 1.0,
                 "amount_charged": amount_charged,
-                "expense_amount": service_expense,
-                "calculated_profit": paid_amount,
-                "payment_status": _normalized_payment_status(row.get(status_h, "") if status_h else ""),
                 "paid_amount": paid_amount,
-                "paid_date": _parse_date(row.get(date_h)) if date_h else None,
-                "service_date": _parse_date(row.get(date_h)) if date_h else None,
+                "service_expense_amount": service_expense,
+                "service_expense_description": str(row.get(expense_desc_h) or "").strip() if expense_desc_h else None,
+                "service_expense_date": _parse_date(row.get(expense_date_h)) if expense_date_h else None,
+                "calculated_profit": paid_amount,
+                "payment_status": payment_status,
+                "paid_date": paid_date_value,
+                "paid_at": paid_at_value,  # This is the key field for profit calculations
+                "service_date": service_date_value,
                 "due_date": _parse_date(row.get(due_h)) if due_h else None,
                 "notes": str(row.get(notes_h) or "").strip() if notes_h else None,
                 "imei": imei_str,
@@ -280,7 +294,8 @@ def import_google_sheets_to_supabase(sb) -> dict:
                 "unit": "pcs",
                 "cost_price": cost_price,
                 "selling_price": selling_price,
-                "payment_status": normalized_status,
+                "product_status": normalized_status,  # Use product_status instead of payment_status
+                "payment_status": normalized_status,  # Also keep payment_status for backward compatibility
                 "source_updated_at": datetime.utcnow().isoformat(),
             }
         )
