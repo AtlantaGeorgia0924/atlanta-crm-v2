@@ -6,3 +6,8 @@
 **/dist
 **/.venv
 **/*.egg-info
+
+# Explicit local secret/artifact ignores
+backend/credentials.json
+.env
+.DS_Store
