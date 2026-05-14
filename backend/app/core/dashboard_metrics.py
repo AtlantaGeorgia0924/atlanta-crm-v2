@@ -6,6 +6,8 @@ from app.core.financials import compute_outstanding, to_number
 
 logger = logging.getLogger(__name__)
 
+ACCOUNTING_START_AT = datetime(2026, 5, 1, tzinfo=timezone.utc)
+
 
 def _fetch_all_rows(sb, table_name: str, select_clause: str, batch_size: int = 1000) -> list[dict]:
     rows: list[dict] = []
@@ -194,7 +196,12 @@ def compute_metrics_from_supabase(sb) -> dict:
         total_outstanding += outstanding
         total_service_expenses += service_expense
 
-        include_profit = (status == "PAID") and (paid_at is not None) and (not is_reversed)
+        include_profit = (
+            (status == "PAID")
+            and (paid_at is not None)
+            and (paid_at >= ACCOUNTING_START_AT)
+            and (not is_reversed)
+        )
 
         if include_profit and imei:
             if imei in imei_inventory_map:
