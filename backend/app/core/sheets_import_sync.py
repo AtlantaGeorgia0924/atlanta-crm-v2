@@ -256,14 +256,33 @@ def import_google_sheets_to_supabase(sb) -> dict:
     sb.table("inventory_items").delete().ilike("legacy_source_id", "sheet_import:inventory:%").execute()
     sb.table("clients").delete().ilike("id", "sheet_import:client:%").execute()
 
+    imei_col_missing = False
     if service_payload:
-        _batch_upsert(sb, "service_jobs", service_payload, on_conflict="legacy_source_id")
+        try:
+            _batch_upsert(sb, "service_jobs", service_payload, on_conflict="legacy_source_id")
+        except Exception as e:
+            # PGRST204 means the column doesn't exist yet in the schema cache
+            if "PGRST204" in str(e) and "imei" in str(e):
+                imei_col_missing = True
+                stripped = [{k: v for k, v in r.items() if k != "imei"} for r in service_payload]
+                _batch_upsert(sb, "service_jobs", stripped, on_conflict="legacy_source_id")
+            else:
+                raise
     if inventory_payload:
-        _batch_upsert(sb, "inventory_items", inventory_payload, on_conflict="legacy_source_id")
+        try:
+            _batch_upsert(sb, "inventory_items", inventory_payload, on_conflict="legacy_source_id")
+        except Exception as e:
+            if "PGRST204" in str(e) and "imei" in str(e):
+                imei_col_missing = True
+                stripped = [{k: v for k, v in r.items() if k != "imei"} for r in inventory_payload]
+                _batch_upsert(sb, "inventory_items", stripped, on_conflict="legacy_source_id")
+            else:
+                raise
     if clients_payload:
         _batch_upsert(sb, "clients", clients_payload, on_conflict="id")
 
     return {
+        "imei_col_missing": imei_col_missing,
         "sheets_read": ["Sheet1 (Services)", "CLIENT DIRECTORY", "Sheet1 (Inventory)"],
         "rows_processed": {
             "Sheet1 (Services)": service_count,
