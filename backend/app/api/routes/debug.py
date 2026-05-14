@@ -420,3 +420,110 @@ def debug_imei_matching():
             "matched_with_missing_cost_price": len(matched_missing_cost),
         },
     }
+
+
+@router.get("/metrics-validation")
+def get_metrics_validation(_user=Depends(get_current_user)):
+    """
+    Returns detailed metrics calculation results for validation.
+    
+    Helps verify that dashboard calculations match spreadsheet values.
+    """
+    from datetime import datetime, timezone
+    
+    sb = get_supabase()
+    
+    try:
+        metrics = compute_metrics_from_supabase(sb)
+    except Exception as e:
+        return {"error": str(e), "status": "failed"}
+    
+    financial = metrics.get("financial", {})
+    dashboard = metrics.get("dashboard", {})
+    
+    return {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "financial_metrics": {
+            "profit_seen_this_week": financial.get("profit_seen_this_week"),
+            "profit_seen_this_month": financial.get("profit_seen_this_month"),
+            "total_sales_collected_this_month": financial.get("total_sales_collected_this_month"),
+            "total_outstanding": financial.get("total_outstanding"),
+            "expenses_of_the_week": financial.get("expenses_of_the_week"),
+            "expenses_of_the_month": financial.get("expenses_of_the_month"),
+            "net_profit_of_the_week": financial.get("net_profit_of_the_week"),
+            "net_profit_of_the_month": financial.get("net_profit_of_the_month"),
+        },
+        "dashboard_metrics": {
+            "total_invoices": dashboard.get("total_invoices"),
+            "total_collected": dashboard.get("total_collected"),
+            "total_outstanding": dashboard.get("total_outstanding"),
+            "amount_owed": dashboard.get("amount_owed"),
+            "gross_profit": dashboard.get("gross_profit"),
+            "net_profit": dashboard.get("net_profit"),
+        },
+        "calculation_details": {
+            "inventory_matched_by_imei": dashboard.get("inventory_matched_count", 0),
+            "skipped_missing_cost_price": dashboard.get("skipped_missing_cost_price", 0),
+            "unmatched_imei_count": dashboard.get("unmatched_imei_count", 0),
+            "service_profit_total": dashboard.get("service_profit_total", 0),
+            "inventory_profit_total": dashboard.get("inventory_profit_total", 0),
+        }
+    }
+
+
+@router.post("/recalculate-metrics")
+def recalculate_metrics(_user=Depends(get_current_user)):
+    """
+    Force immediate recalculation of all metrics and return results.
+    
+    Useful for testing metric calculations without UI refresh.
+    """
+    from datetime import datetime, timezone
+    
+    sb = get_supabase()
+    
+    try:
+        from app.core.metrics_refresh import recompute_and_persist_metrics
+        metrics = recompute_and_persist_metrics(sb, source="debug_recalculate")
+    except Exception as e:
+        return {"error": str(e), "status": "failed"}
+    
+    financial = metrics.get("financial", {})
+    
+    return {
+        "status": "recalculated",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "key_metrics": {
+            "profit_seen_this_week": financial.get("profit_seen_this_week"),
+            "profit_seen_this_month": financial.get("profit_seen_this_month"),
+            "total_sales_collected_this_month": financial.get("total_sales_collected_this_month"),
+            "total_outstanding": financial.get("total_outstanding"),
+        }
+    }
+
+
+@router.get("/cache-status")
+def get_cache_status(_user=Depends(get_current_user)):
+    """
+    Return the current cached metric values from app_settings.
+    
+    Shows what the UI is displaying vs. what's computed.
+    """
+    sb = get_supabase()
+    
+    try:
+        settings = sb.table("app_settings").select("key,value").execute().data or []
+    except Exception as e:
+        return {"error": str(e), "status": "failed"}
+    
+    # Build cache dict
+    cache = {}
+    for setting in settings:
+        key = setting.get("key", "")
+        if any(x in key for x in ["profit", "expense", "collected", "outstanding", "last_"]):
+            cache[key] = setting.get("value")
+    
+    return {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "cache": cache
+    }

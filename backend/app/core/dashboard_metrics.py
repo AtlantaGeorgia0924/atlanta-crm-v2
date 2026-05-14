@@ -203,35 +203,50 @@ def compute_metrics_from_supabase(sb) -> dict:
             and (not is_reversed)
         )
 
-        if include_profit and imei:
-            if imei in imei_inventory_map:
-                inventory_matched_count += 1
-                cost_price = to_number(imei_inventory_map[imei].get("cost_price"))
-                item_expense = to_number(imei_inventory_map[imei].get("item_expense_amount"))
-                if cost_price <= 0:
-                    skipped_missing_cost_price += 1
-                    logger.warning(
-                        "Skipping IMEI sale due to missing/zero cost_price for service row id=%s imei=%s",
-                        row.get("id"),
-                        imei,
-                    )
-                    continue
+        # Try to match to inventory by IMEI for product profit calculation
+        matched_inventory = None
+        if include_profit and imei and imei in imei_inventory_map:
+            matched_inventory = imei_inventory_map[imei]
+            inventory_matched_count += 1
+
+        if matched_inventory:
+            # Product profit: paid - cost_price - item_expense
+            cost_price = to_number(matched_inventory.get("cost_price"))
+            item_expense = to_number(matched_inventory.get("item_expense_amount"))
+            
+            if cost_price <= 0:
+                # Skip from profit calculation if cost_price is missing or zero
+                skipped_missing_cost_price += 1
+                logger.warning(
+                    "Skipping IMEI sale due to missing/zero cost_price for service row id=%s imei=%s",
+                    row.get("id"),
+                    imei,
+                )
             else:
-                unmatched_imei_count += 1
-                logger.warning("No inventory IMEI match for service row id=%s imei=%s; excluding from inventory profit", row.get("id"), imei)
-                continue
-            row_profit = paid - cost_price - item_expense
-            inventory_profit_total += row_profit
-            if week_start <= paid_at < week_end:
-                profit_seen_this_week += row_profit
-            if month_start <= paid_at < month_end:
-                profit_seen_this_month += row_profit
+                # Include in inventory profit
+                row_profit = paid - cost_price - item_expense
+                inventory_profit_total += row_profit
+                if include_profit and week_start <= paid_at < week_end:
+                    profit_seen_this_week += row_profit
+                if include_profit and month_start <= paid_at < month_end:
+                    profit_seen_this_month += row_profit
         elif include_profit:
-            service_profit_total += service_profit
+            # Service profit: paid - service_expense (no IMEI match or no IMEI)
+            # Use service_profit field if available, otherwise calculate from paid - expense
+            if service_profit and service_profit > 0:
+                calc_profit = service_profit
+            else:
+                calc_profit = paid - service_expense
+            
+            service_profit_total += calc_profit
             if week_start <= paid_at < week_end:
-                profit_seen_this_week += service_profit
+                profit_seen_this_week += calc_profit
             if month_start <= paid_at < month_end:
-                profit_seen_this_month += service_profit
+                profit_seen_this_month += calc_profit
+        
+        # Track unmatched IMEIs for diagnostics
+        if include_profit and imei and imei not in imei_inventory_map:
+            unmatched_imei_count += 1
 
         if _is_unpaid(status):
             total_unpaid += 1
