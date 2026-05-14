@@ -110,7 +110,7 @@ def compute_metrics_from_supabase(sb) -> dict:
     inventory = _fetch_all_rows(
         sb,
         "inventory_items",
-        "id,item_name,product_status,payment_status,imei,sku,cost_price",
+        "id,item_name,payment_status,imei,sku,cost_price",
     )
 
     try:

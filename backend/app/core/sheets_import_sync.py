@@ -294,7 +294,6 @@ def import_google_sheets_to_supabase(sb) -> dict:
                 "unit": "pcs",
                 "cost_price": cost_price,
                 "selling_price": selling_price,
-                "product_status": normalized_status,  # Use product_status instead of payment_status
                 "payment_status": normalized_status,  # Also keep payment_status for backward compatibility
                 "source_updated_at": datetime.utcnow().isoformat(),
             }
