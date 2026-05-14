@@ -98,19 +98,23 @@ def _norm_imei(value) -> str:
     return normalized
 
 
+def _is_sheet_import_row(row: dict, prefix: str) -> bool:
+    return str(row.get("legacy_source_id") or "").startswith(prefix)
+
+
 def compute_metrics_from_supabase(sb) -> dict:
     clients = _fetch_all_rows(sb, "clients", "id")
 
     services = _fetch_all_rows(
         sb,
         "service_jobs",
-        "id,client_name,amount_charged,paid_amount,payment_status,service_date,paid_at,paid_date,is_return,service_expense_amount,expense_amount,imei",
+        "id,legacy_source_id,client_name,amount_charged,paid_amount,payment_status,service_date,paid_at,paid_date,is_return,service_expense_amount,expense_amount,imei",
     )
 
     inventory = _fetch_all_rows(
         sb,
         "inventory_items",
-        "id,item_name,payment_status,imei,sku,cost_price",
+        "id,legacy_source_id,item_name,payment_status,imei,sku,cost_price",
     )
 
     try:
@@ -131,6 +135,8 @@ def compute_metrics_from_supabase(sb) -> dict:
     # Maps normalised IMEI/SKU → cost_price (0 if missing)
     imei_cost_map: dict[str, float] = {}
     for inv in inventory:
+        if not _is_sheet_import_row(inv, "sheet_import:inventory:"):
+            continue
         cost_price = to_number(inv.get("cost_price"))
         for candidate in (inv.get("imei"), inv.get("sku")):
             key = _norm_imei(candidate)
@@ -153,6 +159,8 @@ def compute_metrics_from_supabase(sb) -> dict:
     skipped_missing_cost = 0
 
     for row in services:
+        if not _is_sheet_import_row(row, "sheet_import:service:"):
+            continue
         total = to_number(row.get("amount_charged"))
         paid = to_number(row.get("paid_amount"))
         status = _norm(row.get("payment_status"))
@@ -165,10 +173,13 @@ def compute_metrics_from_supabase(sb) -> dict:
         total_sales += total
         total_collected += paid
 
-        # Outstanding: only UNPAID + PART PAYMENT rows
-        if _is_partial_or_unpaid(status):
-            amount_owed += max(0.0, total - paid)
-            total_outstanding += max(0.0, total - paid)
+        # Outstanding: only UNPAID + PART PAYMENT rows from the accounting period, excluding returns
+        if _is_partial_or_unpaid(status) and not is_reversed:
+            service_dt = _parse_dt(row.get("service_date"))
+            in_period = service_dt is None or service_dt >= ACCOUNTING_START_AT
+            if in_period:
+                amount_owed += max(0.0, total - paid)
+                total_outstanding += max(0.0, total - paid)
         if _is_unpaid(status):
             total_unpaid += 1
         if _is_current_month(row.get("service_date")):
@@ -185,7 +196,7 @@ def compute_metrics_from_supabase(sb) -> dict:
             continue
 
         # Total sales collected this month counts all qualifying PAID rows
-        if month_start <= paid_at < month_end:
+        if paid_at >= month_start:
             total_sales_collected_this_month += paid
 
         # ── Determine profit type ──────────────────────────────────────────
@@ -218,7 +229,7 @@ def compute_metrics_from_supabase(sb) -> dict:
 
         if week_start <= paid_at < week_end:
             profit_seen_this_week += row_profit
-        if month_start <= paid_at < month_end:
+        if paid_at >= month_start:
             profit_seen_this_month += row_profit
 
     # ── Inventory product-status counts (dashboard only) ─────────────────────
@@ -227,6 +238,8 @@ def compute_metrics_from_supabase(sb) -> dict:
     low_quality_stock = 0
 
     for row in inventory:
+        if not _is_sheet_import_row(row, "sheet_import:inventory:"):
+            continue
         prod_status = _norm(row.get("product_status") or row.get("payment_status"))
         if prod_status == "AVAILABLE":
             available_products += 1
@@ -394,17 +407,19 @@ def compute_profit_ledger(sb) -> dict:
     services = _fetch_all_rows(
         sb,
         "service_jobs",
-        "id,client_name,amount_charged,paid_amount,payment_status,paid_at,paid_date,is_return,service_expense_amount,expense_amount,imei",
+        "id,legacy_source_id,client_name,amount_charged,paid_amount,payment_status,paid_at,paid_date,is_return,service_expense_amount,expense_amount,imei",
     )
     inventory = _fetch_all_rows(
         sb,
         "inventory_items",
-        "id,item_name,imei,sku,cost_price",
+        "id,legacy_source_id,item_name,imei,sku,cost_price",
     )
 
     # Build IMEI → cost_price map
     imei_cost_map: dict[str, float] = {}
     for inv in inventory:
+        if not _is_sheet_import_row(inv, "sheet_import:inventory:"):
+            continue
         cost_price = to_number(inv.get("cost_price"))
         for candidate in (inv.get("imei"), inv.get("sku")):
             key = _norm_imei(candidate)
@@ -416,6 +431,8 @@ def compute_profit_ledger(sb) -> dict:
     excluded_rows: list[dict] = []
 
     for row in services:
+        if not _is_sheet_import_row(row, "sheet_import:service:"):
+            continue
         paid = to_number(row.get("paid_amount"))
         status = _norm(row.get("payment_status"))
         expense = to_number(row.get("service_expense_amount")) or to_number(row.get("expense_amount"))
@@ -463,7 +480,7 @@ def compute_profit_ledger(sb) -> dict:
                         "cost_price": cost_price,
                         "expense_amount": expense,
                         "computed_profit": None,
-                        "exclusion_reason": "IMEI matched but cost_price=0 or missing",
+                        "exclusion_reason": "imei present but cost price missing",
                     })
                     continue
                 profit = paid - cost_price - expense
@@ -479,7 +496,7 @@ def compute_profit_ledger(sb) -> dict:
                     "cost_price": None,
                     "expense_amount": expense,
                     "computed_profit": None,
-                    "exclusion_reason": f"IMEI={imei} not found in inventory",
+                    "exclusion_reason": "imei present but no inventory match",
                 })
                 continue
         else:
@@ -488,7 +505,7 @@ def compute_profit_ledger(sb) -> dict:
             inclusion_reason = f"service: paid_amount({paid}) - expense({expense})"
 
         in_week = week_start <= paid_at < week_end
-        in_month = month_start <= paid_at < month_end
+        in_month = paid_at >= month_start
 
         entry = {
             "source": "service_job",
