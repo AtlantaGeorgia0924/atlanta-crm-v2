@@ -13,6 +13,7 @@ from app.core.config import settings as app_settings
 from app.core.cashflow_sheet_sync import read_sheet_id
 from app.core.metrics_refresh import recompute_and_persist_metrics
 from app.core.sheets_import_sync import import_google_sheets_to_supabase
+from app.core.service_normalization import normalize_service_jobs_data
 
 router = APIRouter()
 
@@ -217,6 +218,9 @@ def refresh_from_google_sheets(_user=Depends(get_current_user)):
     else:
         raise HTTPException(500, f"Google Sheets refresh failed after 3 attempts (SSL/network error): {str(last_exc)}")
 
+    # Normalize all service_jobs data (payment status, amounts, dates, returns)
+    normalization_result = normalize_service_jobs_data(sb)
+
     try:
         metrics = recompute_and_persist_metrics(sb, source="supabase_after_sheet_import")
     except Exception as e:
@@ -231,6 +235,7 @@ def refresh_from_google_sheets(_user=Depends(get_current_user)):
         "refreshed_at": refreshed_at,
         "source": "google_sheets_import",
         **import_result,
+        "normalization": normalization_result,
         "values_calculated": metrics,
     }
 
@@ -256,6 +261,8 @@ def reset_imported_data_and_rebuild(_user=Depends(get_current_user)):
         cache_clear = _clear_cached_financial_metrics(sb)
 
         import_result = import_google_sheets_to_supabase(sb)
+        # Normalize all service_jobs data (payment status, amounts, dates, returns)
+        normalization_result = normalize_service_jobs_data(sb)
         metrics = recompute_and_persist_metrics(sb, source="reset_imported_data_rebuild")
     except Exception as e:
         raise HTTPException(500, f"Reset imported data and rebuild failed: {str(e)}")
