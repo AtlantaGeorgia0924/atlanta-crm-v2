@@ -25,7 +25,7 @@ const nav = [
 export default function Layout() {
   const { clear, user } = useAuthStore()
   const navigate = useNavigate()
-  const [pendingAction, setPendingAction] = useState<'refresh' | 'refreshSupabase' | 'sync' | null>(null)
+  const [pendingAction, setPendingAction] = useState<'refreshSheets' | 'refreshWorkspace' | 'sync' | null>(null)
   const [countdown, setCountdown] = useState(5)
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [logoFailed, setLogoFailed] = useState(false)
@@ -40,11 +40,11 @@ export default function Layout() {
   }, [pendingAction])
 
   const warningText = useMemo(() => {
-    if (pendingAction === 'refresh') {
-      return 'This will reload dashboard metrics from Google Sheets only. Continue?'
+    if (pendingAction === 'refreshSheets') {
+      return 'This will import latest Services, Inventory and Clients from Google Sheets into Supabase. Continue?'
     }
-    if (pendingAction === 'refreshSupabase') {
-      return 'This will recalculate dashboard metrics from Supabase only (no Google Sheets). Continue?'
+    if (pendingAction === 'refreshWorkspace') {
+      return 'This will recalculate dashboard and financial metrics from Supabase only. Continue?'
     }
     if (pendingAction === 'sync') {
       return 'This will overwrite the selected Google Sheets with the latest Supabase data. Continue?'
@@ -57,12 +57,17 @@ export default function Layout() {
     navigate('/login')
   }
 
-  const handleRefresh = async () => {
+  const handleRefreshFromSheets = async () => {
     try {
-      const { data } = await api.post('/sync/refresh-workspace')
+      const { data } = await api.post('/sync/refresh-from-google-sheets')
       const sheetsRead = Array.isArray(data?.sheets_read) ? data.sheets_read.join(', ') : ''
       const rowsProcessed = data?.rows_processed && typeof data.rows_processed === 'object'
         ? Object.entries(data.rows_processed)
+            .map(([name, count]) => `${name}: ${count}`)
+            .join(' | ')
+        : ''
+      const rowsUpserted = data?.rows_upserted && typeof data.rows_upserted === 'object'
+        ? Object.entries(data.rows_upserted)
             .map(([name, count]) => `${name}: ${count}`)
             .join(' | ')
         : ''
@@ -74,17 +79,18 @@ export default function Layout() {
       toast.success([
         sheetsRead ? `sheets read: ${sheetsRead}` : '',
         rowsProcessed ? `rows processed: ${rowsProcessed}` : '',
+        rowsUpserted ? `rows upserted: ${rowsUpserted}` : '',
         valuesCalculated ? `values calculated: ${valuesCalculated}` : '',
-      ].filter(Boolean).join(' • ') || 'Workspace refreshed')
+      ].filter(Boolean).join(' • ') || 'Google Sheets imported')
       window.location.reload()
     } catch (e: any) {
-      toast.error(e?.response?.data?.detail ?? 'Refresh failed')
+      toast.error(e?.response?.data?.detail ?? 'Google Sheets refresh failed')
     }
   }
 
-  const handleRefreshSupabase = async () => {
+  const handleRefreshWorkspace = async () => {
     try {
-      const { data } = await api.post('/sync/refresh-supabase')
+      const { data } = await api.post('/sync/refresh-workspace')
       const valuesCalculated = data?.values_calculated && typeof data.values_calculated === 'object'
         ? Object.entries(data.values_calculated)
             .map(([name, value]) => `${name}: ${typeof value === 'object' ? JSON.stringify(value) : value}`)
@@ -93,7 +99,7 @@ export default function Layout() {
       toast.success(valuesCalculated || 'Workspace refreshed from Supabase')
       window.location.reload()
     } catch (e: any) {
-      toast.error(e?.response?.data?.detail ?? 'Supabase refresh failed')
+      toast.error(e?.response?.data?.detail ?? 'Workspace refresh failed')
     }
   }
 
@@ -122,10 +128,10 @@ export default function Layout() {
     if (!pendingAction) return
     setIsSubmitting(true)
     try {
-      if (pendingAction === 'refresh') {
-        await handleRefresh()
-      } else if (pendingAction === 'refreshSupabase') {
-        await handleRefreshSupabase()
+      if (pendingAction === 'refreshSheets') {
+        await handleRefreshFromSheets()
+      } else if (pendingAction === 'refreshWorkspace') {
+        await handleRefreshWorkspace()
       } else {
         await handleSync()
       }
@@ -179,11 +185,11 @@ export default function Layout() {
         </nav>
 
         <div className="px-2 pb-4 space-y-1 border-t pt-3" style={{ borderColor: '#3b3b3b' }}>
-          <button onClick={() => setPendingAction('refresh')} className="flex items-center gap-3 w-full rounded-lg px-3 py-2 text-sm text-gray-200 hover:text-black transition-colors hover:bg-[#D4AF37]">
-            <RefreshCw size={16} /> Refresh Workspace
+          <button onClick={() => setPendingAction('refreshSheets')} className="flex items-center gap-3 w-full rounded-lg px-3 py-2 text-sm text-gray-200 hover:text-black transition-colors hover:bg-[#D4AF37]">
+            <RefreshCw size={16} /> Refresh from Google Sheets
           </button>
-          <button onClick={() => setPendingAction('refreshSupabase')} className="flex items-center gap-3 w-full rounded-lg px-3 py-2 text-sm text-gray-200 hover:text-black transition-colors hover:bg-[#D4AF37]">
-            <RefreshCw size={16} /> Refresh from Supabase
+          <button onClick={() => setPendingAction('refreshWorkspace')} className="flex items-center gap-3 w-full rounded-lg px-3 py-2 text-sm text-gray-200 hover:text-black transition-colors hover:bg-[#D4AF37]">
+            <RefreshCw size={16} /> Refresh Workspace
           </button>
           <button onClick={() => setPendingAction('sync')} className="flex items-center gap-3 w-full rounded-lg px-3 py-2 text-sm text-gray-200 hover:text-black transition-colors hover:bg-[#D4AF37]">
             <Sheet size={16} /> Sync to Google Sheets
