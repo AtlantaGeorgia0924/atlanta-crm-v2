@@ -19,6 +19,9 @@ interface Debtor {
   balance: number
   status: string
   due_date: string
+  billing_row_id?: string
+  row_count?: number
+  source_row_ids?: string[]
 }
 
 interface PaymentForm {
@@ -48,7 +51,7 @@ export default function Debtors() {
 
   const applyMutation = useMutation({
     mutationFn: (values: PaymentForm) =>
-      api.post('/payments', { billing_row_id: selectedRow!.id, ...values }),
+      api.post('/payments', { billing_row_id: selectedRow!.billing_row_id || selectedRow!.id, ...values }),
     onSuccess: () => {
       toast.success('Payment applied')
       qc.invalidateQueries({ queryKey: ['debtors'] })
@@ -75,10 +78,9 @@ export default function Debtors() {
       render: (r: Debtor) => (
         <button
           onClick={() => { setSelectedRow(r); reset({ payment_date: new Date().toISOString().slice(0, 10) }) }}
-          disabled={r.row_type === 'inventory'}
           className="btn-primary py-1 px-2 text-xs"
         >
-          <DollarSign size={13} /> {r.row_type === 'inventory' ? 'Inventory Due' : 'Apply Payment'}
+          <DollarSign size={13} /> Apply Payment
         </button>
       ),
     },
@@ -104,6 +106,7 @@ export default function Debtors() {
         >
           <div className="mb-4 p-3 bg-gray-50 rounded-lg text-sm">
             <p><span className="font-medium">Service:</span> {selectedRow.service_name}</p>
+            <p><span className="font-medium">Invoices in Group:</span> {selectedRow.row_count ?? 1}</p>
             <p><span className="font-medium">Outstanding:</span> <span className="text-red-600 font-semibold">{formatCurrency(selectedRow.balance, currency)}</span></p>
           </div>
           <form onSubmit={handleSubmit((v) => applyMutation.mutate(v))} className="space-y-4">

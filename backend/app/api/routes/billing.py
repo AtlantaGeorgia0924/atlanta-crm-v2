@@ -9,6 +9,7 @@ from app.core.financials import (
     compute_payment_status,
     to_number,
 )
+from app.core.debtors import compute_debtors_from_supabase
 from app.core.metrics_refresh import recompute_and_persist_metrics
 
 router = APIRouter()
@@ -126,32 +127,13 @@ def list_billing(
 
 @router.get("/debtors")
 def list_debtors(_user=Depends(get_current_user)):
-    """All billing rows with outstanding balances."""
+    """Grouped debtor balances calculated dynamically from live service rows."""
     sb = get_supabase()
-    result = (
-        sb.table("service_jobs")
-        .select("*")
-        .order("due_date")
-        .execute()
-    )
-    rows = []
-    for row in (result.data or []):
-        total = to_number(row.get("amount_charged"))
-        paid = to_number(row.get("paid_amount"))
-        outstanding = compute_outstanding(total, paid)
-        status_value = compute_payment_status(total, paid)
-        if not (outstanding > 0 or status_value in {"UNPAID", "PARTIAL"}):
-            continue
-        row["total_amount"] = total
-        row["amount_paid"] = paid
-        row["balance"] = outstanding
-        row["status"] = status_value.lower()
-        row["service_name"] = _best_service_name(row)
-        row["row_type"] = "service"
-        rows.append(row)
-
-    rows.sort(key=lambda x: x.get("due_date") or "")
-    return rows
+    debtors = compute_debtors_from_supabase(sb)
+    grouped_rows = debtors["grouped_clients"]
+    for row in grouped_rows:
+        row["service_name"] = row.get("service_name") or "Outstanding invoices"
+    return grouped_rows
 
 
 @router.get("/{billing_id}")

@@ -5,7 +5,11 @@ import re
 from fastapi import APIRouter, Depends
 from app.db.supabase_client import get_supabase
 from app.core.dashboard_metrics import compute_metrics_from_supabase, compute_profit_ledger, _norm_imei
+from app.core.cashflow_sheet_sync import read_sheet_id
+from app.core.config import settings as app_settings
 from app.core.auth import get_current_user
+from app.core.financials import to_number
+from app.core.debtors import compute_debtors_from_supabase
 
 router = APIRouter(tags=["Debug"])
 
@@ -475,6 +479,27 @@ def get_profit_ledger(_user=Depends(get_current_user)):
         return compute_profit_ledger(sb)
     except Exception as e:
         return {"error": str(e), "status": "failed"}
+
+
+@router.get("/debtors-validation")
+def get_debtors_validation(_user=Depends(get_current_user)):
+    """
+    Return detailed debtors calculation results from the live database.
+    """
+    sb = get_supabase()
+    try:
+        debtors = compute_debtors_from_supabase(sb)
+    except Exception as e:
+        return {"error": str(e), "status": "failed"}
+
+    return {
+        "total_amount_owed": debtors["total_amount_owed"],
+        "included_rows": debtors["included_rows"],
+        "excluded_rows": debtors["excluded_rows"],
+        "grouped_clients": debtors["grouped_clients"],
+        "included_count": len(debtors["included_rows"]),
+        "excluded_count": len(debtors["excluded_rows"]),
+    }
 
 
 @router.post("/recalculate-metrics")
