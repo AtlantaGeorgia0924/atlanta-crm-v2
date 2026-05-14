@@ -104,13 +104,13 @@ def compute_metrics_from_supabase(sb) -> dict:
     services = _fetch_all_rows(
         sb,
         "service_jobs",
-        "id,client_name,amount_charged,paid_amount,payment_status,service_date,paid_at,paid_date,is_return,service_expense_amount,expense_amount",
+        "id,client_name,amount_charged,paid_amount,payment_status,service_date,paid_at,paid_date,is_return,service_expense_amount,expense_amount,imei",
     )
 
     inventory = _fetch_all_rows(
         sb,
         "inventory_items",
-        "id,item_name,product_status,payment_status,paid_at,paid_date,is_return,cost_price,selling_price,item_expense_amount,expense_amount",
+        "id,item_name,product_status,payment_status,imei,sku,cost_price",
     )
 
     try:
@@ -127,6 +127,16 @@ def compute_metrics_from_supabase(sb) -> dict:
     week_start, week_end = _week_bounds_utc(now_utc)
     month_start, month_end = _month_bounds_utc(now_utc)
 
+    # ── Build IMEI → cost_price lookup from inventory ─────────────────────────
+    # Maps normalised IMEI/SKU → cost_price (0 if missing)
+    imei_cost_map: dict[str, float] = {}
+    for inv in inventory:
+        cost_price = to_number(inv.get("cost_price"))
+        for candidate in (inv.get("imei"), inv.get("sku")):
+            key = _norm_imei(candidate)
+            if key and key not in imei_cost_map:
+                imei_cost_map[key] = cost_price
+
     # ── Service Jobs ──────────────────────────────────────────────────────────
     total_invoices = 0
     total_unpaid = 0
@@ -135,56 +145,86 @@ def compute_metrics_from_supabase(sb) -> dict:
     total_sales = 0.0
     total_collected = 0.0
     total_outstanding = 0.0
+    product_profit_total = 0.0
     service_profit_total = 0.0
     profit_seen_this_week = 0.0
     profit_seen_this_month = 0.0
     total_sales_collected_this_month = 0.0
+    skipped_missing_cost = 0
 
     for row in services:
         total = to_number(row.get("amount_charged"))
         paid = to_number(row.get("paid_amount"))
         status = _norm(row.get("payment_status"))
-        outstanding = compute_outstanding(total, paid)
-        # prefer service_expense_amount; fall back to expense_amount
-        service_expense = to_number(row.get("service_expense_amount")) or to_number(row.get("expense_amount"))
+        expense = to_number(row.get("service_expense_amount")) or to_number(row.get("expense_amount"))
         paid_at = _parse_dt(row.get("paid_at") or row.get("paid_date"))
         is_reversed = bool(row.get("is_return"))
+        imei = _norm_imei(row.get("imei"))
 
         total_invoices += 1
         total_sales += total
         total_collected += paid
-        total_outstanding += outstanding
 
-        include_profit = (
+        # Outstanding: only UNPAID + PART PAYMENT rows
+        if _is_partial_or_unpaid(status):
+            amount_owed += max(0.0, total - paid)
+            total_outstanding += max(0.0, total - paid)
+        if _is_unpaid(status):
+            total_unpaid += 1
+        if _is_current_month(row.get("service_date")):
+            monthly_sales += paid
+
+        # Profit inclusion gate
+        include = (
             status == "PAID"
             and paid_at is not None
             and paid_at >= ACCOUNTING_START_AT
             and not is_reversed
         )
+        if not include:
+            continue
 
-        if include_profit:
-            # Service profit rule: paid_amount - service_expense_amount
-            row_profit = paid - service_expense
+        # Total sales collected this month counts all qualifying PAID rows
+        if month_start <= paid_at < month_end:
+            total_sales_collected_this_month += paid
+
+        # ── Determine profit type ──────────────────────────────────────────
+        if imei:
+            # Product profit: service row matched to inventory by IMEI
+            if imei in imei_cost_map:
+                cost_price = imei_cost_map[imei]
+                if cost_price <= 0:
+                    # IMEI matched but cost_price missing/zero → exclude from profit
+                    skipped_missing_cost += 1
+                    logger.warning(
+                        "Excluding row id=%s imei=%s: cost_price=%s",
+                        row.get("id"), imei, cost_price,
+                    )
+                    continue
+                row_profit = paid - cost_price - expense
+                product_profit_total += row_profit
+            else:
+                # IMEI present but not found in inventory → exclude from profit
+                skipped_missing_cost += 1
+                logger.warning(
+                    "Excluding row id=%s imei=%s: not found in inventory",
+                    row.get("id"), imei,
+                )
+                continue
+        else:
+            # Service profit: no IMEI
+            row_profit = paid - expense
             service_profit_total += row_profit
 
-            if week_start <= paid_at < week_end:
-                profit_seen_this_week += row_profit
-            if month_start <= paid_at < month_end:
-                profit_seen_this_month += row_profit
-                total_sales_collected_this_month += paid
+        if week_start <= paid_at < week_end:
+            profit_seen_this_week += row_profit
+        if month_start <= paid_at < month_end:
+            profit_seen_this_month += row_profit
 
-        if _is_unpaid(status):
-            total_unpaid += 1
-        if _is_partial_or_unpaid(status):
-            amount_owed += outstanding
-        if _is_current_month(row.get("service_date")):
-            monthly_sales += paid
-
-    # ── Inventory Items ───────────────────────────────────────────────────────
+    # ── Inventory product-status counts (dashboard only) ─────────────────────
     available_products = 0
     pending_products = 0
     low_quality_stock = 0
-    inventory_profit_total = 0.0
 
     for row in inventory:
         prod_status = _norm(row.get("product_status") or row.get("payment_status"))
@@ -195,33 +235,7 @@ def compute_metrics_from_supabase(sb) -> dict:
         elif prod_status == "LOW QUALITY":
             low_quality_stock += 1
 
-        paid_at = _parse_dt(row.get("paid_at") or row.get("paid_date"))
-        is_reversed = bool(row.get("is_return"))
-        # payment_status or product_status drives inclusion
-        pay_status = _norm(row.get("payment_status") or row.get("product_status"))
-
-        include_profit = (
-            pay_status == "PAID"
-            and paid_at is not None
-            and paid_at >= ACCOUNTING_START_AT
-            and not is_reversed
-        )
-
-        if include_profit:
-            selling_price = to_number(row.get("selling_price"))
-            cost_price = to_number(row.get("cost_price"))
-            item_expense = to_number(row.get("item_expense_amount")) or to_number(row.get("expense_amount"))
-
-            if cost_price > 0 or selling_price > 0:
-                # Product profit rule: selling_price - cost_price - item_expense_amount
-                row_profit = selling_price - cost_price - item_expense
-                inventory_profit_total += row_profit
-
-                if week_start <= paid_at < week_end:
-                    profit_seen_this_week += row_profit
-                if month_start <= paid_at < month_end:
-                    profit_seen_this_month += row_profit
-                    total_sales_collected_this_month += selling_price
+    inventory_profit_total = product_profit_total  # alias for return dict
 
     # ── Cashflow Expenses ─────────────────────────────────────────────────────
     total_expenses = 0.0
@@ -361,8 +375,17 @@ def app_settings_payload(metrics: dict, source: str) -> list[dict]:
 
 def compute_profit_ledger(sb) -> dict:
     """
-    Returns every qualifying transaction included in weekly and monthly profit,
+    Returns every transaction considered for weekly and monthly profit,
     with full audit details per row.
+
+    Rules applied:
+    - Service row with IMEI matching inventory (valid cost_price > 0):
+        profit = paid_amount - cost_price - expense_amount  [product]
+    - Service row with IMEI but no inventory match or cost_price = 0:
+        excluded from profit
+    - Service row with no IMEI:
+        profit = paid_amount - expense_amount  [service]
+    Inclusion: payment_status=PAID, paid_at >= 2026-05-01, not reversed
     """
     now_utc = datetime.now(timezone.utc)
     week_start, week_end = _week_bounds_utc(now_utc)
@@ -371,53 +394,99 @@ def compute_profit_ledger(sb) -> dict:
     services = _fetch_all_rows(
         sb,
         "service_jobs",
-        "id,client_name,amount_charged,paid_amount,payment_status,paid_at,paid_date,is_return,service_expense_amount,expense_amount",
+        "id,client_name,amount_charged,paid_amount,payment_status,paid_at,paid_date,is_return,service_expense_amount,expense_amount,imei",
     )
     inventory = _fetch_all_rows(
         sb,
         "inventory_items",
-        "id,item_name,product_status,payment_status,paid_at,paid_date,is_return,cost_price,selling_price,item_expense_amount,expense_amount",
+        "id,item_name,imei,sku,cost_price",
     )
+
+    # Build IMEI → cost_price map
+    imei_cost_map: dict[str, float] = {}
+    for inv in inventory:
+        cost_price = to_number(inv.get("cost_price"))
+        for candidate in (inv.get("imei"), inv.get("sku")):
+            key = _norm_imei(candidate)
+            if key and key not in imei_cost_map:
+                imei_cost_map[key] = cost_price
 
     weekly_rows: list[dict] = []
     monthly_rows: list[dict] = []
     excluded_rows: list[dict] = []
 
-    # ── Service Jobs ──────────────────────────────────────────────────────────
     for row in services:
         paid = to_number(row.get("paid_amount"))
         status = _norm(row.get("payment_status"))
-        service_expense = to_number(row.get("service_expense_amount")) or to_number(row.get("expense_amount"))
+        expense = to_number(row.get("service_expense_amount")) or to_number(row.get("expense_amount"))
         paid_at = _parse_dt(row.get("paid_at") or row.get("paid_date"))
         is_reversed = bool(row.get("is_return"))
+        imei = _norm_imei(row.get("imei"))
 
-        include = (
-            status == "PAID"
-            and paid_at is not None
-            and paid_at >= ACCOUNTING_START_AT
-            and not is_reversed
-        )
-
-        if not include:
+        # Gate: basic inclusion
+        if not (status == "PAID" and paid_at is not None and paid_at >= ACCOUNTING_START_AT and not is_reversed):
             reasons = []
             if status != "PAID":
                 reasons.append(f"status={status}")
             if paid_at is None:
                 reasons.append("no paid_at")
             elif paid_at < ACCOUNTING_START_AT:
-                reasons.append(f"paid_at {paid_at.date()} < accounting_start")
+                reasons.append(f"paid_at {paid_at.date()} < 2026-05-01")
             if is_reversed:
                 reasons.append("reversed")
             excluded_rows.append({
                 "source": "service_job",
                 "id": row.get("id"),
                 "client_name": row.get("client_name"),
+                "imei": row.get("imei"),
                 "paid_at": paid_at.isoformat() if paid_at else None,
+                "paid_amount": paid,
+                "cost_price": None,
+                "expense_amount": expense,
+                "computed_profit": None,
                 "exclusion_reason": "; ".join(reasons),
             })
             continue
 
-        profit = paid - service_expense
+        # Determine profit type
+        if imei:
+            if imei in imei_cost_map:
+                cost_price = imei_cost_map[imei]
+                if cost_price <= 0:
+                    excluded_rows.append({
+                        "source": "service_job",
+                        "id": row.get("id"),
+                        "client_name": row.get("client_name"),
+                        "imei": row.get("imei"),
+                        "paid_at": paid_at.isoformat(),
+                        "paid_amount": paid,
+                        "cost_price": cost_price,
+                        "expense_amount": expense,
+                        "computed_profit": None,
+                        "exclusion_reason": "IMEI matched but cost_price=0 or missing",
+                    })
+                    continue
+                profit = paid - cost_price - expense
+                inclusion_reason = f"product: paid_amount({paid}) - cost_price({cost_price}) - expense({expense})"
+            else:
+                excluded_rows.append({
+                    "source": "service_job",
+                    "id": row.get("id"),
+                    "client_name": row.get("client_name"),
+                    "imei": row.get("imei"),
+                    "paid_at": paid_at.isoformat(),
+                    "paid_amount": paid,
+                    "cost_price": None,
+                    "expense_amount": expense,
+                    "computed_profit": None,
+                    "exclusion_reason": f"IMEI={imei} not found in inventory",
+                })
+                continue
+        else:
+            cost_price = None
+            profit = paid - expense
+            inclusion_reason = f"service: paid_amount({paid}) - expense({expense})"
+
         in_week = week_start <= paid_at < week_end
         in_month = month_start <= paid_at < month_end
 
@@ -425,75 +494,13 @@ def compute_profit_ledger(sb) -> dict:
             "source": "service_job",
             "id": row.get("id"),
             "client_name": row.get("client_name") or "—",
+            "imei": row.get("imei"),
             "paid_at": paid_at.isoformat(),
             "paid_amount": paid,
-            "selling_price": None,
-            "cost_price": None,
-            "expense_amount": service_expense,
-            "computed_profit": round(profit, 2),
-            "inclusion_reason": "service: paid_amount - service_expense_amount",
-            "in_week": in_week,
-            "in_month": in_month,
-        }
-
-        if in_week:
-            weekly_rows.append(entry)
-        if in_month:
-            monthly_rows.append(entry)
-
-    # ── Inventory Items ───────────────────────────────────────────────────────
-    for row in inventory:
-        pay_status = _norm(row.get("payment_status") or row.get("product_status"))
-        paid_at = _parse_dt(row.get("paid_at") or row.get("paid_date"))
-        is_reversed = bool(row.get("is_return"))
-        selling_price = to_number(row.get("selling_price"))
-        cost_price = to_number(row.get("cost_price"))
-        item_expense = to_number(row.get("item_expense_amount")) or to_number(row.get("expense_amount"))
-
-        include = (
-            pay_status == "PAID"
-            and paid_at is not None
-            and paid_at >= ACCOUNTING_START_AT
-            and not is_reversed
-            and (cost_price > 0 or selling_price > 0)
-        )
-
-        if not include:
-            reasons = []
-            if pay_status != "PAID":
-                reasons.append(f"status={pay_status}")
-            if paid_at is None:
-                reasons.append("no paid_at")
-            elif paid_at < ACCOUNTING_START_AT:
-                reasons.append(f"paid_at {paid_at.date()} < accounting_start")
-            if is_reversed:
-                reasons.append("reversed")
-            if cost_price <= 0 and selling_price <= 0:
-                reasons.append("no selling_price or cost_price")
-            excluded_rows.append({
-                "source": "inventory_item",
-                "id": row.get("id"),
-                "client_name": row.get("item_name"),
-                "paid_at": paid_at.isoformat() if paid_at else None,
-                "exclusion_reason": "; ".join(reasons),
-            })
-            continue
-
-        profit = selling_price - cost_price - item_expense
-        in_week = week_start <= paid_at < week_end
-        in_month = month_start <= paid_at < month_end
-
-        entry = {
-            "source": "inventory_item",
-            "id": row.get("id"),
-            "client_name": row.get("item_name") or "—",
-            "paid_at": paid_at.isoformat(),
-            "paid_amount": selling_price,
-            "selling_price": selling_price,
             "cost_price": cost_price,
-            "expense_amount": item_expense,
+            "expense_amount": expense,
             "computed_profit": round(profit, 2),
-            "inclusion_reason": "product: selling_price - cost_price - item_expense_amount",
+            "inclusion_reason": inclusion_reason,
             "in_week": in_week,
             "in_month": in_month,
         }
