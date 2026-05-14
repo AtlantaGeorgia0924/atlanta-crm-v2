@@ -2,6 +2,8 @@
 No other endpoint calls Google Sheets.
 """
 import os
+import ssl
+import time
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException
 from app.db.supabase_client import get_supabase
@@ -83,6 +85,13 @@ def sync_to_sheets(_user=Depends(get_current_user)):
         raise HTTPException(400, "Google Sheets not configured: service account JSON file not found. Set GOOGLE_SERVICE_ACCOUNT_JSON.")
     try:
         return _sync_to_google_sheets(sb, services_sheet_id, stocks_sheet_id)
+    except (ssl.SSLError, OSError, ConnectionError) as e:
+        # Retry once on transient SSL errors
+        try:
+            time.sleep(2)
+            return _sync_to_google_sheets(sb, services_sheet_id, stocks_sheet_id)
+        except Exception as e2:
+            raise HTTPException(500, f"Sync failed (SSL/network error): {str(e2)}")
     except Exception as e:
         raise HTTPException(500, f"Sync failed: {str(e)}")
 
@@ -116,15 +125,31 @@ def refresh_workspace(_user=Depends(get_current_user)):
 def refresh_from_google_sheets(_user=Depends(get_current_user)):
     """Import latest services, inventory and clients from Google Sheets into Supabase."""
     sb = get_supabase()
+
+    # Retry up to 3 times on transient SSL / network errors
+    last_exc: Exception | None = None
+    for attempt in range(3):
+        try:
+            import_result = import_google_sheets_to_supabase(sb)
+            break
+        except (ssl.SSLError, OSError, ConnectionError) as e:
+            last_exc = e
+            if attempt < 2:
+                time.sleep(2 ** attempt)   # 1s, 2s back-off
+            continue
+        except Exception as e:
+            raise HTTPException(500, f"Google Sheets refresh failed: {str(e)}")
+    else:
+        raise HTTPException(500, f"Google Sheets refresh failed after 3 attempts (SSL/network error): {str(last_exc)}")
+
     try:
-        import_result = import_google_sheets_to_supabase(sb)
         metrics = compute_metrics_from_supabase(sb)
         sb.table("app_settings").upsert(
             app_settings_payload(metrics, source="supabase_after_sheet_import"),
             on_conflict="key",
         ).execute()
     except Exception as e:
-        raise HTTPException(500, f"Google Sheets refresh failed: {str(e)}")
+        raise HTTPException(500, f"Metric recalculation failed: {str(e)}")
 
     refreshed_at = datetime.utcnow().isoformat()
     sb.table("app_settings").upsert(
