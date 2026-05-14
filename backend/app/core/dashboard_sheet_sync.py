@@ -28,6 +28,14 @@ def _get_first_match(headers: List[str], aliases: List[str]) -> str:
     return ""
 
 
+def _get_exact_match(headers: List[str], aliases: List[str]) -> str:
+    normalized_aliases = {_normalize_header(a) for a in aliases}
+    for header in headers:
+        if _normalize_header(header) in normalized_aliases:
+            return header
+    return ""
+
+
 def _worksheet_rows(worksheet) -> Tuple[List[Dict[str, str]], int]:
     raw = worksheet.get_all_values()
     if not raw:
@@ -60,6 +68,43 @@ def _sum_column(records: List[Dict[str, str]], aliases: List[str]) -> float:
     if not header:
         return 0.0
     return sum(to_number(r.get(header)) for r in records)
+
+
+def _extract_label_total(values: List[List[str]], aliases: List[str]) -> float:
+    normalized_aliases = [_normalize_header(a) for a in aliases]
+    for row in values:
+        for idx, cell in enumerate(row):
+            normalized_cell = _normalize_header(cell)
+            if any(alias in normalized_cell for alias in normalized_aliases):
+                for candidate in row[idx + 1:]:
+                    value = to_number(candidate)
+                    if value != 0:
+                        return value
+                for candidate in row:
+                    value = to_number(candidate)
+                    if value != 0:
+                        return value
+    return 0.0
+
+
+def _extract_cashflow_totals(values: List[List[str]], records: List[Dict[str, str]]) -> Tuple[float, float]:
+    headers = list(records[0].keys()) if records else []
+
+    expense_aliases = ["Expenses total", "Total expenses", "Expenses"]
+    allowance_aliases = ["Allowances total", "Total allowances", "Allowances"]
+
+    expenses_header = _get_exact_match(headers, expense_aliases)
+    allowances_header = _get_exact_match(headers, allowance_aliases)
+
+    expenses_total = sum(to_number(r.get(expenses_header)) for r in records) if expenses_header else 0.0
+    allowances_total = sum(to_number(r.get(allowances_header)) for r in records) if allowances_header else 0.0
+
+    if expenses_total == 0.0:
+        expenses_total = _extract_label_total(values, expense_aliases)
+    if allowances_total == 0.0:
+        allowances_total = _extract_label_total(values, allowance_aliases)
+
+    return expenses_total, allowances_total
 
 
 def sync_dashboard_metrics_from_sheets(sb) -> Dict:
@@ -107,19 +152,39 @@ def sync_dashboard_metrics_from_sheets(sb) -> Dict:
     inventory_rows, inventory_count = _worksheet_rows(inventory_ws) if inventory_ws else ([], 0)
 
     # Services Sheet1: PRICE (billed), Amount paid (collected), NAME, STATUS, DATE
-    billed_header = _get_first_match(
+    billed_header = _get_exact_match(
         list(service_rows[0].keys()) if service_rows else [],
-        ["PRICE", "price", "amount"],
+        ["PRICE"],
     )
-    paid_header = _get_first_match(
+    paid_header = _get_exact_match(
         list(service_rows[0].keys()) if service_rows else [],
-        ["Amount paid", "amount paid", "collected"],
+        ["Amount paid"],
     )
 
-    total_billed = sum(to_number(r.get(billed_header)) for r in service_rows) if billed_header else 0.0
-    total_collected = sum(to_number(r.get(paid_header)) for r in service_rows) if paid_header else 0.0
-    # Outstanding = PRICE - Amount paid
-    total_outstanding = max(0.0, total_billed - total_collected)
+    parsed_price_values: List[float] = []
+    parsed_amount_paid_values: List[float] = []
+    total_billed = 0.0
+    total_collected = 0.0
+    total_outstanding = 0.0
+
+    for row in service_rows:
+        raw_price = row.get(billed_header) if billed_header else None
+        raw_paid = row.get(paid_header) if paid_header else None
+
+        has_price = str(raw_price or "").strip() != ""
+        has_paid = str(raw_paid or "").strip() != ""
+        if not has_price and not has_paid:
+            continue
+
+        price = to_number(raw_price)
+        paid = to_number(raw_paid)
+
+        parsed_price_values.append(price)
+        parsed_amount_paid_values.append(paid)
+
+        total_billed += price
+        total_collected += paid
+        total_outstanding += (price - paid)
 
     # Debtors Summary: count unique debtors or sum their balances
     debtor_balance_header = _get_first_match(
@@ -128,20 +193,12 @@ def sync_dashboard_metrics_from_sheets(sb) -> Dict:
     )
     total_debtors = sum(to_number(r.get(debtor_balance_header)) for r in debtor_rows) if debtor_balance_header else 0.0
 
-    # Cash Flow sheet: AMOUNT, SOURCE, CATEGORY, TYPE
-    # Use AMOUNT for cash flow totals
-    cash_flow_amount_header = _get_first_match(
-        list(cash_flow_rows[0].keys()) if cash_flow_rows else [],
-        ["AMOUNT", "amount", "total"],
+    total_expenses, total_allowances = _extract_cashflow_totals(
+        cash_flow_ws.get_all_values() if cash_flow_ws else [],
+        cash_flow_rows,
     )
-    total_cash_flow = sum(to_number(r.get(cash_flow_amount_header)) for r in cash_flow_rows) if cash_flow_amount_header else 0.0
 
-    # For now, use cash flow as proxy for expenses/allowances
-    # (You can split by CATEGORY if needed)
-    total_expenses = total_cash_flow * 0.5  # Placeholder: split 50/50
-    total_allowances = total_cash_flow * 0.5
-    
-    net_profit = total_billed - total_expenses - total_allowances
+    net_profit = total_collected - total_expenses - total_allowances
 
     # Inventory Sheet1: PRODUCT STATUS, DESCRIPTION, DEVICE, COST PRICE, NAME OF BUYER
     # Low stock = PRODUCT STATUS = "SOLD" or quantity fields
@@ -162,7 +219,7 @@ def sync_dashboard_metrics_from_sheets(sb) -> Dict:
     values = {
         "total_billed": total_billed,
         "total_collected": total_collected,
-        "total_outstanding": max(0.0, total_outstanding),
+        "total_outstanding": total_outstanding,
         "total_expenses": total_expenses,
         "total_allowances": total_allowances,
         "net_profit": net_profit,
@@ -170,6 +227,22 @@ def sync_dashboard_metrics_from_sheets(sb) -> Dict:
         "total_invoices": service_count,
         "total_debtors": debtor_count,
         "low_stock_count": low_stock_count,
+        "validation": {
+            "first_10_parsed_price_values": parsed_price_values[:10],
+            "first_10_parsed_amount_paid_values": parsed_amount_paid_values[:10],
+            "final_totals": {
+                "total_billed": total_billed,
+                "total_collected": total_collected,
+                "total_outstanding": total_outstanding,
+                "total_expenses": total_expenses,
+                "total_allowances": total_allowances,
+                "net_profit": net_profit,
+            },
+            "detected_headers": {
+                "services_price": billed_header,
+                "services_amount_paid": paid_header,
+            },
+        },
     }
 
     sb.table("app_settings").upsert(

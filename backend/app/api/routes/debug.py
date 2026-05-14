@@ -33,6 +33,14 @@ def _get_first_match(headers: List[str], aliases: List[str]) -> str:
     return ""
 
 
+def _get_exact_match(headers: List[str], aliases: List[str]) -> str:
+    normalized_aliases = {_normalize_header(a) for a in aliases}
+    for header in headers:
+        if _normalize_header(header) in normalized_aliases:
+            return header
+    return ""
+
+
 def _rows_as_records(values: List[List[str]]) -> List[Dict[str, str]]:
     if not values:
         return []
@@ -51,6 +59,42 @@ def _sum_column(records: List[Dict[str, str]], aliases: List[str]) -> float:
     if not header:
         return 0.0
     return sum(to_number(r.get(header)) for r in records)
+
+
+def _extract_label_total(values: List[List[str]], aliases: List[str]) -> float:
+    normalized_aliases = [_normalize_header(a) for a in aliases]
+    for row in values:
+        for idx, cell in enumerate(row):
+            normalized_cell = _normalize_header(cell)
+            if any(alias in normalized_cell for alias in normalized_aliases):
+                for candidate in row[idx + 1:]:
+                    value = to_number(candidate)
+                    if value != 0:
+                        return value
+                for candidate in row:
+                    value = to_number(candidate)
+                    if value != 0:
+                        return value
+    return 0.0
+
+
+def _extract_cashflow_totals(values: List[List[str]], records: List[Dict[str, str]]) -> tuple[float, float]:
+    headers = list(records[0].keys()) if records else []
+    expense_aliases = ["Expenses total", "Total expenses", "Expenses"]
+    allowance_aliases = ["Allowances total", "Total allowances", "Allowances"]
+
+    expenses_header = _get_exact_match(headers, expense_aliases)
+    allowances_header = _get_exact_match(headers, allowance_aliases)
+
+    expenses_total = sum(to_number(r.get(expenses_header)) for r in records) if expenses_header else 0.0
+    allowances_total = sum(to_number(r.get(allowances_header)) for r in records) if allowances_header else 0.0
+
+    if expenses_total == 0.0:
+        expenses_total = _extract_label_total(values, expense_aliases)
+    if allowances_total == 0.0:
+        allowances_total = _extract_label_total(values, allowance_aliases)
+
+    return expenses_total, allowances_total
 
 
 @router.get("/google-sheets")
@@ -164,20 +208,39 @@ def debug_google_sheets(_user=Depends(get_current_user)):
     debtor_records = _rows_as_records(debtors_values)
     inventory_records = _rows_as_records(inventory_values)
 
-    # Services Sheet1: PRICE (billed), Amount paid (collected)
-    billed_header = _get_first_match(
+    # Services Sheet1: use only PRICE and Amount paid
+    billed_header = _get_exact_match(
         list(service_records[0].keys()) if service_records else [],
-        ["PRICE", "price", "amount"],
+        ["PRICE"],
     )
-    paid_header = _get_first_match(
+    paid_header = _get_exact_match(
         list(service_records[0].keys()) if service_records else [],
-        ["Amount paid", "amount paid", "collected"],
+        ["Amount paid"],
     )
 
-    total_billed = sum(to_number(r.get(billed_header)) for r in service_records) if billed_header else 0.0
-    total_collected = sum(to_number(r.get(paid_header)) for r in service_records) if paid_header else 0.0
-    # Outstanding = PRICE - Amount paid
-    total_outstanding = max(0.0, total_billed - total_collected)
+    parsed_price_values: List[float] = []
+    parsed_amount_paid_values: List[float] = []
+    total_billed = 0.0
+    total_collected = 0.0
+    total_outstanding = 0.0
+
+    for row in service_records:
+        raw_price = row.get(billed_header) if billed_header else None
+        raw_paid = row.get(paid_header) if paid_header else None
+
+        has_price = str(raw_price or "").strip() != ""
+        has_paid = str(raw_paid or "").strip() != ""
+        if not has_price and not has_paid:
+            continue
+
+        price = to_number(raw_price)
+        paid = to_number(raw_paid)
+        parsed_price_values.append(price)
+        parsed_amount_paid_values.append(paid)
+
+        total_billed += price
+        total_collected += paid
+        total_outstanding += (price - paid)
 
     # Debtors Summary: sum balance column
     debtor_balance_header = _get_first_match(
@@ -186,17 +249,8 @@ def debug_google_sheets(_user=Depends(get_current_user)):
     )
     total_debtors_balance = sum(to_number(r.get(debtor_balance_header)) for r in debtor_records) if debtor_balance_header else 0.0
 
-    # Cash Flow: AMOUNT column
-    cash_flow_amount_header = _get_first_match(
-        list(cash_flow_records[0].keys()) if cash_flow_records else [],
-        ["AMOUNT", "amount", "total"],
-    )
-    total_cash_flow = sum(to_number(r.get(cash_flow_amount_header)) for r in cash_flow_records) if cash_flow_amount_header else 0.0
-    
-    # For now, split cash flow 50/50 for expenses/allowances
-    total_expenses = total_cash_flow * 0.5
-    total_allowances = total_cash_flow * 0.5
-    net_profit = total_billed - total_expenses - total_allowances
+    total_expenses, total_allowances = _extract_cashflow_totals(cash_flow_values, cash_flow_records)
+    net_profit = total_collected - total_expenses - total_allowances
 
     # Inventory Sheet1: count PRODUCT STATUS = "SOLD"
     product_status_header = _get_first_match(
@@ -215,20 +269,30 @@ def debug_google_sheets(_user=Depends(get_current_user)):
     result["calculated_dashboard_totals"] = {
         "total_billed": total_billed,
         "total_collected": total_collected,
-        "total_outstanding": max(0.0, total_outstanding),
+        "total_outstanding": total_outstanding,
         "total_expenses": total_expenses,
         "total_allowances": total_allowances,
         "total_debtors_balance": total_debtors_balance,
-        "total_cash_flow": total_cash_flow,
         "net_profit": net_profit,
         "total_clients": len(client_records),
         "total_invoices": len(service_records),
         "low_stock_count": low_stock_count,
+        "validation": {
+            "first_10_parsed_price_values": parsed_price_values[:10],
+            "first_10_parsed_amount_paid_values": parsed_amount_paid_values[:10],
+            "final_totals": {
+                "total_billed": total_billed,
+                "total_collected": total_collected,
+                "total_outstanding": total_outstanding,
+                "total_expenses": total_expenses,
+                "total_allowances": total_allowances,
+                "net_profit": net_profit,
+            },
+        },
         "detected_headers": {
             "services_sheet1_billed": billed_header,
             "services_sheet1_collected": paid_header,
             "debtors_balance": debtor_balance_header,
-            "cash_flow_amount": cash_flow_amount_header,
             "inventory_product_status": product_status_header,
         },
     }
