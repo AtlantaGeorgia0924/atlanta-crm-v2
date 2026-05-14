@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useForm } from 'react-hook-form'
 import api from '@/lib/api'
+import { useEffect, useDeferredValue } from 'react'
 import Table from '@/components/Table'
 import Modal from '@/components/Modal'
 import LoadingSpinner from '@/components/LoadingSpinner'
@@ -35,7 +36,8 @@ interface PaymentForm {
 export default function Debtors() {
   const qc = useQueryClient()
   const [selectedRow, setSelectedRow] = useState<Debtor | null>(null)
-  const [search, setSearch] = useState('')
+  const [searchInput, setSearchInput] = useState('')
+  const deferredSearch = useDeferredValue(searchInput)
 
   const { data: debtors, isLoading } = useQuery<Debtor[]>({
     queryKey: ['debtors', search],
@@ -101,8 +103,8 @@ export default function Debtors() {
         <input
           type="text"
           placeholder="Search by client name or service..."
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
+          value={searchInput}
+          onChange={(e) => setSearchInput(e.target.value)}
           className="form-input w-full"
         />
         {search && (
