@@ -371,7 +371,7 @@ def debug_google_sheets(_user=Depends(get_current_user)):
     return result
 
 
-@router.get("/debug/imei-matching")
+@router.get("/imei-matching")
 def debug_imei_matching():
     """Live IMEI matching and profit diagnostics: returns metrics, row counts, and sample IMEIs."""
     sb = get_supabase()
