@@ -7,6 +7,8 @@ from app.core.cashflow_sheet_sync import read_sheet_id
 from app.core.config import settings as app_settings
 from app.core.financials import to_number
 
+NUMERIC12_MAX = 9_999_999_999.99
+
 
 def _normalize_header(value: str) -> str:
     text = re.sub(r"[^a-z0-9]+", " ", str(value or "").strip().lower())
@@ -74,6 +76,10 @@ def _normalized_payment_status(status: str) -> str:
     return "UNPAID"
 
 
+def _fits_numeric12(value: float) -> bool:
+    return abs(float(value)) <= NUMERIC12_MAX
+
+
 def _batch_upsert(sb, table_name: str, rows: List[dict], on_conflict: str, chunk_size: int = 500):
     for i in range(0, len(rows), chunk_size):
         sb.table(table_name).upsert(rows[i : i + chunk_size], on_conflict=on_conflict).execute()
@@ -120,13 +126,22 @@ def import_google_sheets_to_supabase(sb) -> dict:
     notes_h = _get_first_match(service_headers, ["NOTES"])
 
     service_payload = []
+    skipped_service_overflow = 0
     for idx, row in enumerate(service_rows):
         amount_charged = to_number(row.get(price_h)) if price_h else 0.0
         paid_amount = to_number(row.get(paid_h)) if paid_h else 0.0
         quantity = to_number(row.get(qty_h)) if qty_h else 1.0
+        service_expense = to_number(row.get(expense_h)) if expense_h else 0.0
         service_name = str(row.get(service_h) or "").strip() if service_h else ""
         if not service_name:
             service_name = "General Service"
+
+        if not all(
+            _fits_numeric12(v)
+            for v in [amount_charged, paid_amount, quantity, service_expense]
+        ):
+            skipped_service_overflow += 1
+            continue
 
         service_payload.append(
             {
@@ -136,7 +151,7 @@ def import_google_sheets_to_supabase(sb) -> dict:
                 "description": str(row.get(service_h) or "").strip() if service_h else None,
                 "quantity": quantity or 1.0,
                 "amount_charged": amount_charged,
-                "expense_amount": to_number(row.get(expense_h)) if expense_h else 0.0,
+                "expense_amount": service_expense,
                 "calculated_profit": paid_amount,
                 "payment_status": _normalized_payment_status(row.get(status_h, "") if status_h else ""),
                 "paid_amount": paid_amount,
@@ -184,6 +199,7 @@ def import_google_sheets_to_supabase(sb) -> dict:
     notes_h_inv = _get_first_match(inventory_headers, ["NOTES"])
 
     inventory_payload = []
+    skipped_inventory_overflow = 0
     for idx, row in enumerate(inventory_rows):
         item_name = str(row.get(item_h) or "").strip() if item_h else ""
         if not item_name:
@@ -192,6 +208,12 @@ def import_google_sheets_to_supabase(sb) -> dict:
         status = str(row.get(status_h_inv) or "").strip() if status_h_inv else ""
         normalized_status = status.upper() if status else "AVAILABLE"
         quantity = 0.0 if normalized_status == "SOLD" else 1.0
+        cost_price = to_number(row.get(cost_h)) if cost_h else 0.0
+        selling_price = to_number(row.get(sell_h)) if sell_h else 0.0
+
+        if not all(_fits_numeric12(v) for v in [quantity, cost_price, selling_price]):
+            skipped_inventory_overflow += 1
+            continue
 
         inventory_payload.append(
             {
@@ -202,8 +224,8 @@ def import_google_sheets_to_supabase(sb) -> dict:
                 "description": str(row.get(notes_h_inv) or "").strip() if notes_h_inv else None,
                 "quantity": quantity,
                 "unit": "pcs",
-                "cost_price": to_number(row.get(cost_h)) if cost_h else 0.0,
-                "selling_price": to_number(row.get(sell_h)) if sell_h else 0.0,
+                "cost_price": cost_price,
+                "selling_price": selling_price,
                 "payment_status": normalized_status,
                 "source_updated_at": datetime.utcnow().isoformat(),
             }
@@ -232,6 +254,10 @@ def import_google_sheets_to_supabase(sb) -> dict:
             "service_jobs": len(service_payload),
             "clients": len(clients_payload),
             "inventory_items": len(inventory_payload),
+        },
+        "rows_skipped_overflow": {
+            "service_jobs": skipped_service_overflow,
+            "inventory_items": skipped_inventory_overflow,
         },
         "headers_detected": {
             "services": {
