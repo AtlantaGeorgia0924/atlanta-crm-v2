@@ -1,5 +1,6 @@
 import os
 import re
+import time
 from datetime import datetime
 from typing import Dict, List
 
@@ -7,6 +8,26 @@ from app.core.config import settings as app_settings
 from app.core.financials import to_number
 
 CASHFLOW_SUMMARY_ID = "dashboard_totals"
+
+
+def _read_settings_with_retry(sb, keys: List[str], attempts: int = 3, delay_seconds: float = 0.5):
+    last_error = None
+    for attempt in range(attempts):
+        try:
+            return (
+                sb.table("app_settings")
+                .select("key,value")
+                .in_("key", keys)
+                .execute()
+                .data
+                or []
+            )
+        except Exception as exc:
+            last_error = exc
+            if attempt == attempts - 1:
+                break
+            time.sleep(delay_seconds * (attempt + 1))
+    raise last_error
 
 
 def read_sheet_id(sb, purpose: str = "services") -> str:
@@ -30,14 +51,7 @@ def read_sheet_id(sb, purpose: str = "services") -> str:
             return app_settings.GOOGLE_SHEET_ID_SERVICES
         purpose_key = "google_sheet_id_services"
 
-    local_settings = (
-        sb.table("app_settings")
-        .select("key,value")
-        .in_("key", [purpose_key, "google_sheet_id"])
-        .execute()
-        .data
-        or []
-    )
+    local_settings = _read_settings_with_retry(sb, [purpose_key, "google_sheet_id"])
     settings_map = {row.get("key"): row.get("value") for row in local_settings}
 
     purpose_value = str(settings_map.get(purpose_key) or "").strip()

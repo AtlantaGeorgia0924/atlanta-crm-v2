@@ -88,6 +88,55 @@ def _extract_label_total(values: List[List[str]], aliases: List[str]) -> float:
     return 0.0
 
 
+def _sum_cashflow_transactions(records: List[Dict[str, str]]) -> Tuple[float, float]:
+    if not records:
+        return 0.0, 0.0
+
+    headers = list(records[0].keys())
+    amount_header = _get_exact_match(headers, ["AMOUNT", "Amount"])
+    source_header = _get_exact_match(headers, ["SOURCE", "Source"])
+    type_header = _get_exact_match(headers, ["TYPE", "Type"])
+    category_header = _get_exact_match(headers, ["CATEGORY", "Category"])
+    description_header = _get_exact_match(headers, ["DESCRIPTION", "Description"])
+
+    if not amount_header:
+        return 0.0, 0.0
+
+    expenses_total = 0.0
+    allowances_total = 0.0
+
+    for row in records:
+        amount = to_number(row.get(amount_header))
+        if amount == 0:
+            continue
+
+        source = _normalize_header(row.get(source_header, "") if source_header else "")
+        typ = _normalize_header(row.get(type_header, "") if type_header else "")
+        category = _normalize_header(row.get(category_header, "") if category_header else "")
+        description = _normalize_header(row.get(description_header, "") if description_header else "")
+
+        is_allowance = (
+            "allowance" in source
+            or "allowance" in typ
+            or "allowance" in category
+            or "allowance" in description
+        )
+        is_expense = (
+            source in {"expense", "expenses", "cost"}
+            or typ in {"expense", "expenses", "cost"}
+            or "expense" in category
+            or "expense" in description
+            or "cost" in category
+        )
+
+        if is_allowance:
+            allowances_total += abs(amount)
+        elif is_expense:
+            expenses_total += abs(amount)
+
+    return expenses_total, allowances_total
+
+
 def _extract_cashflow_totals(values: List[List[str]], records: List[Dict[str, str]]) -> Tuple[float, float]:
     headers = list(records[0].keys()) if records else []
 
@@ -104,6 +153,13 @@ def _extract_cashflow_totals(values: List[List[str]], records: List[Dict[str, st
         expenses_total = _extract_label_total(values, expense_aliases)
     if allowances_total == 0.0:
         allowances_total = _extract_label_total(values, allowance_aliases)
+
+    # Fallback: derive totals from transactional CASH FLOW rows when summary labels are absent.
+    tx_expenses, tx_allowances = _sum_cashflow_transactions(records)
+    if expenses_total == 0.0:
+        expenses_total = tx_expenses
+    if allowances_total == 0.0:
+        allowances_total = tx_allowances
 
     return expenses_total, allowances_total
 
