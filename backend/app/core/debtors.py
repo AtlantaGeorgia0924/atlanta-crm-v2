@@ -19,6 +19,28 @@ def _normalize_client_name(value) -> str:
 
 
 def compute_debtors_from_supabase(sb) -> dict:
+    """
+    Compute outstanding debtors from service_jobs.
+    
+    Inclusion rules (only rows matching ALL conditions are included):
+    - payment_status IN ('UNPAID', 'PART PAYMENT')
+    - outstanding > 0 (calculated as max(amount_charged - paid_amount, 0))
+    - is_return = false
+    
+    Exclusion rules (any row matching these is excluded):
+    - payment_status = 'PAID'
+    - payment_status = 'RETURNED'
+    - is_return = true
+    - outstanding <= 0
+    
+    Outstanding formula: outstanding = max(amount_charged - paid_amount, 0)
+    
+    Returns dict with:
+    - total_amount_owed: sum of all outstanding balances for included rows
+    - included_rows: list of rows that met inclusion criteria
+    - excluded_rows: list of rows that didn't meet criteria
+    - grouped_clients: clients grouped by name with aggregated amounts
+    """
     rows = _fetch_all_rows(
         sb,
         "service_jobs",
