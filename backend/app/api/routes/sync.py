@@ -8,6 +8,7 @@ from app.db.supabase_client import get_supabase
 from app.core.auth import get_current_user
 from app.core.config import settings as app_settings
 from app.core.cashflow_sheet_sync import read_sheet_id
+from app.core.dashboard_metrics import app_settings_payload, compute_metrics_from_supabase
 from app.core.dashboard_sheet_sync import sync_dashboard_metrics_from_sheets
 
 router = APIRouter()
@@ -88,7 +89,7 @@ def sync_to_sheets(_user=Depends(get_current_user)):
 
 @router.post("/refresh-workspace")
 def refresh_workspace(_user=Depends(get_current_user)):
-    """Manually refresh dashboard metrics from Google Sheets."""
+    """Manually refresh dashboard metrics from Google Sheets only."""
     sb = get_supabase()
     try:
         refresh_result = sync_dashboard_metrics_from_sheets(sb)
@@ -105,4 +106,29 @@ def refresh_workspace(_user=Depends(get_current_user)):
         "sheets_read": refresh_result.get("sheets_read", []),
         "rows_processed": refresh_result.get("rows_processed", {}),
         "values_calculated": refresh_result.get("values_calculated", {}),
+    }
+
+
+@router.post("/refresh-supabase")
+def refresh_from_supabase(_user=Depends(get_current_user)):
+    """Recalculate dashboard metrics from Supabase tables only."""
+    sb = get_supabase()
+    try:
+        metrics = compute_metrics_from_supabase(sb)
+        sb.table("app_settings").upsert(
+            app_settings_payload(metrics, source="supabase"),
+            on_conflict="key",
+        ).execute()
+    except Exception as e:
+        raise HTTPException(500, f"Supabase refresh failed: {str(e)}")
+
+    refreshed_at = datetime.utcnow().isoformat()
+    sb.table("app_settings").upsert(
+        {"key": "last_supabase_refresh", "value": refreshed_at}
+    ).execute()
+    return {
+        "message": "Workspace refreshed from Supabase.",
+        "refreshed_at": refreshed_at,
+        "source": "supabase",
+        "values_calculated": metrics,
     }

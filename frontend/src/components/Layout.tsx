@@ -25,9 +25,10 @@ const nav = [
 export default function Layout() {
   const { clear, user } = useAuthStore()
   const navigate = useNavigate()
-  const [pendingAction, setPendingAction] = useState<'refresh' | 'sync' | null>(null)
+  const [pendingAction, setPendingAction] = useState<'refresh' | 'refreshSupabase' | 'sync' | null>(null)
   const [countdown, setCountdown] = useState(5)
   const [isSubmitting, setIsSubmitting] = useState(false)
+  const [logoFailed, setLogoFailed] = useState(false)
 
   useEffect(() => {
     if (!pendingAction) return
@@ -40,7 +41,10 @@ export default function Layout() {
 
   const warningText = useMemo(() => {
     if (pendingAction === 'refresh') {
-      return 'This will reload data from Google Sheets and Supabase. Continue?'
+      return 'This will reload dashboard metrics from Google Sheets only. Continue?'
+    }
+    if (pendingAction === 'refreshSupabase') {
+      return 'This will recalculate dashboard metrics from Supabase only (no Google Sheets). Continue?'
     }
     if (pendingAction === 'sync') {
       return 'This will overwrite the selected Google Sheets with the latest Supabase data. Continue?'
@@ -64,7 +68,7 @@ export default function Layout() {
         : ''
       const valuesCalculated = data?.values_calculated && typeof data.values_calculated === 'object'
         ? Object.entries(data.values_calculated)
-            .map(([name, value]) => `${name}: ${value}`)
+            .map(([name, value]) => `${name}: ${typeof value === 'object' ? JSON.stringify(value) : value}`)
             .join(' | ')
         : ''
       toast.success([
@@ -75,6 +79,21 @@ export default function Layout() {
       window.location.reload()
     } catch (e: any) {
       toast.error(e?.response?.data?.detail ?? 'Refresh failed')
+    }
+  }
+
+  const handleRefreshSupabase = async () => {
+    try {
+      const { data } = await api.post('/sync/refresh-supabase')
+      const valuesCalculated = data?.values_calculated && typeof data.values_calculated === 'object'
+        ? Object.entries(data.values_calculated)
+            .map(([name, value]) => `${name}: ${typeof value === 'object' ? JSON.stringify(value) : value}`)
+            .join(' | ')
+        : ''
+      toast.success(valuesCalculated || 'Workspace refreshed from Supabase')
+      window.location.reload()
+    } catch (e: any) {
+      toast.error(e?.response?.data?.detail ?? 'Supabase refresh failed')
     }
   }
 
@@ -105,6 +124,8 @@ export default function Layout() {
     try {
       if (pendingAction === 'refresh') {
         await handleRefresh()
+      } else if (pendingAction === 'refreshSupabase') {
+        await handleRefreshSupabase()
       } else {
         await handleSync()
       }
@@ -119,7 +140,21 @@ export default function Layout() {
       {/* Sidebar */}
       <aside className="w-56 shrink-0 text-white flex flex-col" style={{ background: '#000000' }}>
         <div className="px-4 py-5 border-b" style={{ borderColor: '#3b3b3b' }}>
-          <h1 className="font-bold text-lg">CRM</h1>
+          <div className="flex items-center gap-3">
+            {!logoFailed && (
+              <img
+                src="/assets/atlanta-logo.jpeg"
+                alt="ATLANTA GEORGIA_TECH"
+                className="h-10 w-10 rounded object-cover border"
+                style={{ borderColor: '#D4AF37' }}
+                onError={() => setLogoFailed(true)}
+              />
+            )}
+            <div>
+              <h1 className="font-bold text-xs leading-tight tracking-wide">ATLANTA</h1>
+              <p className="text-[11px] leading-tight text-[#D4AF37] font-semibold">GEORGIA_TECH</p>
+            </div>
+          </div>
           <p className="text-xs text-gray-300 truncate">{user?.email}</p>
         </div>
 
@@ -146,6 +181,9 @@ export default function Layout() {
         <div className="px-2 pb-4 space-y-1 border-t pt-3" style={{ borderColor: '#3b3b3b' }}>
           <button onClick={() => setPendingAction('refresh')} className="flex items-center gap-3 w-full rounded-lg px-3 py-2 text-sm text-gray-200 hover:text-black transition-colors hover:bg-[#D4AF37]">
             <RefreshCw size={16} /> Refresh Workspace
+          </button>
+          <button onClick={() => setPendingAction('refreshSupabase')} className="flex items-center gap-3 w-full rounded-lg px-3 py-2 text-sm text-gray-200 hover:text-black transition-colors hover:bg-[#D4AF37]">
+            <RefreshCw size={16} /> Refresh from Supabase
           </button>
           <button onClick={() => setPendingAction('sync')} className="flex items-center gap-3 w-full rounded-lg px-3 py-2 text-sm text-gray-200 hover:text-black transition-colors hover:bg-[#D4AF37]">
             <Sheet size={16} /> Sync to Google Sheets

@@ -4,8 +4,9 @@ import time
 from datetime import datetime
 from typing import Dict, List, Tuple
 
-from app.core.cashflow_sheet_sync import CASHFLOW_SUMMARY_ID, read_sheet_id
+from app.core.cashflow_sheet_sync import read_sheet_id
 from app.core.config import settings as app_settings
+from app.core.dashboard_metrics import app_settings_payload
 from app.core.financials import to_number
 
 
@@ -183,6 +184,33 @@ def _is_excluded_service_row(status_value: str) -> bool:
     return normalized in blocked_statuses
 
 
+def _normalized_payment_status(value: str) -> str:
+    normalized = _normalize_header(value).upper().replace(" ", " ").strip()
+    if normalized == "PART PAYMENT":
+        return "PARTIAL"
+    return normalized
+
+
+def _is_current_month_date(value: str) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return False
+    parsed = None
+    for fmt in ["%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y", "%d-%m-%Y", "%Y/%m/%d"]:
+        try:
+            parsed = datetime.strptime(text, fmt)
+            break
+        except Exception:
+            parsed = None
+    if parsed is None:
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except Exception:
+            return False
+    now = datetime.utcnow()
+    return parsed.year == now.year and parsed.month == now.month
+
+
 def sync_dashboard_metrics_from_sheets(sb) -> Dict:
     import gspread
     from google.oauth2.service_account import Credentials
@@ -227,7 +255,7 @@ def sync_dashboard_metrics_from_sheets(sb) -> Dict:
     debtor_rows, debtor_count = _worksheet_rows(debtors_ws) if debtors_ws else ([], 0)
     inventory_rows, inventory_count = _worksheet_rows(inventory_ws) if inventory_ws else ([], 0)
 
-    # Services Sheet1: PRICE (billed), Amount paid (collected), NAME, STATUS, DATE
+    # Services Sheet1: PRICE, Amount paid, STATUS, DATE (+ optional service expense)
     billed_header = _get_exact_match(
         list(service_rows[0].keys()) if service_rows else [],
         ["PRICE"],
@@ -241,13 +269,26 @@ def sync_dashboard_metrics_from_sheets(sb) -> Dict:
         list(service_rows[0].keys()) if service_rows else [],
         ["STATUS"],
     )
+    date_header = _get_first_match(
+        list(service_rows[0].keys()) if service_rows else [],
+        ["DATE", "INVOICE DATE", "SERVICE DATE"],
+    )
+    service_expense_header = _get_first_match(
+        list(service_rows[0].keys()) if service_rows else [],
+        ["SERVICE EXPENSE", "SERVICE_EXPENSE"],
+    )
 
     parsed_price_values: List[float] = []
     parsed_amount_paid_values: List[float] = []
     excluded_rows = 0
-    total_billed = 0.0
+    total_sales = 0.0
     total_collected = 0.0
     total_outstanding = 0.0
+    total_service_expenses = 0.0
+    total_unpaid = 0
+    amount_owed = 0.0
+    monthly_sales = 0.0
+    total_invoices = 0
 
     for row in service_rows:
         raw_price = row.get(billed_header) if billed_header else None
@@ -265,13 +306,25 @@ def sync_dashboard_metrics_from_sheets(sb) -> Dict:
 
         price = to_number(raw_price)
         paid = to_number(raw_paid)
+        outstanding = max(0.0, price - paid)
+        normalized_status = _normalized_payment_status(row.get(status_header, "") if status_header else "")
+        service_expense = to_number(row.get(service_expense_header)) if service_expense_header else 0.0
 
         parsed_price_values.append(price)
         parsed_amount_paid_values.append(paid)
 
-        total_billed += price
+        total_sales += price
         total_collected += paid
-        total_outstanding += (price - paid)
+        total_outstanding += outstanding
+        total_service_expenses += service_expense
+        total_invoices += 1
+
+        if normalized_status == "UNPAID":
+            total_unpaid += 1
+        if normalized_status in {"UNPAID", "PART PAYMENT", "PARTIAL"}:
+            amount_owed += outstanding
+        if _is_current_month_date(row.get(date_header, "") if date_header else ""):
+            monthly_sales += paid
 
     # Debtors Summary: count unique debtors or sum their balances
     debtor_balance_header = _get_first_match(
@@ -285,50 +338,69 @@ def sync_dashboard_metrics_from_sheets(sb) -> Dict:
         cash_flow_rows,
     )
 
-    net_profit = total_collected - total_expenses - total_allowances
+    gross_profit = total_collected - total_expenses - total_allowances
+    net_profit = gross_profit - total_service_expenses
 
-    # Inventory Sheet1: PRODUCT STATUS, DESCRIPTION, DEVICE, COST PRICE, NAME OF BUYER
-    # Low stock = PRODUCT STATUS = "SOLD" or quantity fields
+    # Inventory Sheet1: PRODUCT STATUS values: Available, Pending Deal, Sold, Low Quality
     product_status_header = _get_first_match(
         list(inventory_rows[0].keys()) if inventory_rows else [],
         ["PRODUCT STATUS", "product status", "status"],
     )
-    
-    # Count items with PRODUCT STATUS = "SOLD"
-    low_stock_count = 0
+
+    available_products = 0
+    pending_products = 0
+    low_quality_stock = 0
     if product_status_header:
-        low_stock_count = sum(
-            1
-            for r in inventory_rows
-            if str(r.get(product_status_header, "")).strip().upper() == "SOLD"
-        )
+        for r in inventory_rows:
+            status = str(r.get(product_status_header, "")).strip().upper()
+            if status == "AVAILABLE":
+                available_products += 1
+            elif status == "PENDING DEAL":
+                pending_products += 1
+            elif status == "LOW QUALITY":
+                low_quality_stock += 1
 
     values = {
-        "total_billed": total_billed,
-        "total_collected": total_collected,
-        "total_outstanding": total_outstanding,
-        "total_expenses": total_expenses,
-        "total_allowances": total_allowances,
-        "net_profit": net_profit,
-        "total_clients": client_count,
-        "total_invoices": service_count,
-        "total_debtors": debtor_count,
-        "low_stock_count": low_stock_count,
+        "dashboard": {
+            "clients": client_count,
+            "total_invoices": total_invoices,
+            "total_unpaid": total_unpaid,
+            "amount_owed": amount_owed,
+            "monthly_sales": monthly_sales,
+            "available_products": available_products,
+            "pending_products": pending_products,
+            "low_quality_stock": low_quality_stock,
+            "net_profit": net_profit,
+        },
+        "financial": {
+            "total_sales": total_sales,
+            "total_collected": total_collected,
+            "total_outstanding": total_outstanding,
+            "total_expenses": total_expenses,
+            "total_service_expenses": total_service_expenses,
+            "total_allowances": total_allowances,
+            "gross_profit": gross_profit,
+            "net_profit": net_profit,
+        },
         "validation": {
             "first_10_parsed_price_values": parsed_price_values[:10],
             "first_10_parsed_amount_paid_values": parsed_amount_paid_values[:10],
             "final_totals": {
-                "total_billed": total_billed,
+                "total_sales": total_sales,
                 "total_collected": total_collected,
                 "total_outstanding": total_outstanding,
                 "total_expenses": total_expenses,
+                "total_service_expenses": total_service_expenses,
                 "total_allowances": total_allowances,
+                "gross_profit": gross_profit,
                 "net_profit": net_profit,
             },
             "detected_headers": {
                 "services_price": billed_header,
                 "services_amount_paid": paid_header,
                 "services_status": status_header,
+                "services_date": date_header,
+                "services_service_expense": service_expense_header,
             },
             "excluded_rows_count": excluded_rows,
         },
@@ -336,26 +408,13 @@ def sync_dashboard_metrics_from_sheets(sb) -> Dict:
 
     _upsert_with_retry(
         sb,
-        [
-            {"key": "dashboard_total_billed", "value": str(values["total_billed"])},
-            {"key": "dashboard_total_collected", "value": str(values["total_collected"])},
-            {"key": "dashboard_total_outstanding", "value": str(values["total_outstanding"])},
-            {"key": "dashboard_total_expenses", "value": str(values["total_expenses"])},
-            {"key": "dashboard_total_allowances", "value": str(values["total_allowances"])},
-            {"key": "dashboard_net_profit", "value": str(values["net_profit"])},
-        ],
-        on_conflict="key",
-    )
-
-    now_iso = datetime.utcnow().isoformat()
-    _upsert_with_retry(
-        sb,
-        [
-            {"key": "dashboard_total_clients", "value": str(values["total_clients"])},
-            {"key": "dashboard_total_invoices", "value": str(values["total_invoices"])},
-            {"key": "dashboard_low_stock_count", "value": str(values["low_stock_count"])},
-            {"key": "dashboard_last_recalculated_at", "value": now_iso},
-        ],
+        app_settings_payload(
+            {
+                "dashboard": values["dashboard"],
+                "financial": values["financial"],
+            },
+            source="google_sheets",
+        ),
         on_conflict="key",
     )
 
