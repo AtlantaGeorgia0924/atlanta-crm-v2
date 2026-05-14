@@ -30,6 +30,14 @@ def _get_first_match(headers: List[str], aliases: List[str]) -> str:
     return ""
 
 
+def _get_exact_match(headers: List[str], aliases: List[str]) -> str:
+    normalized_aliases = {_normalize_header(a) for a in aliases}
+    for header in headers:
+        if _normalize_header(header) in normalized_aliases:
+            return header
+    return ""
+
+
 # PRE-ACCOUNTING sentinel: any PAID row whose date cannot be determined from the
 # sheet gets this value so the DB trigger (set_paid_at_once) does NOT stamp it
 # with NOW() and inflate current-period metrics.
@@ -89,7 +97,7 @@ def _open_worksheet(book, title: str):
 def _normalized_payment_status(status: str) -> str:
     normalized = _normalize_header(status).upper()
     if normalized in {"PART PAYMENT", "PARTIAL"}:
-        return "PARTIAL"
+        return "PART PAYMENT"
     if normalized in {"UNPAID", "PAID"}:
         return normalized
     return "UNPAID"
@@ -117,6 +125,26 @@ def _batch_upsert(sb, table_name: str, rows: List[dict], on_conflict: str, chunk
                 raise
         else:
             raise RuntimeError(f"Batch upsert to {table_name} failed after 3 attempts: {last_exc}")
+
+
+def _fetch_all_rows(sb, table_name: str, select_clause: str, batch_size: int = 1000) -> List[dict]:
+    rows: List[dict] = []
+    start = 0
+    while True:
+        response = (
+            sb.table(table_name)
+            .select(select_clause)
+            .range(start, start + batch_size - 1)
+            .execute()
+        )
+        batch = response.data or []
+        if not batch:
+            break
+        rows.extend(batch)
+        if len(batch) < batch_size:
+            break
+        start += batch_size
+    return rows
 
 
 def import_google_sheets_to_supabase(sb) -> dict:
@@ -148,20 +176,22 @@ def import_google_sheets_to_supabase(sb) -> dict:
     inventory_rows, inventory_count = _worksheet_rows(inventory_ws) if inventory_ws else ([], 0)
 
     service_headers = list(service_rows[0].keys()) if service_rows else []
-    price_h = _get_first_match(service_headers, ["PRICE", "UNIT PRICE", "AMOUNT CHARGED"])
-    paid_h = _get_first_match(service_headers, ["Amount paid", "PAID", "PAID AMOUNT"])
-    status_h = _get_first_match(service_headers, ["STATUS", "PAYMENT STATUS"])
-    date_h = _get_first_match(service_headers, ["DATE", "SERVICE DATE", "INVOICE DATE"])
-    paid_date_h = _get_first_match(service_headers, ["PAID DATE"])
+    # Use exact-name matching first for critical services columns to avoid
+    # accidental partial matches (for example mapping PRICE to a wrong column).
+    price_h = _get_exact_match(service_headers, ["PRICE"]) or _get_first_match(service_headers, ["PRICE", "UNIT PRICE", "AMOUNT CHARGED"])
+    paid_h = _get_exact_match(service_headers, ["Amount paid"]) or _get_first_match(service_headers, ["Amount paid", "PAID", "PAID AMOUNT"])
+    status_h = _get_exact_match(service_headers, ["STATUS"]) or _get_first_match(service_headers, ["STATUS", "PAYMENT STATUS"])
+    date_h = _get_exact_match(service_headers, ["DATE"]) or _get_first_match(service_headers, ["DATE", "SERVICE DATE", "INVOICE DATE"])
+    paid_date_h = _get_exact_match(service_headers, ["PAID DATE"]) or _get_first_match(service_headers, ["PAID DATE"])
     due_h = _get_first_match(service_headers, ["DUE DATE"])
-    client_h = _get_first_match(service_headers, ["NAME", "CLIENT", "CLIENT NAME"])
-    service_h = _get_first_match(service_headers, ["SERVICE NAME", "DESCRIPTION", "FAULT", "SERVICE"])
+    client_h = _get_exact_match(service_headers, ["NAME"]) or _get_first_match(service_headers, ["NAME", "CLIENT", "CLIENT NAME"])
+    service_h = _get_exact_match(service_headers, ["DESCRIPTION"]) or _get_first_match(service_headers, ["SERVICE NAME", "DESCRIPTION", "FAULT", "SERVICE"])
     qty_h = _get_first_match(service_headers, ["QUANTITY", "QTY"])
-    expense_h = _get_first_match(service_headers, ["SERVICE EXPENSE", "EXPENSE", "EXPENSE AMOUNT"])
-    expense_desc_h = _get_first_match(service_headers, ["EXPENSE DESCRIPTION"])
+    expense_h = _get_exact_match(service_headers, ["EXPENSE AMOUNT"]) or _get_first_match(service_headers, ["SERVICE EXPENSE", "EXPENSE", "EXPENSE AMOUNT"])
+    expense_desc_h = _get_exact_match(service_headers, ["EXPENSE DESCRIPTION"]) or _get_first_match(service_headers, ["EXPENSE DESCRIPTION"])
     expense_date_h = _get_first_match(service_headers, ["EXPENSE DATE"])
     notes_h = _get_first_match(service_headers, ["NOTES"])
-    imei_h = _get_first_match(service_headers, ["IMEI", "SERIAL", "SERIAL NUMBER", "DEVICE IMEI", "IMEI NUMBER"])
+    imei_h = _get_exact_match(service_headers, ["IMEI"]) or _get_first_match(service_headers, ["IMEI", "SERIAL", "SERIAL NUMBER", "DEVICE IMEI", "IMEI NUMBER"])
 
     service_payload = []
     skipped_service_overflow = 0
@@ -214,7 +244,7 @@ def import_google_sheets_to_supabase(sb) -> dict:
         elif payment_status == "UNPAID":
             paid_amount = 0.0
             paid_at_value = None
-        # PARTIAL / PART PAYMENT: keep actual paid_amount from sheet; paid_at stays None
+        # PART PAYMENT: keep actual paid_amount from sheet; paid_at stays None
 
         service_payload.append(
             {
@@ -350,6 +380,70 @@ def import_google_sheets_to_supabase(sb) -> dict:
     if clients_payload:
         _batch_upsert(sb, "clients", clients_payload, on_conflict="id")
 
+    # Post-import validation: compare imported rows to sheet rows by legacy_source_id.
+    imported_service_rows = _fetch_all_rows(
+        sb,
+        "service_jobs",
+        "legacy_source_id,amount_charged,paid_amount,payment_status",
+    )
+    imported_by_legacy = {
+        r.get("legacy_source_id"): r
+        for r in imported_service_rows
+        if str(r.get("legacy_source_id") or "").startswith("sheet_import:service:")
+    }
+
+    validation_checked = 0
+    validation_matches = 0
+    validation_mismatches: List[dict] = []
+    for idx, row in enumerate(service_rows):
+        legacy_source_id = f"sheet_import:service:{idx + 1}"
+        imported_row = imported_by_legacy.get(legacy_source_id)
+        if not imported_row:
+            validation_mismatches.append(
+                {
+                    "legacy_source_id": legacy_source_id,
+                    "reason": "missing imported row",
+                }
+            )
+            continue
+
+        expected_amount_charged = to_number(row.get(price_h)) if price_h else 0.0
+        expected_paid_amount = to_number(row.get(paid_h)) if paid_h else 0.0
+        expected_payment_status = _normalized_payment_status(row.get(status_h, "") if status_h else "")
+
+        if expected_payment_status == "PAID" and expected_paid_amount <= 0:
+            expected_paid_amount = expected_amount_charged
+        elif expected_payment_status == "UNPAID":
+            expected_paid_amount = 0.0
+
+        actual_amount_charged = to_number(imported_row.get("amount_charged"))
+        actual_paid_amount = to_number(imported_row.get("paid_amount"))
+        actual_payment_status = _normalized_payment_status(imported_row.get("payment_status", ""))
+
+        validation_checked += 1
+        if (
+            actual_amount_charged == expected_amount_charged
+            and actual_paid_amount == expected_paid_amount
+            and actual_payment_status == expected_payment_status
+        ):
+            validation_matches += 1
+        else:
+            validation_mismatches.append(
+                {
+                    "legacy_source_id": legacy_source_id,
+                    "expected": {
+                        "amount_charged": expected_amount_charged,
+                        "paid_amount": expected_paid_amount,
+                        "payment_status": expected_payment_status,
+                    },
+                    "actual": {
+                        "amount_charged": actual_amount_charged,
+                        "paid_amount": actual_paid_amount,
+                        "payment_status": actual_payment_status,
+                    },
+                }
+            )
+
     return {
         "imei_col_missing": imei_col_missing,
         "sheets_read": ["Sheet1 (Services)", "CLIENT DIRECTORY", "Sheet1 (Inventory)"],
@@ -377,6 +471,9 @@ def import_google_sheets_to_supabase(sb) -> dict:
                 "client": client_h,
                 "service_name": service_h,
                 "imei": imei_h,
+                "paid_date": paid_date_h,
+                "expense_amount": expense_h,
+                "expense_description": expense_desc_h,
             },
             "clients": {
                 "name": client_name_h,
@@ -391,5 +488,11 @@ def import_google_sheets_to_supabase(sb) -> dict:
                 "selling_price": sell_h,
                 "category": category_h,
             },
+        },
+        "services_import_validation": {
+            "rows_checked": validation_checked,
+            "rows_matched": validation_matches,
+            "rows_mismatched": len(validation_mismatches),
+            "mismatches": validation_mismatches[:100],
         },
     }
