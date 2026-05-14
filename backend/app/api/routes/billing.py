@@ -38,6 +38,7 @@ class BillingCreate(BaseModel):
     quantity: float = 1
     unit_price: float
     amount_paid: float = 0
+    service_expense: float = 0
     status: Optional[str] = "unpaid"
     invoice_date: Optional[str] = None
     due_date: Optional[str] = None
@@ -52,6 +53,7 @@ class BillingUpdate(BaseModel):
     quantity: Optional[float] = None
     unit_price: Optional[float] = None
     amount_paid: Optional[float] = None
+    service_expense: Optional[float] = None
     status: Optional[str] = None
     invoice_date: Optional[str] = None
     due_date: Optional[str] = None
@@ -76,7 +78,11 @@ def list_billing(
         .range(offset, offset + page_size - 1)
     )
     if status:
-        query = query.eq("payment_status", status.upper())
+        normalized = status.strip().upper()
+        if normalized in {"PARTIAL", "PART PAYMENT"}:
+            query = query.in_("payment_status", ["PARTIAL", "PART PAYMENT"])
+        else:
+            query = query.eq("payment_status", normalized)
     if client_id:
         query = query.eq("client_id", client_id)
     result = query.execute()
@@ -85,6 +91,7 @@ def list_billing(
         total = to_number(row.get("amount_charged"))
         paid = to_number(row.get("paid_amount"))
         qty = to_number(row.get("quantity")) or 1
+        service_expense = to_number(row.get("service_expense"))
         outstanding = compute_outstanding(total, paid)
         status_value = compute_payment_status(total, paid)
         row["unit_price"] = total
@@ -92,6 +99,9 @@ def list_billing(
         row["amount_paid"] = paid
         row["balance"] = outstanding
         row["status"] = status_value.lower()
+        row["service_expense"] = service_expense
+        row["gross_profit"] = paid
+        row["net_profit"] = paid - service_expense
         row["invoice_date"] = row.get("service_date")
         row["service_name"] = _best_service_name(row)
         row["description"] = row.get("description") or row.get("service_name")
@@ -150,11 +160,15 @@ def get_billing(billing_id: str, _user=Depends(get_current_user)):
     total = to_number(row.get("amount_charged"))
     paid = to_number(row.get("paid_amount"))
     outstanding = compute_outstanding(total, paid)
+    service_expense = to_number(row.get("service_expense"))
     status_value = compute_payment_status(total, paid)
     row["total_amount"] = total
     row["amount_paid"] = paid
     row["balance"] = outstanding
     row["status"] = status_value.lower()
+    row["service_expense"] = service_expense
+    row["gross_profit"] = paid
+    row["net_profit"] = paid - service_expense
     row["invoice_date"] = row.get("service_date")
     row["service_name"] = _best_service_name(row)
     return row
@@ -180,6 +194,7 @@ def create_billing(payload: BillingCreate, _user=Depends(get_current_user)):
         "amount_charged": total,
         "payment_status": payment_status,
         "paid_amount": amount_paid,
+        "service_expense": to_number(data.get("service_expense", 0)),
         "paid_date": data.get("invoice_date") if payment_status == "PAID" else None,
         "service_date": data.get("invoice_date"),
         "due_date": data.get("due_date"),

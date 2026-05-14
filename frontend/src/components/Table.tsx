@@ -34,9 +34,9 @@ export default function Table<T extends Record<string, unknown>>({ columns, data
             </tr>
           ) : (
             data.map((row) => (
-              <tr key={String(row[keyField])} className="transition-colors" style={{ borderTop: '1px solid #f1e7bf' }}>
+              <tr key={String(row[keyField])} className="group transition-colors hover:bg-[#fff9e7]" style={{ borderTop: '1px solid #f1e7bf' }}>
                 {columns.map((col) => (
-                  <td key={col.key} className="px-4 py-3 whitespace-nowrap hover:bg-[#fff9e7]">
+                  <td key={col.key} className="px-4 py-3 whitespace-nowrap">
                     {col.render ? col.render(row) : String(row[col.key] ?? '—')}
                   </td>
                 ))}

@@ -22,7 +22,10 @@
     background: var(--brand-gold);
     color: var(--brand-black);
   }
-  .btn-primary:hover { filter: brightness(0.95); }
+  .btn-primary:hover {
+    background: #bf9b30;
+    color: var(--brand-black);
+  }
   .btn-secondary {
     @apply inline-flex items-center gap-2 rounded-lg border px-4 py-2 text-sm font-medium
            focus:outline-none focus:ring-2 focus:ring-primary-500
@@ -31,7 +34,10 @@
     background: var(--brand-white);
     color: var(--brand-black);
   }
-  .btn-secondary:hover { background: #f9f6eb; }
+  .btn-secondary:hover {
+    background: var(--brand-gold);
+    color: var(--brand-black);
+  }
   .btn-danger {
     @apply inline-flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium text-white
            focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-offset-2
@@ -42,6 +48,11 @@
     @apply rounded-xl shadow-sm border p-6;
     background: var(--brand-white);
     border-color: #e7d89f;
+    transition: border-color 0.2s ease, box-shadow 0.2s ease;
+  }
+  .card:hover {
+    border-color: var(--brand-gold);
+    box-shadow: 0 6px 20px rgba(212, 175, 55, 0.16);
   }
   .form-input {
     @apply block w-full rounded-lg border bg-white px-3 py-2 text-sm
@@ -53,7 +64,22 @@
     @apply block text-sm font-semibold mb-1;
     color: var(--brand-black);
   }
-  .badge-paid    { @apply inline-flex px-2 py-0.5 rounded-full text-xs font-semibold; background: #e5e7eb; color: #111827; border: 1px solid #d4af37; }
-  .badge-partial { @apply inline-flex px-2 py-0.5 rounded-full text-xs font-semibold; background: #f7f1da; color: #111827; border: 1px solid #d4af37; }
-  .badge-unpaid  { @apply inline-flex px-2 py-0.5 rounded-full text-xs font-semibold; background: #111827; color: #fff; border: 1px solid #d4af37; }
+  .badge-paid {
+    @apply inline-flex px-2 py-0.5 rounded-full text-xs font-semibold;
+    background: #dcfce7;
+    color: #166534;
+    border: 1px solid #86efac;
+  }
+  .badge-partial {
+    @apply inline-flex px-2 py-0.5 rounded-full text-xs font-semibold;
+    background: #fef3c7;
+    color: #92400e;
+    border: 1px solid #fcd34d;
+  }
+  .badge-unpaid {
+    @apply inline-flex px-2 py-0.5 rounded-full text-xs font-semibold;
+    background: #fee2e2;
+    color: #991b1b;
+    border: 1px solid #fca5a5;
+  }
 }

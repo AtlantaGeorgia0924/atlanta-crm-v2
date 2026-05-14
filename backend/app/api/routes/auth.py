@@ -1,7 +1,7 @@
 """Auth routes – thin wrapper; Supabase handles the heavy lifting."""
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, EmailStr
-from app.db.supabase_client import get_supabase
+from app.db.supabase_client import get_supabase, get_supabase_auth
 
 router = APIRouter()
 
@@ -18,7 +18,7 @@ class SignupPayload(BaseModel):
 
 @router.post("/login")
 def login(payload: LoginPayload):
-    sb = get_supabase()
+    sb = get_supabase_auth()
     try:
         result = sb.auth.sign_in_with_password(
             {"email": payload.email, "password": payload.password}
@@ -29,7 +29,8 @@ def login(payload: LoginPayload):
             "user": {"id": str(result.user.id), "email": result.user.email},
         }
     except Exception as e:
-        raise HTTPException(status_code=401, detail="Invalid credentials")
+        print(f"Login error: {str(e)}")
+        raise HTTPException(status_code=401, detail=str(e))
 
 
 @router.post("/signup")

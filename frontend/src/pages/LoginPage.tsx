@@ -13,6 +13,7 @@ interface FormValues {
 export default function LoginPage() {
   const { register, handleSubmit, formState: { errors } } = useForm<FormValues>()
   const [loading, setLoading] = useState(false)
+  const [logoFailed, setLogoFailed] = useState(false)
   const setAuth = useAuthStore((s) => s.setAuth)
   const navigate = useNavigate()
 
@@ -32,7 +33,21 @@ export default function LoginPage() {
   return (
     <div className="min-h-screen flex items-center justify-center bg-gray-50">
       <div className="w-full max-w-sm card">
-        <h1 className="text-2xl font-bold text-center mb-6">CRM Login</h1>
+        <div className="mb-6 flex flex-col items-center gap-3">
+          {!logoFailed && (
+            <img
+              src="/assets/atlanta-logo.jpeg"
+              alt="ATLANTA GEORGIA_TECH"
+              className="h-20 w-20 rounded-xl object-cover border"
+              style={{ borderColor: '#D4AF37' }}
+              onError={() => setLogoFailed(true)}
+            />
+          )}
+          <div className="text-center">
+            <h1 className="text-xl font-bold leading-tight">ATLANTA</h1>
+            <p className="text-sm font-semibold" style={{ color: '#8a6c12' }}>GEORGIA_TECH</p>
+          </div>
+        </div>
         <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
           <div>
             <label className="form-label">Email</label>

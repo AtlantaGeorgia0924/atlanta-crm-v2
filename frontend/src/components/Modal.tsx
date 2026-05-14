@@ -29,7 +29,7 @@ export default function Modal({ title, open, onClose, children, size = 'md' }: P
       >
         <div className="flex items-center justify-between px-6 py-4 border-b" style={{ borderColor: '#e7d89f' }}>
           <h2 className="text-base font-semibold" style={{ color: '#000' }}>{title}</h2>
-          <button onClick={onClose} className="text-gray-500 hover:text-black transition-colors">
+          <button onClick={onClose} className="text-gray-500 transition-colors hover:text-[#D4AF37]">
             <X size={20} />
           </button>
         </div>

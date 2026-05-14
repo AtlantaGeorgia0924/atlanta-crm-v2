@@ -16,6 +16,7 @@ from app.api.routes import (
     sync,
     settings as settings_router,
 )
+from app.api.routes import debug
 
 app = FastAPI(
     title="CRM API",
@@ -43,7 +44,7 @@ app.include_router(expenses.router,        prefix="/expenses",   tags=["Expenses
 app.include_router(allowances.router,      prefix="/allowances", tags=["Allowances"])
 app.include_router(cashflow.router,        prefix="/cashflow",   tags=["CashFlow"])
 app.include_router(dashboard.router,       prefix="/dashboard",  tags=["Dashboard"])
-app.include_router(debug.router,           prefix="/debug",      tags=["Debug"])
+app.include_router(debug.router, prefix="/debug", tags=["Debug"])
 app.include_router(sync.router,            prefix="/sync",       tags=["Sync"])
 app.include_router(settings_router.router, prefix="/settings",   tags=["Settings"])
 

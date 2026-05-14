@@ -3,14 +3,11 @@ import os
 import re
 
 from fastapi import APIRouter, Depends
-
-from app.core.auth import get_current_user
-from app.core.cashflow_sheet_sync import read_sheet_id
-from app.core.config import settings as app_settings
-from app.core.financials import to_number
 from app.db.supabase_client import get_supabase
+from app.core.dashboard_metrics import compute_metrics_from_supabase
+from app.core.auth import get_current_user
 
-router = APIRouter()
+router = APIRouter(tags=["Debug"])
 
 
 def _normalize_header(value: str) -> str:
@@ -372,3 +369,40 @@ def debug_google_sheets(_user=Depends(get_current_user)):
     }
 
     return result
+
+
+@router.get("/debug/imei-matching")
+def debug_imei_matching():
+    """Live IMEI matching and profit diagnostics: returns metrics, row counts, and sample IMEIs."""
+    sb = get_supabase()
+    # Live metrics
+    metrics = compute_metrics_from_supabase(sb)
+    v = metrics.get("validation", {})
+    # Raw IMEI lists
+    service_rows = sb.table("service_jobs").select("id,imei").neq("imei", None).execute().data or []
+    inventory_rows = sb.table("inventory_items").select("id,imei,cost_price").neq("imei", None).execute().data or []
+    service_imeis = [str(r["imei"]).strip().upper() for r in service_rows if r.get("imei")]
+    inventory_imeis = [str(r["imei"]).strip().upper() for r in inventory_rows if r.get("imei")]
+    inventory_imei_set = set(inventory_imeis)
+    unmatched_imeis = [imei for imei in service_imeis if imei not in inventory_imei_set]
+    matched_imeis = [imei for imei in service_imeis if imei in inventory_imei_set]
+    # Count matched rows with missing/zero cost_price
+    cost_map = {str(r["imei"]).strip().upper(): r.get("cost_price") for r in inventory_rows}
+    matched_missing_cost = [imei for imei in matched_imeis if not cost_map.get(imei) or float(cost_map.get(imei) or 0) <= 0]
+    return {
+        "metrics": {
+            "inventory_matched_by_imei": v.get("inventory_matched_by_imei"),
+            "imei_no_inventory_match": v.get("imei_no_inventory_match"),
+            "skipped_missing_cost_price": v.get("skipped_missing_cost_price"),
+            "total_inventory_profit": v.get("total_inventory_profit"),
+            "total_service_profit": v.get("total_service_profit"),
+            "final_net_profit": v.get("final_net_profit"),
+        },
+        "diagnostics": {
+            "service_jobs_with_imei": len(service_imeis),
+            "inventory_items_with_imei": len(inventory_imeis),
+            "first_20_unmatched_service_imeis": unmatched_imeis[:20],
+            "first_20_inventory_imeis": inventory_imeis[:20],
+            "matched_with_missing_cost_price": len(matched_missing_cost),
+        },
+    }

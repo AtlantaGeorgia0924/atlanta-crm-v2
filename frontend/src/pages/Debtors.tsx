@@ -5,7 +5,7 @@ import api from '@/lib/api'
 import Table from '@/components/Table'
 import Modal from '@/components/Modal'
 import LoadingSpinner from '@/components/LoadingSpinner'
-import { formatCurrency, statusBadgeClass } from '@/lib/utils'
+import { formatCurrency, statusBadgeClass, statusLabel } from '@/lib/utils'
 import { DollarSign } from 'lucide-react'
 import toast from 'react-hot-toast'
 
@@ -68,7 +68,7 @@ export default function Debtors() {
     { key: 'total_amount', header: 'Total',   render: (r: Debtor) => formatCurrency(r.total_amount, currency) },
     { key: 'amount_paid',  header: 'Paid',    render: (r: Debtor) => formatCurrency(r.amount_paid, currency) },
     { key: 'balance',      header: 'Balance', render: (r: Debtor) => <span className="font-semibold text-red-600">{formatCurrency(r.balance, currency)}</span> },
-    { key: 'status',       header: 'Status',  render: (r: Debtor) => <span className={statusBadgeClass(r.status)}>{r.status}</span> },
+    { key: 'status',       header: 'Status',  render: (r: Debtor) => <span className={statusBadgeClass(r.status)}>{statusLabel(r.status)}</span> },
     { key: 'due_date',     header: 'Due',     render: (r: Debtor) => r.due_date ? new Date(r.due_date).toLocaleDateString() : '—' },
     {
       key: 'actions', header: '',

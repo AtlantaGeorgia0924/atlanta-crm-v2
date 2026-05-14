@@ -5,7 +5,7 @@ import api from '@/lib/api'
 import Table from '@/components/Table'
 import Modal from '@/components/Modal'
 import LoadingSpinner from '@/components/LoadingSpinner'
-import { formatCurrency, formatDate, statusBadgeClass } from '@/lib/utils'
+import { formatCurrency, formatDate, statusBadgeClass, statusLabel } from '@/lib/utils'
 import { Plus, Pencil, Trash2 } from 'lucide-react'
 import toast from 'react-hot-toast'
 
@@ -19,6 +19,9 @@ interface BillingRow {
   amount_paid: number
   balance: number
   status: string
+  service_expense: number
+  gross_profit: number
+  net_profit: number
   invoice_date: string
   due_date: string
 }
@@ -36,6 +39,7 @@ interface FormValues {
   quantity: number
   unit_price: number
   amount_paid: number
+  service_expense: number
   invoice_date: string
   due_date: string
   notes: string
@@ -127,6 +131,8 @@ export default function Billing() {
 
       const payload = {
         ...values,
+        amount_paid: Number.isFinite(values.amount_paid) ? values.amount_paid : 0,
+        service_expense: Number.isFinite(values.service_expense) ? values.service_expense : 0,
         client_id: clientId || undefined,
       }
 
@@ -161,6 +167,7 @@ export default function Billing() {
       quantity: row.quantity,
       unit_price: row.unit_price,
       amount_paid: row.amount_paid,
+      service_expense: row.service_expense || 0,
       invoice_date: row.invoice_date?.slice(0, 10),
       due_date: row.due_date?.slice(0, 10),
     })
@@ -185,8 +192,10 @@ export default function Billing() {
     { key: 'service_name', header: 'Service' },
     { key: 'total_amount', header: 'Total', render: (r: BillingRow) => formatCurrency(r.total_amount, currency) },
     { key: 'amount_paid',  header: 'Paid',  render: (r: BillingRow) => formatCurrency(r.amount_paid, currency) },
+    { key: 'service_expense', header: 'Expense', render: (r: BillingRow) => formatCurrency(r.service_expense || 0, currency) },
+    { key: 'net_profit', header: 'Net Profit', render: (r: BillingRow) => formatCurrency(r.net_profit || 0, currency) },
     { key: 'balance',      header: 'Balance', render: (r: BillingRow) => formatCurrency(r.balance, currency) },
-    { key: 'status',       header: 'Status', render: (r: BillingRow) => <span className={statusBadgeClass(r.status)}>{r.status}</span> },
+    { key: 'status',       header: 'Status', render: (r: BillingRow) => <span className={statusBadgeClass(r.status)}>{statusLabel(r.status)}</span> },
     { key: 'invoice_date', header: 'Date', render: (r: BillingRow) => formatDate(r.invoice_date) },
     {
       key: 'actions', header: '',
@@ -211,7 +220,7 @@ export default function Billing() {
           <button
             key={s}
             onClick={() => { setStatusFilter(s); setPage(1) }}
-            className={`px-3 py-1 rounded-full text-xs font-medium border transition-colors ${statusFilter === s ? 'bg-primary-600 text-white border-primary-600' : 'bg-white text-gray-600 border-gray-300 hover:bg-gray-50'}`}
+            className={`px-3 py-1 rounded-full text-xs font-medium border transition-colors ${statusFilter === s ? 'text-black border-[#D4AF37] bg-[#D4AF37]' : 'bg-white text-gray-600 border-gray-300 hover:bg-[#fff9e7] hover:border-[#D4AF37] hover:text-black'}`}
           >
             {s || 'All'}
           </button>
@@ -302,6 +311,10 @@ export default function Billing() {
           <div>
             <label className="form-label">Amount Paid</label>
             <input type="number" step="0.01" className="form-input" {...register('amount_paid', { valueAsNumber: true })} />
+          </div>
+          <div>
+            <label className="form-label">Service Expense</label>
+            <input type="number" step="0.01" className="form-input" {...register('service_expense', { valueAsNumber: true })} />
           </div>
           <div>
             <label className="form-label">Invoice Date</label>

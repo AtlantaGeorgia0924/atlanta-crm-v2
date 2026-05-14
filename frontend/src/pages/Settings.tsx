@@ -5,7 +5,7 @@ import api from '@/lib/api'
 import LoadingSpinner from '@/components/LoadingSpinner'
 import Modal from '@/components/Modal'
 import toast from 'react-hot-toast'
-import { Save, Copy, Bug } from 'lucide-react'
+import { Save, Copy, Bug, Search } from 'lucide-react'
 
 interface SettingsMap {
   business_name?: string
@@ -23,6 +23,17 @@ export default function Settings() {
   const [countdown, setCountdown] = useState(5)
   const [debugModalOpen, setDebugModalOpen] = useState(false)
   const [debugData, setDebugData] = useState<Record<string, any> | null>(null)
+  const [imeiDebugModalOpen, setImeiDebugModalOpen] = useState(false)
+  const [imeiDebugData, setImeiDebugData] = useState<Record<string, any> | null>(null)
+  const imeiDebugMutation = useMutation({
+    mutationFn: () => api.get('/debug/imei-matching').then((r) => r.data),
+    onSuccess: (res: any) => {
+      setImeiDebugData(res)
+      setImeiDebugModalOpen(true)
+      toast.success('IMEI debug data loaded')
+    },
+    onError: (e: any) => toast.error(e?.response?.data?.detail ?? 'IMEI debug request failed'),
+  })
 
   useEffect(() => {
     if (!confirmSyncOpen) return
@@ -180,6 +191,50 @@ export default function Settings() {
           >
             <Bug size={15} /> {debugMutation.isPending ? 'Loading…' : 'Debug Google Sheets'}
           </button>
+          <button
+            type="button"
+            className="btn-secondary"
+            onClick={() => imeiDebugMutation.mutate()}
+            disabled={imeiDebugMutation.isPending}
+          >
+            <Search size={15} /> {imeiDebugMutation.isPending ? 'Loading…' : 'Debug IMEI Matching'}
+          </button>
+              <Modal
+                title="IMEI Matching Debug Information"
+                open={imeiDebugModalOpen}
+                onClose={() => setImeiDebugModalOpen(false)}
+              >
+                <div className="space-y-4">
+                  {imeiDebugData && (
+                    <>
+                      <div className="bg-gray-100 rounded p-4 max-h-96 overflow-y-auto">
+                        <pre className="text-xs font-mono text-gray-800 whitespace-pre-wrap break-words">
+                          {JSON.stringify(imeiDebugData, null, 2)}
+                        </pre>
+                      </div>
+                      <div className="flex gap-2 justify-end">
+                        <button
+                          type="button"
+                          className="btn-secondary"
+                          onClick={() => {
+                            navigator.clipboard.writeText(JSON.stringify(imeiDebugData, null, 2))
+                            toast.success('Copied to clipboard')
+                          }}
+                        >
+                          <Copy size={15} /> Copy JSON
+                        </button>
+                        <button
+                          type="button"
+                          className="btn-primary"
+                          onClick={() => setImeiDebugModalOpen(false)}
+                        >
+                          Close
+                        </button>
+                      </div>
+                    </>
+                  )}
+                </div>
+              </Modal>
         </form>
       </div>
 
