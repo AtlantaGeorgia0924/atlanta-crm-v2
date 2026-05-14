@@ -53,13 +53,22 @@ def compute_metrics_from_supabase(sb) -> dict:
             or []
         )
     except Exception:
-        services = (
-            sb.table("service_jobs")
-            .select("id,amount_charged,paid_amount,payment_status,service_date,expense_amount")
-            .execute()
-            .data
-            or []
-        )
+        try:
+            services = (
+                sb.table("service_jobs")
+                .select("id,amount_charged,paid_amount,payment_status,service_date,expense_amount,imei")
+                .execute()
+                .data
+                or []
+            )
+        except Exception:
+            services = (
+                sb.table("service_jobs")
+                .select("id,amount_charged,paid_amount,payment_status,service_date,expense_amount")
+                .execute()
+                .data
+                or []
+            )
     try:
         inventory = sb.table("inventory_items").select("id,product_status,payment_status,cost_price,imei,sku").execute().data or []
     except Exception:
@@ -85,6 +94,7 @@ def compute_metrics_from_supabase(sb) -> dict:
     inventory_profit_total = 0.0
     service_profit_total = 0.0
     unmatched_imei_count = 0
+    skipped_missing_cost_price = 0
 
     for row in services:
         total = to_number(row.get("amount_charged"))
@@ -104,10 +114,18 @@ def compute_metrics_from_supabase(sb) -> dict:
             if imei in imei_inventory_map:
                 inventory_matched_count += 1
                 cost_price = imei_inventory_map[imei]
+                if cost_price <= 0:
+                    skipped_missing_cost_price += 1
+                    logger.warning(
+                        "Skipping IMEI sale due to missing/zero cost_price for service row id=%s imei=%s",
+                        row.get("id"),
+                        imei,
+                    )
+                    continue
             else:
                 unmatched_imei_count += 1
-                cost_price = 0.0
-                logger.warning("No inventory IMEI match for service row id=%s imei=%s; using cost_price=0", row.get("id"), imei)
+                logger.warning("No inventory IMEI match for service row id=%s imei=%s; excluding from inventory profit", row.get("id"), imei)
+                continue
             inventory_profit_total += paid - cost_price
         else:
             service_profit_total += paid - service_expense
@@ -164,6 +182,7 @@ def compute_metrics_from_supabase(sb) -> dict:
             "total_service_profit": service_profit_total,
             "final_net_profit": net_profit,
             "imei_no_inventory_match": unmatched_imei_count,
+            "skipped_missing_cost_price": skipped_missing_cost_price,
         },
     }
 
@@ -196,6 +215,7 @@ def app_settings_payload(metrics: dict, source: str) -> list[dict]:
         {"key": "finance_total_service_profit", "value": str(validation.get("total_service_profit", 0))},
         {"key": "finance_final_net_profit", "value": str(validation.get("final_net_profit", financial["net_profit"]))},
         {"key": "finance_imei_no_inventory_match", "value": str(validation.get("imei_no_inventory_match", 0))},
+        {"key": "finance_skipped_missing_cost_price", "value": str(validation.get("skipped_missing_cost_price", 0))},
         {"key": "dashboard_last_recalculated_at", "value": now_iso},
         {"key": "dashboard_last_source", "value": source},
     ]

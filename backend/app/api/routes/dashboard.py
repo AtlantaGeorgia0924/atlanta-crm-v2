@@ -77,6 +77,7 @@ def dashboard_validation(_user=Depends(get_current_user)):
                 "finance_total_service_profit",
                 "finance_final_net_profit",
                 "finance_imei_no_inventory_match",
+                "finance_skipped_missing_cost_price",
             ],
         )
         .execute()
@@ -95,11 +96,18 @@ def dashboard_validation(_user=Depends(get_current_user)):
         "low_quality_stock": values["low_quality_stock"],
         "net_profit": values["net_profit"],
         "clients": values["clients"],
+        "inventory_matched_by_imei": int(to_number(settings_map.get("finance_inventory_matched_by_imei"))),
+        "imei_no_inventory_match": int(to_number(settings_map.get("finance_imei_no_inventory_match"))),
+        "skipped_missing_cost_price": int(to_number(settings_map.get("finance_skipped_missing_cost_price"))),
+        "total_inventory_profit": to_number(settings_map.get("finance_total_inventory_profit")),
+        "total_service_profit": to_number(settings_map.get("finance_total_service_profit")),
+        "final_net_profit": to_number(settings_map.get("finance_final_net_profit")),
         "imei_validation": {
             "inventory_matched_by_imei": int(to_number(settings_map.get("finance_inventory_matched_by_imei"))),
             "total_inventory_profit": to_number(settings_map.get("finance_total_inventory_profit")),
             "total_service_profit": to_number(settings_map.get("finance_total_service_profit")),
             "final_net_profit": to_number(settings_map.get("finance_final_net_profit")),
             "imei_no_inventory_match": int(to_number(settings_map.get("finance_imei_no_inventory_match"))),
+            "skipped_missing_cost_price": int(to_number(settings_map.get("finance_skipped_missing_cost_price"))),
         },
     }
