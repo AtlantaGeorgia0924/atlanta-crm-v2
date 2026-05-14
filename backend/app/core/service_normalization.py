@@ -75,10 +75,19 @@ def normalize_service_jobs_data(sb) -> Dict[str, int]:
         
         # Normalize RETURNED status
         if payment_status == "RETURNED":
-            is_return = True
-            paid_amount = 0.0
-            has_changes = True
-            counts["rows_marked_returned"] += 1
+            if not is_return:
+                is_return = True
+                has_changes = True
+                counts["rows_marked_returned"] += 1
+            if paid_amount != 0.0:
+                paid_amount = 0.0
+                has_changes = True
+                counts["rows_fixed_paid_amount"] += 1
+        else:
+            # Non-returned rows must always be marked as not returned
+            if is_return:
+                is_return = False
+                has_changes = True
 
         # PAID row normalization
         if payment_status == "PAID":
@@ -109,8 +118,8 @@ def normalize_service_jobs_data(sb) -> Dict[str, int]:
                 has_changes = True
                 counts["rows_fixed_paid_amount"] += 1
 
-        # Clamp overpayments
-        if paid_amount > amount_charged:
+        # Clamp overpayments (skip RETURNED rows which are always 0)
+        if payment_status != "RETURNED" and paid_amount > amount_charged:
             paid_amount = amount_charged
             has_changes = True
             counts["rows_clamped_overpayment"] += 1

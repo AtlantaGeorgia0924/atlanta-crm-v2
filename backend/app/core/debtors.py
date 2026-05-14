@@ -61,6 +61,7 @@ def compute_debtors_from_supabase(sb) -> dict:
 
         include = (
             status in {"UNPAID", "PART PAYMENT"}
+            and status != "RETURNED"
             and outstanding > 0
             and not is_return
         )

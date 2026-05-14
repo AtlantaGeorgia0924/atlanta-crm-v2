@@ -41,6 +41,10 @@ def _is_unpaid(status: str) -> bool:
     return _norm(status) == "UNPAID"
 
 
+def _is_returned(status: str, is_return: bool) -> bool:
+    return _norm(status) == "RETURNED" or bool(is_return)
+
+
 def _is_current_month(value) -> bool:
     if not value:
         return False
@@ -166,7 +170,7 @@ def compute_metrics_from_supabase(sb) -> dict:
         status = _norm(row.get("payment_status"))
         expense = to_number(row.get("service_expense_amount")) or to_number(row.get("expense_amount"))
         paid_at = _parse_dt(row.get("paid_at") or row.get("paid_date"))
-        is_reversed = bool(row.get("is_return"))
+        is_reversed = _is_returned(status, bool(row.get("is_return")))
         imei = _norm_imei(row.get("imei"))
 
         total_invoices += 1
@@ -437,7 +441,7 @@ def compute_profit_ledger(sb) -> dict:
         status = _norm(row.get("payment_status"))
         expense = to_number(row.get("service_expense_amount")) or to_number(row.get("expense_amount"))
         paid_at = _parse_dt(row.get("paid_at") or row.get("paid_date"))
-        is_reversed = bool(row.get("is_return"))
+        is_reversed = _is_returned(status, bool(row.get("is_return")))
         imei = _norm_imei(row.get("imei"))
 
         # Gate: basic inclusion

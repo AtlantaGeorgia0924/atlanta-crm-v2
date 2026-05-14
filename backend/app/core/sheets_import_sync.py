@@ -96,6 +96,8 @@ def _open_worksheet(book, title: str):
 
 def _normalized_payment_status(status: str) -> str:
     normalized = _normalize_header(status).upper()
+    if normalized == "RETURNED":
+        return "RETURNED"
     if normalized in {"PART PAYMENT", "PARTIAL"}:
         return "PART PAYMENT"
     if normalized in {"UNPAID", "PAID"}:
@@ -233,14 +235,20 @@ def import_google_sheets_to_supabase(sb) -> dict:
         # Normalize paid_amount by payment status:
         # PAID: paid_amount must equal amount_charged if it is 0/null
         # UNPAID: force paid_amount = 0
+        # RETURNED: force paid_amount = 0 and mark as return
         # PARTIAL/PART PAYMENT: keep the actual value from the sheet
         paid_at_value = None
+        is_return_value = False
         if payment_status == "PAID":
             if paid_amount <= 0:
                 paid_amount = amount_charged
             # Prefer PAID DATE, fall back to service date, then sentinel so the DB
             # trigger (set_paid_at_once) does NOT stamp the row with NOW() and inflate metrics.
             paid_at_value = paid_date_value or service_date_value or _PRE_ACCOUNTING_SENTINEL
+        elif payment_status == "RETURNED":
+            paid_amount = 0.0
+            paid_at_value = None
+            is_return_value = True
         elif payment_status == "UNPAID":
             paid_amount = 0.0
             paid_at_value = None
@@ -260,6 +268,7 @@ def import_google_sheets_to_supabase(sb) -> dict:
                 "service_expense_date": _parse_date(row.get(expense_date_h)) if expense_date_h else None,
                 "calculated_profit": paid_amount,
                 "payment_status": payment_status,
+                "is_return": is_return_value,
                 "paid_date": paid_date_value,
                 "paid_at": paid_at_value,  # This is the key field for profit calculations
                 "service_date": service_date_value,
@@ -413,6 +422,8 @@ def import_google_sheets_to_supabase(sb) -> dict:
 
         if expected_payment_status == "PAID" and expected_paid_amount <= 0:
             expected_paid_amount = expected_amount_charged
+        elif expected_payment_status == "RETURNED":
+            expected_paid_amount = 0.0
         elif expected_payment_status == "UNPAID":
             expected_paid_amount = 0.0
 
