@@ -25,7 +25,7 @@ const nav = [
 export default function Layout() {
   const { clear, user } = useAuthStore()
   const navigate = useNavigate()
-  const [pendingAction, setPendingAction] = useState<'refreshSheets' | 'refreshWorkspace' | 'sync' | null>(null)
+  const [pendingAction, setPendingAction] = useState<'refreshSheets' | 'refreshWorkspace' | 'sync' | 'resetRebuild' | null>(null)
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [logoFailed, setLogoFailed] = useState(false)
 
@@ -38,6 +38,9 @@ export default function Layout() {
     }
     if (pendingAction === 'sync') {
       return 'This will overwrite the selected Google Sheets with the latest Supabase data. Continue?'
+    }
+    if (pendingAction === 'resetRebuild') {
+      return 'This will backup imported rows, truncate Services/Inventory/Clients, clear cached metrics, re-import from Google Sheets, and rebuild all metrics. Continue?'
     }
     return ''
   }, [pendingAction])
@@ -114,6 +117,35 @@ export default function Layout() {
     }
   }
 
+  const handleResetImportedDataAndRebuild = async () => {
+    try {
+      const { data } = await api.post('/sync/reset-imported-data-rebuild')
+      const backedUp = data?.backup?.rows_backed_up && typeof data.backup.rows_backed_up === 'object'
+        ? Object.entries(data.backup.rows_backed_up)
+            .map(([name, count]) => `${name}: ${count}`)
+            .join(' | ')
+        : ''
+      const deleted = data?.deleted_rows && typeof data.deleted_rows === 'object'
+        ? Object.entries(data.deleted_rows)
+            .map(([name, count]) => `${name}: ${count}`)
+            .join(' | ')
+        : ''
+      const imported = data?.imported_rows && typeof data.imported_rows === 'object'
+        ? Object.entries(data.imported_rows)
+            .map(([name, count]) => `${name}: ${count}`)
+            .join(' | ')
+        : ''
+      toast.success([
+        backedUp ? `backed up: ${backedUp}` : '',
+        deleted ? `deleted: ${deleted}` : '',
+        imported ? `imported: ${imported}` : '',
+      ].filter(Boolean).join(' • ') || 'Reset and rebuild completed')
+      window.location.reload()
+    } catch (e: any) {
+      toast.error(e?.response?.data?.detail ?? 'Reset imported data and rebuild failed')
+    }
+  }
+
   const executeConfirmedAction = async () => {
     if (!pendingAction) return
     setIsSubmitting(true)
@@ -122,6 +154,8 @@ export default function Layout() {
         await handleRefreshFromSheets()
       } else if (pendingAction === 'refreshWorkspace') {
         await handleRefreshWorkspace()
+      } else if (pendingAction === 'resetRebuild') {
+        await handleResetImportedDataAndRebuild()
       } else {
         await handleSync()
       }
@@ -183,6 +217,9 @@ export default function Layout() {
           </button>
           <button onClick={() => setPendingAction('sync')} className="flex items-center gap-3 w-full rounded-lg px-3 py-2 text-sm text-gray-200 hover:text-black transition-colors hover:bg-[#D4AF37]">
             <Sheet size={16} /> Sync to Google Sheets
+          </button>
+          <button onClick={() => setPendingAction('resetRebuild')} className="flex items-center gap-3 w-full rounded-lg px-3 py-2 text-sm text-gray-200 hover:text-black transition-colors hover:bg-[#D4AF37]">
+            <RefreshCw size={16} /> Reset Imported Data and Rebuild
           </button>
           <button onClick={handleLogout} className="flex items-center gap-3 w-full rounded-lg px-3 py-2 text-sm text-gray-200 hover:text-black transition-colors hover:bg-[#D4AF37]">
             <LogOut size={16} /> Logout

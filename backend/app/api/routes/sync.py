@@ -4,6 +4,7 @@ No other endpoint calls Google Sheets.
 import os
 import ssl
 import time
+import json
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException
 from app.db.supabase_client import get_supabase
@@ -14,6 +15,84 @@ from app.core.metrics_refresh import recompute_and_persist_metrics
 from app.core.sheets_import_sync import import_google_sheets_to_supabase
 
 router = APIRouter()
+
+
+def _backup_imported_rows(sb, backup_stamp: str) -> dict:
+    service_rows = (
+        sb.table("service_jobs")
+        .select("*", count="exact")
+        .ilike("legacy_source_id", "sheet_import:service:%")
+        .execute()
+    )
+    inventory_rows = (
+        sb.table("inventory_items")
+        .select("*", count="exact")
+        .ilike("legacy_source_id", "sheet_import:inventory:%")
+        .execute()
+    )
+    client_rows = (
+        sb.table("clients")
+        .select("*", count="exact")
+        .ilike("id", "sheet_import:client:%")
+        .execute()
+    )
+
+    service_data = service_rows.data or []
+    inventory_data = inventory_rows.data or []
+    client_data = client_rows.data or []
+
+    backup_payload = [
+        {
+            "key": f"backup_import_service_jobs_{backup_stamp}",
+            "value": json.dumps(service_data),
+            "description": f"Backup before reset imported data ({backup_stamp})",
+        },
+        {
+            "key": f"backup_import_inventory_items_{backup_stamp}",
+            "value": json.dumps(inventory_data),
+            "description": f"Backup before reset imported data ({backup_stamp})",
+        },
+        {
+            "key": f"backup_import_clients_{backup_stamp}",
+            "value": json.dumps(client_data),
+            "description": f"Backup before reset imported data ({backup_stamp})",
+        },
+    ]
+    sb.table("app_settings").upsert(backup_payload, on_conflict="key").execute()
+
+    return {
+        "service_jobs": len(service_data),
+        "inventory_items": len(inventory_data),
+        "clients": len(client_data),
+    }
+
+
+def _truncate_target_tables(sb) -> dict:
+    service_resp = sb.table("service_jobs").delete().gte("created_at", "1900-01-01").execute()
+    inventory_resp = sb.table("inventory_items").delete().gte("created_at", "1900-01-01").execute()
+    clients_resp = sb.table("clients").delete().gte("created_at", "1900-01-01").execute()
+
+    return {
+        "service_jobs": len(service_resp.data or []),
+        "inventory_items": len(inventory_resp.data or []),
+        "clients": len(clients_resp.data or []),
+    }
+
+
+def _clear_cached_financial_metrics(sb) -> dict:
+    settings_rows = sb.table("app_settings").select("key").execute().data or []
+    cached_keys = []
+    for row in settings_rows:
+        key = str(row.get("key") or "")
+        if key.startswith("finance_") or key.startswith("dashboard_"):
+            cached_keys.append(key)
+
+    if cached_keys:
+        sb.table("app_settings").delete().in_("key", cached_keys).execute()
+
+    return {"keys_cleared": len(cached_keys), "keys": cached_keys}
+
+
 def _overwrite_worksheet(spreadsheet, tab_name: str, data: list[dict]) -> int:
     import gspread
 
@@ -160,3 +239,43 @@ def refresh_from_google_sheets(_user=Depends(get_current_user)):
 def refresh_from_supabase(_user=Depends(get_current_user)):
     """Backward-compatible alias for refresh-workspace (Supabase-only)."""
     return refresh_workspace(_user)
+
+
+@router.post("/reset-imported-data-rebuild")
+def reset_imported_data_and_rebuild(_user=Depends(get_current_user)):
+    """
+    Backup imported rows, truncate target tables, clear cached metrics,
+    import fresh rows from Google Sheets, then recalculate all metrics.
+    """
+    sb = get_supabase()
+    backup_stamp = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+
+    try:
+        backup_counts = _backup_imported_rows(sb, backup_stamp)
+        deleted_counts = _truncate_target_tables(sb)
+        cache_clear = _clear_cached_financial_metrics(sb)
+
+        import_result = import_google_sheets_to_supabase(sb)
+        metrics = recompute_and_persist_metrics(sb, source="reset_imported_data_rebuild")
+    except Exception as e:
+        raise HTTPException(500, f"Reset imported data and rebuild failed: {str(e)}")
+
+    refreshed_at = datetime.utcnow().isoformat()
+    sb.table("app_settings").upsert(
+        {"key": "last_reset_imported_data_rebuild", "value": refreshed_at}
+    ).execute()
+
+    return {
+        "message": "Imported data reset and rebuild completed.",
+        "refreshed_at": refreshed_at,
+        "source": "reset_imported_data_rebuild",
+        "backup": {
+            "stamp": backup_stamp,
+            "rows_backed_up": backup_counts,
+        },
+        "deleted_rows": deleted_counts,
+        "cache_cleared": cache_clear,
+        "imported_rows": import_result.get("rows_upserted", {}),
+        "rows_processed": import_result.get("rows_processed", {}),
+        "final_metrics": metrics,
+    }
