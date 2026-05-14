@@ -1,6 +1,9 @@
+import logging
 from datetime import datetime
 
 from app.core.financials import compute_outstanding, to_number
+
+logger = logging.getLogger(__name__)
 
 
 def _norm(value: str) -> str:
@@ -35,12 +38,16 @@ def _is_current_month(value) -> bool:
     return parsed.year == now.year and parsed.month == now.month
 
 
+def _norm_imei(value) -> str:
+    return str(value or "").strip().upper()
+
+
 def compute_metrics_from_supabase(sb) -> dict:
     clients = sb.table("clients").select("id").execute().data or []
     try:
         services = (
             sb.table("service_jobs")
-            .select("id,amount_charged,paid_amount,payment_status,service_date,service_expense")
+            .select("id,amount_charged,paid_amount,payment_status,service_date,service_expense,expense_amount,imei")
             .execute()
             .data
             or []
@@ -48,15 +55,15 @@ def compute_metrics_from_supabase(sb) -> dict:
     except Exception:
         services = (
             sb.table("service_jobs")
-            .select("id,amount_charged,paid_amount,payment_status,service_date")
+            .select("id,amount_charged,paid_amount,payment_status,service_date,expense_amount")
             .execute()
             .data
             or []
         )
     try:
-        inventory = sb.table("inventory_items").select("id,product_status,payment_status").execute().data or []
+        inventory = sb.table("inventory_items").select("id,product_status,payment_status,cost_price,imei,sku").execute().data or []
     except Exception:
-        inventory = sb.table("inventory_items").select("id,payment_status").execute().data or []
+        inventory = sb.table("inventory_items").select("id,payment_status,cost_price,sku").execute().data or []
     expenses = sb.table("manual_expenses").select("amount").execute().data or []
     allowances = sb.table("allowance_withdrawals").select("amount").execute().data or []
 
@@ -68,18 +75,42 @@ def compute_metrics_from_supabase(sb) -> dict:
     total_collected = 0.0
     total_outstanding = 0.0
     total_service_expenses = 0.0
+    imei_inventory_map = {}
+    for inv in inventory:
+        inv_imei = _norm_imei(inv.get("imei") or inv.get("sku"))
+        if inv_imei and inv_imei not in imei_inventory_map:
+            imei_inventory_map[inv_imei] = to_number(inv.get("cost_price"))
+
+    inventory_matched_count = 0
+    inventory_profit_total = 0.0
+    service_profit_total = 0.0
+    unmatched_imei_count = 0
 
     for row in services:
         total = to_number(row.get("amount_charged"))
         paid = to_number(row.get("paid_amount"))
         status = _norm(row.get("payment_status"))
         outstanding = compute_outstanding(total, paid)
+        service_expense = to_number(row.get("service_expense")) or to_number(row.get("expense_amount"))
+        imei = _norm_imei(row.get("imei"))
 
         total_invoices += 1
         total_sales += total
         total_collected += paid
         total_outstanding += outstanding
-        total_service_expenses += to_number(row.get("service_expense"))
+        total_service_expenses += service_expense
+
+        if imei:
+            if imei in imei_inventory_map:
+                inventory_matched_count += 1
+                cost_price = imei_inventory_map[imei]
+            else:
+                unmatched_imei_count += 1
+                cost_price = 0.0
+                logger.warning("No inventory IMEI match for service row id=%s imei=%s; using cost_price=0", row.get("id"), imei)
+            inventory_profit_total += paid - cost_price
+        else:
+            service_profit_total += paid - service_expense
 
         if _is_unpaid(status):
             total_unpaid += 1
@@ -102,8 +133,8 @@ def compute_metrics_from_supabase(sb) -> dict:
 
     total_expenses = sum(to_number(row.get("amount")) for row in expenses)
     total_allowances = sum(to_number(row.get("amount")) for row in allowances)
-    gross_profit = total_collected - total_expenses - total_allowances
-    net_profit = gross_profit - total_service_expenses
+    gross_profit = inventory_profit_total + service_profit_total
+    net_profit = gross_profit - total_expenses - total_allowances
 
     return {
         "dashboard": {
@@ -127,6 +158,13 @@ def compute_metrics_from_supabase(sb) -> dict:
             "gross_profit": gross_profit,
             "net_profit": net_profit,
         },
+        "validation": {
+            "inventory_matched_by_imei": inventory_matched_count,
+            "total_inventory_profit": inventory_profit_total,
+            "total_service_profit": service_profit_total,
+            "final_net_profit": net_profit,
+            "imei_no_inventory_match": unmatched_imei_count,
+        },
     }
 
 
@@ -134,6 +172,7 @@ def app_settings_payload(metrics: dict, source: str) -> list[dict]:
     now_iso = datetime.utcnow().isoformat()
     dashboard = metrics["dashboard"]
     financial = metrics["financial"]
+    validation = metrics.get("validation", {})
     return [
         {"key": "dashboard_total_clients", "value": str(dashboard["clients"])},
         {"key": "dashboard_total_invoices", "value": str(dashboard["total_invoices"])},
@@ -152,6 +191,11 @@ def app_settings_payload(metrics: dict, source: str) -> list[dict]:
         {"key": "finance_total_allowances", "value": str(financial["total_allowances"])},
         {"key": "finance_gross_profit", "value": str(financial["gross_profit"])},
         {"key": "finance_net_profit", "value": str(financial["net_profit"])},
+        {"key": "finance_inventory_matched_by_imei", "value": str(validation.get("inventory_matched_by_imei", 0))},
+        {"key": "finance_total_inventory_profit", "value": str(validation.get("total_inventory_profit", 0))},
+        {"key": "finance_total_service_profit", "value": str(validation.get("total_service_profit", 0))},
+        {"key": "finance_final_net_profit", "value": str(validation.get("final_net_profit", financial["net_profit"]))},
+        {"key": "finance_imei_no_inventory_match", "value": str(validation.get("imei_no_inventory_match", 0))},
         {"key": "dashboard_last_recalculated_at", "value": now_iso},
         {"key": "dashboard_last_source", "value": source},
     ]

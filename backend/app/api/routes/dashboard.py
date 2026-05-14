@@ -66,6 +66,24 @@ def get_dashboard(_user=Depends(get_current_user)):
 def dashboard_validation(_user=Depends(get_current_user)):
     sb = get_supabase()
     values = _get_dashboard_values(sb)
+    settings_rows = (
+        sb.table("app_settings")
+        .select("key,value")
+        .in_(
+            "key",
+            [
+                "finance_inventory_matched_by_imei",
+                "finance_total_inventory_profit",
+                "finance_total_service_profit",
+                "finance_final_net_profit",
+                "finance_imei_no_inventory_match",
+            ],
+        )
+        .execute()
+        .data
+        or []
+    )
+    settings_map = {row.get("key"): row.get("value") for row in settings_rows}
     return {
         "values_displayed_on_dashboard": values,
         "total_invoices": values["total_invoices"],
@@ -77,4 +95,11 @@ def dashboard_validation(_user=Depends(get_current_user)):
         "low_quality_stock": values["low_quality_stock"],
         "net_profit": values["net_profit"],
         "clients": values["clients"],
+        "imei_validation": {
+            "inventory_matched_by_imei": int(to_number(settings_map.get("finance_inventory_matched_by_imei"))),
+            "total_inventory_profit": to_number(settings_map.get("finance_total_inventory_profit")),
+            "total_service_profit": to_number(settings_map.get("finance_total_service_profit")),
+            "final_net_profit": to_number(settings_map.get("finance_final_net_profit")),
+            "imei_no_inventory_match": int(to_number(settings_map.get("finance_imei_no_inventory_match"))),
+        },
     }
