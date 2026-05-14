@@ -35,10 +35,11 @@ interface PaymentForm {
 export default function Debtors() {
   const qc = useQueryClient()
   const [selectedRow, setSelectedRow] = useState<Debtor | null>(null)
+  const [search, setSearch] = useState('')
 
   const { data: debtors, isLoading } = useQuery<Debtor[]>({
-    queryKey: ['debtors'],
-    queryFn: () => api.get('/billing/debtors').then((r) => r.data),
+    queryKey: ['debtors', search],
+    queryFn: () => api.get('/billing/debtors', { params: { search: search || undefined } }).then((r) => r.data),
   })
 
   const { data: status } = useQuery<{ currency?: string }>({
@@ -94,6 +95,21 @@ export default function Debtors() {
           <p className="text-xs text-gray-500">Total Outstanding</p>
           <p className="text-2xl font-bold text-red-600">{formatCurrency(totalOutstanding, currency)}</p>
         </div>
+      </div>
+
+      <div className="card p-4">
+        <input
+          type="text"
+          placeholder="Search by client name or service..."
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          className="form-input w-full"
+        />
+        {search && (
+          <p className="text-xs text-gray-500 mt-2">
+            Found {debtors?.length ?? 0} result{debtors?.length !== 1 ? 's' : ''}
+          </p>
+        )}
       </div>
 
       {isLoading ? <LoadingSpinner /> : <Table columns={columns as any} data={(debtors ?? []) as any} />}

@@ -126,13 +126,23 @@ def list_billing(
 
 
 @router.get("/debtors")
-def list_debtors(_user=Depends(get_current_user)):
+def list_debtors(search: Optional[str] = Query(None), _user=Depends(get_current_user)):
     """Grouped debtor balances calculated dynamically from live service rows."""
     sb = get_supabase()
     debtors = compute_debtors_from_supabase(sb)
     grouped_rows = debtors["grouped_clients"]
     for row in grouped_rows:
         row["service_name"] = row.get("service_name") or "Outstanding invoices"
+    
+    # Filter by search term if provided
+    if search:
+        search_lower = search.lower().strip()
+        grouped_rows = [
+            row for row in grouped_rows
+            if search_lower in (row.get("client_name") or "").lower()
+            or search_lower in (row.get("service_name") or "").lower()
+        ]
+    
     return grouped_rows
 
 
