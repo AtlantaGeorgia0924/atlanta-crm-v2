@@ -30,11 +30,19 @@ def _get_first_match(headers: List[str], aliases: List[str]) -> str:
     return ""
 
 
+# PRE-ACCOUNTING sentinel: any PAID row whose date cannot be determined from the
+# sheet gets this value so the DB trigger (set_paid_at_once) does NOT stamp it
+# with NOW() and inflate current-period metrics.
+_PRE_ACCOUNTING_SENTINEL = "2025-12-31"
+
+
 def _parse_date(value: str) -> Optional[str]:
     text = str(value or "").strip()
     if not text:
         return None
-    for fmt in ["%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y", "%d-%m-%Y", "%Y/%m/%d"]:
+    # IMPORTANT: try MM/DD/YYYY (US format used by these Google Sheets) BEFORE
+    # DD/MM/YYYY. Dates like '05/11/2026' must parse as May 11, not Nov 5.
+    for fmt in ["%Y-%m-%d", "%m/%d/%Y", "%d/%m/%Y", "%d-%m-%Y", "%Y/%m/%d"]:
         try:
             return datetime.strptime(text, fmt).date().isoformat()
         except Exception:
@@ -191,9 +199,22 @@ def import_google_sheets_to_supabase(sb) -> dict:
         payment_status = _normalized_payment_status(row.get(status_h, "") if status_h else "")
         paid_date_value = _parse_date(row.get(paid_date_h)) if paid_date_h else None
         service_date_value = _parse_date(row.get(date_h)) if date_h else None
-        
-        # If status is PAID and we have a paid date, use it; otherwise use service date
-        paid_at_value = paid_date_value if payment_status == "PAID" and paid_date_value else None
+
+        # Normalize paid_amount by payment status:
+        # PAID: paid_amount must equal amount_charged if it is 0/null
+        # UNPAID: force paid_amount = 0
+        # PARTIAL/PART PAYMENT: keep the actual value from the sheet
+        paid_at_value = None
+        if payment_status == "PAID":
+            if paid_amount <= 0:
+                paid_amount = amount_charged
+            # Prefer PAID DATE, fall back to service date, then sentinel so the DB
+            # trigger (set_paid_at_once) does NOT stamp the row with NOW() and inflate metrics.
+            paid_at_value = paid_date_value or service_date_value or _PRE_ACCOUNTING_SENTINEL
+        elif payment_status == "UNPAID":
+            paid_amount = 0.0
+            paid_at_value = None
+        # PARTIAL / PART PAYMENT: keep actual paid_amount from sheet; paid_at stays None
 
         service_payload.append(
             {
