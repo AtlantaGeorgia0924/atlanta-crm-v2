@@ -1,6 +1,6 @@
 import logging
 import re
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 from app.core.financials import compute_outstanding, to_number
 
@@ -58,6 +58,34 @@ def _is_current_month(value) -> bool:
     return parsed.year == now.year and parsed.month == now.month
 
 
+def _parse_dt(value):
+    if not value:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    except Exception:
+        return None
+
+
+def _week_bounds_utc(now_utc: datetime) -> tuple[datetime, datetime]:
+    start = (now_utc - timedelta(days=now_utc.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+    end = start + timedelta(days=7)
+    return start, end
+
+
+def _month_bounds_utc(now_utc: datetime) -> tuple[datetime, datetime]:
+    start = now_utc.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    if start.month == 12:
+        end = start.replace(year=start.year + 1, month=1)
+    else:
+        end = start.replace(month=start.month + 1)
+    return start, end
+
+
 def _norm_imei(value) -> str:
     raw = str(value or "").strip().upper()
     # Keep only identifier portion before slash, then remove non-alphanumerics.
@@ -74,27 +102,39 @@ def compute_metrics_from_supabase(sb) -> dict:
         services = _fetch_all_rows(
             sb,
             "service_jobs",
-            "id,amount_charged,paid_amount,payment_status,service_date,service_expense,expense_amount,imei",
+            "id,amount_charged,paid_amount,payment_status,service_date,paid_at,is_return,service_expense,expense_amount,service_expense_amount,service_expense_description,service_expense_date,service_profit,imei",
         )
     except Exception:
         try:
             services = _fetch_all_rows(
                 sb,
                 "service_jobs",
-                "id,amount_charged,paid_amount,payment_status,service_date,expense_amount,imei",
+                "id,amount_charged,paid_amount,payment_status,service_date,paid_date,is_return,expense_amount,service_expense,service_profit,imei",
             )
         except Exception:
             services = _fetch_all_rows(
                 sb,
                 "service_jobs",
-                "id,amount_charged,paid_amount,payment_status,service_date,expense_amount",
+                "id,amount_charged,paid_amount,payment_status,service_date,paid_date,expense_amount,imei",
             )
     try:
-        inventory = _fetch_all_rows(sb, "inventory_items", "id,product_status,payment_status,cost_price,imei,sku")
+        inventory = _fetch_all_rows(
+            sb,
+            "inventory_items",
+            "id,product_status,payment_status,paid_at,is_return,cost_price,selling_price,item_expense_amount,item_expense_description,item_expense_date,product_profit,imei,sku",
+        )
     except Exception:
-        inventory = _fetch_all_rows(sb, "inventory_items", "id,payment_status,cost_price,sku")
-    expenses = _fetch_all_rows(sb, "manual_expenses", "amount")
-    allowances = _fetch_all_rows(sb, "allowance_withdrawals", "amount")
+        inventory = _fetch_all_rows(sb, "inventory_items", "id,payment_status,paid_date,is_return,cost_price,selling_price,expense_amount,product_profit,imei,sku")
+
+    try:
+        expenses = _fetch_all_rows(sb, "cashflow_expenses", "amount,expense_date,is_reversed,reversed_at")
+    except Exception:
+        expenses = _fetch_all_rows(sb, "manual_expenses", "amount,expense_date")
+
+    try:
+        allowances = _fetch_all_rows(sb, "allowance_withdrawals", "amount,withdrawn_at,status,week_key")
+    except Exception:
+        allowances = _fetch_all_rows(sb, "allowance_withdrawals", "amount,withdrawal_date")
 
     total_invoices = 0
     total_unpaid = 0
@@ -106,11 +146,17 @@ def compute_metrics_from_supabase(sb) -> dict:
     total_service_expenses = 0.0
     imei_inventory_map = {}
     for inv in inventory:
+        if bool(inv.get("is_return")):
+            continue
         cost_price = to_number(inv.get("cost_price"))
+        item_expense = to_number(inv.get("item_expense_amount"))
         for candidate in (inv.get("imei"), inv.get("sku")):
             normalized_identifier = _norm_imei(candidate)
             if normalized_identifier and normalized_identifier not in imei_inventory_map:
-                imei_inventory_map[normalized_identifier] = cost_price
+                imei_inventory_map[normalized_identifier] = {
+                    "cost_price": cost_price,
+                    "item_expense_amount": item_expense,
+                }
 
     inventory_matched_count = 0
     inventory_profit_total = 0.0
@@ -118,13 +164,29 @@ def compute_metrics_from_supabase(sb) -> dict:
     unmatched_imei_count = 0
     skipped_missing_cost_price = 0
 
+    now_utc = datetime.now(timezone.utc)
+    week_start, week_end = _week_bounds_utc(now_utc)
+    month_start, month_end = _month_bounds_utc(now_utc)
+
+    profit_seen_this_week = 0.0
+    profit_seen_this_month = 0.0
+
     for row in services:
         total = to_number(row.get("amount_charged"))
         paid = to_number(row.get("paid_amount"))
         status = _norm(row.get("payment_status"))
         outstanding = compute_outstanding(total, paid)
-        service_expense = to_number(row.get("service_expense")) or to_number(row.get("expense_amount"))
+        service_expense = (
+            to_number(row.get("service_expense_amount"))
+            or to_number(row.get("service_expense"))
+            or to_number(row.get("expense_amount"))
+        )
+        service_profit = to_number(row.get("service_profit"))
+        if service_profit == 0 and (paid != 0 or service_expense != 0):
+            service_profit = paid - service_expense
         imei = _norm_imei(row.get("imei"))
+        paid_at = _parse_dt(row.get("paid_at") or row.get("paid_date"))
+        is_reversed = bool(row.get("is_return"))
 
         total_invoices += 1
         total_sales += total
@@ -132,10 +194,13 @@ def compute_metrics_from_supabase(sb) -> dict:
         total_outstanding += outstanding
         total_service_expenses += service_expense
 
-        if imei:
+        include_profit = (status == "PAID") and (paid_at is not None) and (not is_reversed)
+
+        if include_profit and imei:
             if imei in imei_inventory_map:
                 inventory_matched_count += 1
-                cost_price = imei_inventory_map[imei]
+                cost_price = to_number(imei_inventory_map[imei].get("cost_price"))
+                item_expense = to_number(imei_inventory_map[imei].get("item_expense_amount"))
                 if cost_price <= 0:
                     skipped_missing_cost_price += 1
                     logger.warning(
@@ -148,9 +213,18 @@ def compute_metrics_from_supabase(sb) -> dict:
                 unmatched_imei_count += 1
                 logger.warning("No inventory IMEI match for service row id=%s imei=%s; excluding from inventory profit", row.get("id"), imei)
                 continue
-            inventory_profit_total += paid - cost_price
-        else:
-            service_profit_total += paid - service_expense
+            row_profit = paid - cost_price - item_expense
+            inventory_profit_total += row_profit
+            if week_start <= paid_at < week_end:
+                profit_seen_this_week += row_profit
+            if month_start <= paid_at < month_end:
+                profit_seen_this_month += row_profit
+        elif include_profit:
+            service_profit_total += service_profit
+            if week_start <= paid_at < week_end:
+                profit_seen_this_week += service_profit
+            if month_start <= paid_at < month_end:
+                profit_seen_this_month += service_profit
 
         if _is_unpaid(status):
             total_unpaid += 1
@@ -171,10 +245,60 @@ def compute_metrics_from_supabase(sb) -> dict:
         elif status == "LOW QUALITY":
             low_quality_stock += 1
 
-    total_expenses = sum(to_number(row.get("amount")) for row in expenses)
-    total_allowances = sum(to_number(row.get("amount")) for row in allowances)
+    total_expenses = 0.0
+    expenses_of_the_week = 0.0
+    expenses_of_the_month = 0.0
+    for row in expenses:
+        if bool(row.get("is_reversed")):
+            continue
+        amount = to_number(row.get("amount"))
+        exp_dt = _parse_dt(row.get("expense_date"))
+        total_expenses += amount
+        if exp_dt and week_start <= exp_dt < week_end:
+            expenses_of_the_week += amount
+        if exp_dt and month_start <= exp_dt < month_end:
+            expenses_of_the_month += amount
+
+    total_allowances = 0.0
+    for row in allowances:
+        if str(row.get("status") or "YES").upper() != "YES":
+            continue
+        total_allowances += to_number(row.get("amount"))
+
     gross_profit = inventory_profit_total + service_profit_total
     net_profit = gross_profit - total_expenses - total_allowances
+
+    net_profit_of_the_week = profit_seen_this_week - expenses_of_the_week
+    next_week_allowance = net_profit_of_the_week * 0.25
+    net_profit_of_the_month = profit_seen_this_month - expenses_of_the_month
+    net_profit_left_this_month = net_profit_of_the_month * 0.75
+
+    week_key = now_utc.strftime("%G-W%V")
+    month_key = now_utc.strftime("%Y-%m")
+
+    try:
+        sb.table("weekly_financial_snapshots").upsert(
+            {
+                "week_key": week_key,
+                "profit_seen_this_week": profit_seen_this_week,
+                "expenses_of_the_week": expenses_of_the_week,
+                "net_profit_of_the_week": net_profit_of_the_week,
+                "next_week_allowance": next_week_allowance,
+            },
+            on_conflict="week_key",
+        ).execute()
+        sb.table("monthly_financial_snapshots").upsert(
+            {
+                "month_key": month_key,
+                "profit_seen_this_month": profit_seen_this_month,
+                "expenses_of_the_month": expenses_of_the_month,
+                "net_profit_of_the_month": net_profit_of_the_month,
+                "net_profit_left_this_month": net_profit_left_this_month,
+            },
+            on_conflict="month_key",
+        ).execute()
+    except Exception as exc:
+        logger.warning("Failed to persist financial snapshots: %s", exc)
 
     return {
         "dashboard": {
@@ -197,6 +321,14 @@ def compute_metrics_from_supabase(sb) -> dict:
             "total_allowances": total_allowances,
             "gross_profit": gross_profit,
             "net_profit": net_profit,
+            "profit_seen_this_week": profit_seen_this_week,
+            "expenses_of_the_week": expenses_of_the_week,
+            "net_profit_of_the_week": net_profit_of_the_week,
+            "next_week_allowance": next_week_allowance,
+            "profit_seen_this_month": profit_seen_this_month,
+            "expenses_of_the_month": expenses_of_the_month,
+            "net_profit_of_the_month": net_profit_of_the_month,
+            "net_profit_left_this_month": net_profit_left_this_month,
         },
         "validation": {
             "inventory_matched_by_imei": inventory_matched_count,
@@ -232,6 +364,14 @@ def app_settings_payload(metrics: dict, source: str) -> list[dict]:
         {"key": "finance_total_allowances", "value": str(financial["total_allowances"])},
         {"key": "finance_gross_profit", "value": str(financial["gross_profit"])},
         {"key": "finance_net_profit", "value": str(financial["net_profit"])},
+        {"key": "finance_profit_seen_this_week", "value": str(financial.get("profit_seen_this_week", 0))},
+        {"key": "finance_expenses_of_the_week", "value": str(financial.get("expenses_of_the_week", 0))},
+        {"key": "finance_net_profit_of_the_week", "value": str(financial.get("net_profit_of_the_week", 0))},
+        {"key": "finance_next_week_allowance", "value": str(financial.get("next_week_allowance", 0))},
+        {"key": "finance_profit_seen_this_month", "value": str(financial.get("profit_seen_this_month", 0))},
+        {"key": "finance_expenses_of_the_month", "value": str(financial.get("expenses_of_the_month", 0))},
+        {"key": "finance_net_profit_of_the_month", "value": str(financial.get("net_profit_of_the_month", 0))},
+        {"key": "finance_net_profit_left_this_month", "value": str(financial.get("net_profit_left_this_month", 0))},
         {"key": "finance_inventory_matched_by_imei", "value": str(validation.get("inventory_matched_by_imei", 0))},
         {"key": "finance_total_inventory_profit", "value": str(validation.get("total_inventory_profit", 0))},
         {"key": "finance_total_service_profit", "value": str(validation.get("total_service_profit", 0))},

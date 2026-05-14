@@ -6,7 +6,7 @@ No Google Sheets calls here.
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from typing import Optional
-from datetime import date
+from datetime import date, datetime
 from app.db.supabase_client import get_supabase
 from app.core.auth import get_current_user
 from app.core.financials import compute_outstanding, compute_payment_status, to_number
@@ -92,6 +92,7 @@ def apply_payment(payload: PaymentCreate, _user=Depends(get_current_user)):
             "paid_amount":   new_paid,
             "payment_status": new_status,
             "paid_date":  pay_date if new_status == "PAID" else None,
+            "paid_at": datetime.utcnow().isoformat() if new_status == "PAID" else None,
         })
         .eq("id", payload.billing_row_id)
         .execute()

@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from typing import Optional
+from datetime import datetime
 from app.db.supabase_client import get_supabase
 from app.core.auth import get_current_user
 from app.core.financials import (
@@ -92,6 +93,8 @@ def list_billing(
         paid = to_number(row.get("paid_amount"))
         qty = to_number(row.get("quantity")) or 1
         service_expense = to_number(row.get("service_expense"))
+        if service_expense == 0:
+            service_expense = to_number(row.get("service_expense_amount")) or to_number(row.get("expense_amount"))
         outstanding = compute_outstanding(total, paid)
         status_value = compute_payment_status(total, paid)
         row["unit_price"] = total
@@ -101,7 +104,7 @@ def list_billing(
         row["status"] = status_value.lower()
         row["service_expense"] = service_expense
         row["gross_profit"] = paid
-        row["net_profit"] = paid - service_expense
+        row["net_profit"] = to_number(row.get("service_profit")) or (paid - service_expense)
         row["invoice_date"] = row.get("service_date")
         row["service_name"] = _best_service_name(row)
         row["description"] = row.get("description") or row.get("service_name")
@@ -161,6 +164,8 @@ def get_billing(billing_id: str, _user=Depends(get_current_user)):
     paid = to_number(row.get("paid_amount"))
     outstanding = compute_outstanding(total, paid)
     service_expense = to_number(row.get("service_expense"))
+    if service_expense == 0:
+        service_expense = to_number(row.get("service_expense_amount")) or to_number(row.get("expense_amount"))
     status_value = compute_payment_status(total, paid)
     row["total_amount"] = total
     row["amount_paid"] = paid
@@ -168,7 +173,7 @@ def get_billing(billing_id: str, _user=Depends(get_current_user)):
     row["status"] = status_value.lower()
     row["service_expense"] = service_expense
     row["gross_profit"] = paid
-    row["net_profit"] = paid - service_expense
+    row["net_profit"] = to_number(row.get("service_profit")) or (paid - service_expense)
     row["invoice_date"] = row.get("service_date")
     row["service_name"] = _best_service_name(row)
     return row
@@ -194,8 +199,11 @@ def create_billing(payload: BillingCreate, _user=Depends(get_current_user)):
         "amount_charged": total,
         "payment_status": payment_status,
         "paid_amount": amount_paid,
-        "service_expense": to_number(data.get("service_expense", 0)),
+        "service_expense_amount": to_number(data.get("service_expense", 0)),
+        "service_expense_date": data.get("invoice_date"),
+        "service_expense_description": data.get("description"),
         "paid_date": data.get("invoice_date") if payment_status == "PAID" else None,
+        "paid_at": datetime.utcnow().isoformat() if payment_status == "PAID" else None,
         "service_date": data.get("invoice_date"),
         "due_date": data.get("due_date"),
         "notes": data.get("notes"),
@@ -234,7 +242,11 @@ def update_billing(billing_id: str, payload: BillingUpdate, _user=Depends(get_cu
         total = to_number(data.get("amount_charged", existing.get("amount_charged") or 0))
         paid = to_number(data.get("paid_amount", existing.get("paid_amount") or 0))
         data["payment_status"] = compute_payment_status(total, paid)
-        data["paid_date"] = data.get("paid_date") if data["payment_status"] == "PAID" else None
+        if data["payment_status"] == "PAID":
+            data["paid_date"] = data.get("paid_date")
+            data.setdefault("paid_at", datetime.utcnow().isoformat())
+        else:
+            data["paid_date"] = None
 
     result = sb.table("service_jobs").update(data).eq("id", billing_id).execute()
     return result.data[0]

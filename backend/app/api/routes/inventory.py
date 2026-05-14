@@ -3,6 +3,7 @@ from pydantic import BaseModel
 from typing import Optional
 import json
 import uuid
+from datetime import datetime
 from app.db.supabase_client import get_supabase
 from app.core.auth import get_current_user
 
@@ -121,6 +122,9 @@ class StockCreate(BaseModel):
     location: Optional[str] = None
     source: Optional[str] = "manual"
     payment_status: Optional[str] = None
+    item_expense_amount: Optional[float] = 0
+    item_expense_description: Optional[str] = None
+    item_expense_date: Optional[str] = None
 
 
 class StockUpdate(BaseModel):
@@ -137,6 +141,9 @@ class StockUpdate(BaseModel):
     location: Optional[str] = None
     is_active: Optional[bool] = None
     payment_status: Optional[str] = None
+    item_expense_amount: Optional[float] = None
+    item_expense_description: Optional[str] = None
+    item_expense_date: Optional[str] = None
 
 
 class StockBulkCreate(BaseModel):
@@ -217,7 +224,12 @@ def create_item(payload: StockCreate, _user=Depends(get_current_user)):
         "cost_price": data.get("unit_cost", 0),
         "selling_price": data.get("unit_price", 0),
         "payment_status": (data.get("payment_status") or "").upper() or None,
+        "item_expense_amount": data.get("item_expense_amount", 0),
+        "item_expense_description": data.get("item_expense_description"),
+        "item_expense_date": data.get("item_expense_date"),
     }
+    if mapped["payment_status"] == "PAID":
+        mapped["paid_at"] = datetime.utcnow().isoformat()
     result = sb.table("inventory_items").insert(mapped).execute()
     return result.data[0]
 
@@ -246,6 +258,10 @@ def create_items_bulk(payload: StockBulkCreate, _user=Depends(get_current_user))
                 "cost_price": data.get("unit_cost", 0),
                 "selling_price": data.get("unit_price", 0),
                 "payment_status": (data.get("payment_status") or "").upper() or None,
+                "item_expense_amount": data.get("item_expense_amount", 0),
+                "item_expense_description": data.get("item_expense_description"),
+                "item_expense_date": data.get("item_expense_date"),
+                "paid_at": datetime.utcnow().isoformat() if (data.get("payment_status") or "").upper() == "PAID" else None,
             }
         )
 
