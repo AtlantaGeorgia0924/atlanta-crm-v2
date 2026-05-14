@@ -111,13 +111,13 @@ def compute_metrics_from_supabase(sb) -> dict:
             services = _fetch_all_rows(
                 sb,
                 "service_jobs",
-                "id,amount_charged,paid_amount,payment_status,service_date,paid_date,is_return,expense_amount,service_expense,service_profit,imei",
+                "id,amount_charged,paid_amount,payment_status,service_date,paid_date,paid_at,is_return,expense_amount,service_expense,service_expense_amount,service_profit,imei",
             )
         except Exception:
             services = _fetch_all_rows(
                 sb,
                 "service_jobs",
-                "id,amount_charged,paid_amount,payment_status,service_date,paid_date,expense_amount,imei",
+                "id,amount_charged,paid_amount,payment_status,service_date,paid_date,paid_at,is_return,expense_amount,service_profit,imei",
             )
     try:
         inventory = _fetch_all_rows(
