@@ -5,7 +5,7 @@ import api from '@/lib/api'
 import LoadingSpinner from '@/components/LoadingSpinner'
 import Modal from '@/components/Modal'
 import toast from 'react-hot-toast'
-import { Save, Copy, Bug, Search } from 'lucide-react'
+import { Save, Copy, Bug, Search, ReceiptText } from 'lucide-react'
 
 interface SettingsMap {
   business_name?: string
@@ -24,6 +24,8 @@ export default function Settings() {
   const [debugData, setDebugData] = useState<Record<string, any> | null>(null)
   const [imeiDebugModalOpen, setImeiDebugModalOpen] = useState(false)
   const [imeiDebugData, setImeiDebugData] = useState<Record<string, any> | null>(null)
+  const [debtorsDebugModalOpen, setDebtorsDebugModalOpen] = useState(false)
+  const [debtorsDebugData, setDebtorsDebugData] = useState<Record<string, any> | null>(null)
   const imeiDebugMutation = useMutation({
     mutationFn: () => api.get('/debug/imei-matching').then((r) => r.data),
     onSuccess: (res: any) => {
@@ -32,6 +34,16 @@ export default function Settings() {
       toast.success('IMEI debug data loaded')
     },
     onError: (e: any) => toast.error(e?.response?.data?.detail ?? 'IMEI debug request failed'),
+  })
+
+  const debtorsDebugMutation = useMutation({
+    mutationFn: () => api.get('/debug/debtors-validation').then((r) => r.data),
+    onSuccess: (res: any) => {
+      setDebtorsDebugData(res)
+      setDebtorsDebugModalOpen(true)
+      toast.success('Debtors debug data loaded')
+    },
+    onError: (e: any) => toast.error(e?.response?.data?.detail ?? 'Debtors debug request failed'),
   })
 
   const { data, isLoading } = useQuery<SettingsMap>({
@@ -190,6 +202,14 @@ export default function Settings() {
           >
             <Search size={15} /> {imeiDebugMutation.isPending ? 'Loading…' : 'Debug IMEI Matching'}
           </button>
+          <button
+            type="button"
+            className="btn-secondary"
+            onClick={() => debtorsDebugMutation.mutate()}
+            disabled={debtorsDebugMutation.isPending}
+          >
+            <ReceiptText size={15} /> {debtorsDebugMutation.isPending ? 'Loading…' : 'Debug Debtors Validation'}
+          </button>
               <Modal
                 title="IMEI Matching Debug Information"
                 open={imeiDebugModalOpen}
@@ -218,6 +238,56 @@ export default function Settings() {
                           type="button"
                           className="btn-primary"
                           onClick={() => setImeiDebugModalOpen(false)}
+                        >
+                          Close
+                        </button>
+                      </div>
+                    </>
+                  )}
+                </div>
+              </Modal>
+              <Modal
+                title="Debtors Validation Information"
+                open={debtorsDebugModalOpen}
+                onClose={() => setDebtorsDebugModalOpen(false)}
+              >
+                <div className="space-y-4">
+                  {debtorsDebugData && (
+                    <>
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-sm">
+                        <div className="bg-gray-50 rounded p-3">
+                          <p className="text-xs text-gray-500">Total Amount Owed</p>
+                          <p className="font-semibold">{Number(debtorsDebugData.total_amount_owed ?? 0).toLocaleString()}</p>
+                        </div>
+                        <div className="bg-gray-50 rounded p-3">
+                          <p className="text-xs text-gray-500">Included Rows</p>
+                          <p className="font-semibold">{debtorsDebugData.included_rows?.length ?? 0}</p>
+                        </div>
+                        <div className="bg-gray-50 rounded p-3">
+                          <p className="text-xs text-gray-500">Excluded Rows</p>
+                          <p className="font-semibold">{debtorsDebugData.excluded_rows?.length ?? 0}</p>
+                        </div>
+                      </div>
+                      <div className="bg-gray-100 rounded p-4 max-h-96 overflow-y-auto">
+                        <pre className="text-xs font-mono text-gray-800 whitespace-pre-wrap break-words">
+                          {JSON.stringify(debtorsDebugData, null, 2)}
+                        </pre>
+                      </div>
+                      <div className="flex gap-2 justify-end">
+                        <button
+                          type="button"
+                          className="btn-secondary"
+                          onClick={() => {
+                            navigator.clipboard.writeText(JSON.stringify(debtorsDebugData, null, 2))
+                            toast.success('Copied to clipboard')
+                          }}
+                        >
+                          <Copy size={15} /> Copy JSON
+                        </button>
+                        <button
+                          type="button"
+                          className="btn-primary"
+                          onClick={() => setDebtorsDebugModalOpen(false)}
                         >
                           Close
                         </button>
