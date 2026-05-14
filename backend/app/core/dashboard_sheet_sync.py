@@ -1,5 +1,6 @@
 import os
 import re
+import time
 from datetime import datetime
 from typing import Dict, List, Tuple
 
@@ -107,6 +108,25 @@ def _extract_cashflow_totals(values: List[List[str]], records: List[Dict[str, st
     return expenses_total, allowances_total
 
 
+def _upsert_with_retry(sb, payload, *, on_conflict: str, attempts: int = 3, delay_seconds: float = 0.6):
+    last_error = None
+    for attempt in range(attempts):
+        try:
+            return sb.table("app_settings").upsert(payload, on_conflict=on_conflict).execute()
+        except Exception as exc:
+            last_error = exc
+            if attempt == attempts - 1:
+                break
+            time.sleep(delay_seconds * (attempt + 1))
+    raise last_error
+
+
+def _is_excluded_service_row(status_value: str) -> bool:
+    normalized = _normalize_header(status_value)
+    blocked_statuses = {"returned", "cancelled", "canceled", "refunded", "void", "reversed"}
+    return normalized in blocked_statuses
+
+
 def sync_dashboard_metrics_from_sheets(sb) -> Dict:
     import gspread
     from google.oauth2.service_account import Credentials
@@ -161,8 +181,14 @@ def sync_dashboard_metrics_from_sheets(sb) -> Dict:
         ["Amount paid"],
     )
 
+    status_header = _get_exact_match(
+        list(service_rows[0].keys()) if service_rows else [],
+        ["STATUS"],
+    )
+
     parsed_price_values: List[float] = []
     parsed_amount_paid_values: List[float] = []
+    excluded_rows = 0
     total_billed = 0.0
     total_collected = 0.0
     total_outstanding = 0.0
@@ -170,6 +196,11 @@ def sync_dashboard_metrics_from_sheets(sb) -> Dict:
     for row in service_rows:
         raw_price = row.get(billed_header) if billed_header else None
         raw_paid = row.get(paid_header) if paid_header else None
+
+        status_value = row.get(status_header, "") if status_header else ""
+        if _is_excluded_service_row(status_value):
+            excluded_rows += 1
+            continue
 
         has_price = str(raw_price or "").strip() != ""
         has_paid = str(raw_paid or "").strip() != ""
@@ -241,11 +272,14 @@ def sync_dashboard_metrics_from_sheets(sb) -> Dict:
             "detected_headers": {
                 "services_price": billed_header,
                 "services_amount_paid": paid_header,
+                "services_status": status_header,
             },
+            "excluded_rows_count": excluded_rows,
         },
     }
 
-    sb.table("app_settings").upsert(
+    _upsert_with_retry(
+        sb,
         [
             {"key": "dashboard_total_billed", "value": str(values["total_billed"])},
             {"key": "dashboard_total_collected", "value": str(values["total_collected"])},
@@ -255,10 +289,11 @@ def sync_dashboard_metrics_from_sheets(sb) -> Dict:
             {"key": "dashboard_net_profit", "value": str(values["net_profit"])},
         ],
         on_conflict="key",
-    ).execute()
+    )
 
     now_iso = datetime.utcnow().isoformat()
-    sb.table("app_settings").upsert(
+    _upsert_with_retry(
+        sb,
         [
             {"key": "dashboard_total_clients", "value": str(values["total_clients"])},
             {"key": "dashboard_total_invoices", "value": str(values["total_invoices"])},
@@ -266,7 +301,7 @@ def sync_dashboard_metrics_from_sheets(sb) -> Dict:
             {"key": "dashboard_last_recalculated_at", "value": now_iso},
         ],
         on_conflict="key",
-    ).execute()
+    )
 
     rows_processed = {
         "Sheet1 (Services)": service_count,

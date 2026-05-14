@@ -97,6 +97,12 @@ def _extract_cashflow_totals(values: List[List[str]], records: List[Dict[str, st
     return expenses_total, allowances_total
 
 
+def _is_excluded_service_row(status_value: str) -> bool:
+    normalized = _normalize_header(status_value)
+    blocked_statuses = {"returned", "cancelled", "canceled", "refunded", "void", "reversed"}
+    return normalized in blocked_statuses
+
+
 @router.get("/google-sheets")
 def debug_google_sheets(_user=Depends(get_current_user)):
     sb = get_supabase()
@@ -218,8 +224,14 @@ def debug_google_sheets(_user=Depends(get_current_user)):
         ["Amount paid"],
     )
 
+    status_header = _get_exact_match(
+        list(service_records[0].keys()) if service_records else [],
+        ["STATUS"],
+    )
+
     parsed_price_values: List[float] = []
     parsed_amount_paid_values: List[float] = []
+    excluded_rows = 0
     total_billed = 0.0
     total_collected = 0.0
     total_outstanding = 0.0
@@ -227,6 +239,11 @@ def debug_google_sheets(_user=Depends(get_current_user)):
     for row in service_records:
         raw_price = row.get(billed_header) if billed_header else None
         raw_paid = row.get(paid_header) if paid_header else None
+
+        status_value = row.get(status_header, "") if status_header else ""
+        if _is_excluded_service_row(status_value):
+            excluded_rows += 1
+            continue
 
         has_price = str(raw_price or "").strip() != ""
         has_paid = str(raw_paid or "").strip() != ""
@@ -288,10 +305,12 @@ def debug_google_sheets(_user=Depends(get_current_user)):
                 "total_allowances": total_allowances,
                 "net_profit": net_profit,
             },
+            "excluded_rows_count": excluded_rows,
         },
         "detected_headers": {
             "services_sheet1_billed": billed_header,
             "services_sheet1_collected": paid_header,
+            "services_sheet1_status": status_header,
             "debtors_balance": debtor_balance_header,
             "inventory_product_status": product_status_header,
         },
