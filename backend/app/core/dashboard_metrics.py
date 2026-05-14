@@ -1,9 +1,29 @@
 import logging
+import re
 from datetime import datetime
 
 from app.core.financials import compute_outstanding, to_number
 
 logger = logging.getLogger(__name__)
+
+
+def _fetch_all_rows(sb, table_name: str, select_clause: str, batch_size: int = 1000) -> list[dict]:
+    rows: list[dict] = []
+    start = 0
+    while True:
+        batch = (
+            sb.table(table_name)
+            .select(select_clause)
+            .range(start, start + batch_size - 1)
+            .execute()
+            .data
+            or []
+        )
+        rows.extend(batch)
+        if len(batch) < batch_size:
+            break
+        start += batch_size
+    return rows
 
 
 def _norm(value: str) -> str:
@@ -40,46 +60,41 @@ def _is_current_month(value) -> bool:
 
 def _norm_imei(value) -> str:
     raw = str(value or "").strip().upper()
-    # Reject placeholders that contain no alphanumeric characters or are too short
-    import re as _re
-    if not _re.search(r'[A-Z0-9]', raw) or len(raw) < 5:
+    # Keep only identifier portion before slash, then remove non-alphanumerics.
+    raw = raw.split("/", 1)[0]
+    normalized = re.sub(r"[^A-Z0-9]", "", raw)
+    if len(normalized) < 5:
         return ""
-    return raw
+    return normalized
 
 
 def compute_metrics_from_supabase(sb) -> dict:
-    clients = sb.table("clients").select("id").execute().data or []
+    clients = _fetch_all_rows(sb, "clients", "id")
     try:
-        services = (
-            sb.table("service_jobs")
-            .select("id,amount_charged,paid_amount,payment_status,service_date,service_expense,expense_amount,imei")
-            .execute()
-            .data
-            or []
+        services = _fetch_all_rows(
+            sb,
+            "service_jobs",
+            "id,amount_charged,paid_amount,payment_status,service_date,service_expense,expense_amount,imei",
         )
     except Exception:
         try:
-            services = (
-                sb.table("service_jobs")
-                .select("id,amount_charged,paid_amount,payment_status,service_date,expense_amount,imei")
-                .execute()
-                .data
-                or []
+            services = _fetch_all_rows(
+                sb,
+                "service_jobs",
+                "id,amount_charged,paid_amount,payment_status,service_date,expense_amount,imei",
             )
         except Exception:
-            services = (
-                sb.table("service_jobs")
-                .select("id,amount_charged,paid_amount,payment_status,service_date,expense_amount")
-                .execute()
-                .data
-                or []
+            services = _fetch_all_rows(
+                sb,
+                "service_jobs",
+                "id,amount_charged,paid_amount,payment_status,service_date,expense_amount",
             )
     try:
-        inventory = sb.table("inventory_items").select("id,product_status,payment_status,cost_price,imei,sku").execute().data or []
+        inventory = _fetch_all_rows(sb, "inventory_items", "id,product_status,payment_status,cost_price,imei,sku")
     except Exception:
-        inventory = sb.table("inventory_items").select("id,payment_status,cost_price,sku").execute().data or []
-    expenses = sb.table("manual_expenses").select("amount").execute().data or []
-    allowances = sb.table("allowance_withdrawals").select("amount").execute().data or []
+        inventory = _fetch_all_rows(sb, "inventory_items", "id,payment_status,cost_price,sku")
+    expenses = _fetch_all_rows(sb, "manual_expenses", "amount")
+    allowances = _fetch_all_rows(sb, "allowance_withdrawals", "amount")
 
     total_invoices = 0
     total_unpaid = 0
@@ -91,9 +106,11 @@ def compute_metrics_from_supabase(sb) -> dict:
     total_service_expenses = 0.0
     imei_inventory_map = {}
     for inv in inventory:
-        inv_imei = _norm_imei(inv.get("imei") or inv.get("sku"))
-        if inv_imei and inv_imei not in imei_inventory_map:
-            imei_inventory_map[inv_imei] = to_number(inv.get("cost_price"))
+        cost_price = to_number(inv.get("cost_price"))
+        for candidate in (inv.get("imei"), inv.get("sku")):
+            normalized_identifier = _norm_imei(candidate)
+            if normalized_identifier and normalized_identifier not in imei_inventory_map:
+                imei_inventory_map[normalized_identifier] = cost_price
 
     inventory_matched_count = 0
     inventory_profit_total = 0.0

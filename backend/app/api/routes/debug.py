@@ -4,7 +4,7 @@ import re
 
 from fastapi import APIRouter, Depends
 from app.db.supabase_client import get_supabase
-from app.core.dashboard_metrics import compute_metrics_from_supabase
+from app.core.dashboard_metrics import compute_metrics_from_supabase, _norm_imei
 from app.core.auth import get_current_user
 
 router = APIRouter(tags=["Debug"])
@@ -380,15 +380,29 @@ def debug_imei_matching():
     v = metrics.get("validation", {})
     # Raw IMEI lists
     service_rows = sb.table("service_jobs").select("id,imei").neq("imei", None).execute().data or []
-    inventory_rows = sb.table("inventory_items").select("id,imei,cost_price").neq("imei", None).execute().data or []
-    service_imeis = [str(r["imei"]).strip().upper() for r in service_rows if r.get("imei")]
-    inventory_imeis = [str(r["imei"]).strip().upper() for r in inventory_rows if r.get("imei")]
-    inventory_imei_set = set(inventory_imeis)
+    inventory_rows = sb.table("inventory_items").select("id,imei,sku,cost_price").execute().data or []
+    service_imeis = [_norm_imei(r.get("imei")) for r in service_rows]
+    service_imeis = [imei for imei in service_imeis if imei]
+
+    inventory_identifiers = []
+    inventory_cost_map = {}
+    for row in inventory_rows:
+        for candidate in (row.get("imei"), row.get("sku")):
+            normalized_identifier = _norm_imei(candidate)
+            if normalized_identifier:
+                inventory_identifiers.append(normalized_identifier)
+                if normalized_identifier not in inventory_cost_map:
+                    inventory_cost_map[normalized_identifier] = row.get("cost_price")
+
+    inventory_imei_set = set(inventory_identifiers)
     unmatched_imeis = [imei for imei in service_imeis if imei not in inventory_imei_set]
     matched_imeis = [imei for imei in service_imeis if imei in inventory_imei_set]
     # Count matched rows with missing/zero cost_price
-    cost_map = {str(r["imei"]).strip().upper(): r.get("cost_price") for r in inventory_rows}
-    matched_missing_cost = [imei for imei in matched_imeis if not cost_map.get(imei) or float(cost_map.get(imei) or 0) <= 0]
+    matched_missing_cost = [
+        imei
+        for imei in matched_imeis
+        if not inventory_cost_map.get(imei) or float(inventory_cost_map.get(imei) or 0) <= 0
+    ]
     return {
         "metrics": {
             "inventory_matched_by_imei": v.get("inventory_matched_by_imei"),
@@ -400,9 +414,9 @@ def debug_imei_matching():
         },
         "diagnostics": {
             "service_jobs_with_imei": len(service_imeis),
-            "inventory_items_with_imei": len(inventory_imeis),
+            "inventory_items_with_imei": len(inventory_imei_set),
             "first_20_unmatched_service_imeis": unmatched_imeis[:20],
-            "first_20_inventory_imeis": inventory_imeis[:20],
+            "first_20_inventory_imeis": inventory_identifiers[:20],
             "matched_with_missing_cost_price": len(matched_missing_cost),
         },
     }
