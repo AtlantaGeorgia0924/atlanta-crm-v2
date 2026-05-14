@@ -4,7 +4,7 @@ import re
 
 from fastapi import APIRouter, Depends
 from app.db.supabase_client import get_supabase
-from app.core.dashboard_metrics import compute_metrics_from_supabase, _norm_imei
+from app.core.dashboard_metrics import compute_metrics_from_supabase, compute_profit_ledger, _norm_imei
 from app.core.auth import get_current_user
 
 router = APIRouter(tags=["Debug"])
@@ -425,50 +425,56 @@ def debug_imei_matching():
 @router.get("/metrics-validation")
 def get_metrics_validation(_user=Depends(get_current_user)):
     """
-    Returns detailed metrics calculation results for validation.
-    
-    Helps verify that dashboard calculations match spreadsheet values.
+    Returns top-level financial metrics for quick validation.
     """
     from datetime import datetime, timezone
-    
+
     sb = get_supabase()
-    
+
     try:
         metrics = compute_metrics_from_supabase(sb)
     except Exception as e:
         return {"error": str(e), "status": "failed"}
-    
+
     financial = metrics.get("financial", {})
-    dashboard = metrics.get("dashboard", {})
-    
+    validation = metrics.get("validation", {})
+
     return {
         "timestamp": datetime.now(timezone.utc).isoformat(),
-        "financial_metrics": {
+        "key_metrics": {
             "profit_seen_this_week": financial.get("profit_seen_this_week"),
             "profit_seen_this_month": financial.get("profit_seen_this_month"),
             "total_sales_collected_this_month": financial.get("total_sales_collected_this_month"),
             "total_outstanding": financial.get("total_outstanding"),
-            "expenses_of_the_week": financial.get("expenses_of_the_week"),
-            "expenses_of_the_month": financial.get("expenses_of_the_month"),
             "net_profit_of_the_week": financial.get("net_profit_of_the_week"),
             "net_profit_of_the_month": financial.get("net_profit_of_the_month"),
         },
-        "dashboard_metrics": {
-            "total_invoices": dashboard.get("total_invoices"),
-            "total_collected": dashboard.get("total_collected"),
-            "total_outstanding": dashboard.get("total_outstanding"),
-            "amount_owed": dashboard.get("amount_owed"),
-            "gross_profit": dashboard.get("gross_profit"),
-            "net_profit": dashboard.get("net_profit"),
+        "breakdown": {
+            "total_inventory_profit": validation.get("total_inventory_profit"),
+            "total_service_profit": validation.get("total_service_profit"),
+            "total_expenses": financial.get("total_expenses"),
+            "total_allowances": financial.get("total_allowances"),
+            "gross_profit": financial.get("gross_profit"),
+            "net_profit": financial.get("net_profit"),
         },
-        "calculation_details": {
-            "inventory_matched_by_imei": dashboard.get("inventory_matched_count", 0),
-            "skipped_missing_cost_price": dashboard.get("skipped_missing_cost_price", 0),
-            "unmatched_imei_count": dashboard.get("unmatched_imei_count", 0),
-            "service_profit_total": dashboard.get("service_profit_total", 0),
-            "inventory_profit_total": dashboard.get("inventory_profit_total", 0),
-        }
     }
+
+
+@router.get("/profit-ledger")
+def get_profit_ledger(_user=Depends(get_current_user)):
+    """
+    Returns every transaction included in weekly and monthly profit calculations.
+
+    Each row shows: client_name, paid_at, paid_amount, cost_price,
+    expense_amount, computed_profit, inclusion_reason.
+
+    Use this to audit and validate totals against real-world sales data.
+    """
+    sb = get_supabase()
+    try:
+        return compute_profit_ledger(sb)
+    except Exception as e:
+        return {"error": str(e), "status": "failed"}
 
 
 @router.post("/recalculate-metrics")
