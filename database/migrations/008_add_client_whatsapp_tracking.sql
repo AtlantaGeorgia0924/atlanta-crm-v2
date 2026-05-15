@@ -1,0 +1,5 @@
+ALTER TABLE clients
+ADD COLUMN IF NOT EXISTS whatsapp_sent_count INTEGER NOT NULL DEFAULT 0;
+
+ALTER TABLE clients
+ADD COLUMN IF NOT EXISTS last_whatsapp_sent_at TIMESTAMPTZ;

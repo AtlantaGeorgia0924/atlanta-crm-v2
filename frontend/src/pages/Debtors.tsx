@@ -27,6 +27,15 @@ interface Debtor {
   source_row_ids?: string[]
 }
 
+interface WhatsAppContact {
+  client_name: string
+  client_id?: string
+  phone_number: string
+  normalized_phone_number: string
+  source: string | null
+  requires_manual_entry: boolean
+}
+
 interface PaymentForm {
   amount: number
   payment_method: string
@@ -47,6 +56,8 @@ export default function Debtors() {
   const [selectedRow, setSelectedRow] = useState<Debtor | null>(null)
   const [searchInput, setSearchInput] = useState('')
   const [showBillModal, setShowBillModal] = useState(false)
+  const [showPhoneModal, setShowPhoneModal] = useState(false)
+  const [manualPhoneNumber, setManualPhoneNumber] = useState('')
   const [billText, setBillText] = useState('')
   const deferredSearch = useDeferredValue(searchInput)
 
@@ -85,9 +96,9 @@ export default function Debtors() {
   })
 
   const whatsappMutation = useMutation({
-    mutationFn: () =>
+    mutationFn: (phoneNumber: string) =>
       api.post(`/billing/debtors/${encodeURIComponent(selectedRow!.client_name)}/whatsapp`, {
-        phone_number: selectedRow?.phone_number || '',
+        phone_number: phoneNumber,
       }),
     onSuccess: () => {
       toast.success('WhatsApp send tracked')
@@ -125,20 +136,56 @@ export default function Debtors() {
   }
 
   const handleSendWhatsApp = async () => {
-    const phoneNumber = selectedRow?.phone_number || ''
-    if (!phoneNumber) {
+    if (!selectedRow || !billText) {
+      toast.error('Generate the bill before sending')
+      return
+    }
+
+    try {
+      const response = await api.get<WhatsAppContact>(`/billing/debtors/${encodeURIComponent(selectedRow.client_name)}/whatsapp-contact`)
+      const contact = response.data
+
+      if (contact.requires_manual_entry || !contact.normalized_phone_number) {
+        setManualPhoneNumber('')
+        setShowPhoneModal(true)
+        return
+      }
+
+      await openWhatsApp(contact.phone_number, contact.normalized_phone_number)
+    } catch (error: any) {
+      toast.error(error?.response?.data?.detail ?? 'Failed to resolve WhatsApp number')
+    }
+  }
+
+  const openWhatsApp = async (phoneNumber: string, normalizedPhoneNumber?: string) => {
+    const normalized = normalizedPhoneNumber || phoneNumber.replace(/\D+/g, '')
+    if (!normalized) {
       toast.error('Phone number not available')
       return
     }
 
+    toast.success(`Using WhatsApp number: ${phoneNumber}`)
+
     const encodedText = encodeWhatsAppText(billText)
-    const whatsappUrl = `https://wa.me/${phoneNumber}?text=${encodedText}`
+    const whatsappUrl = `https://wa.me/${normalized}?text=${encodedText}`
+    const popup = window.open(whatsappUrl, '_blank')
 
-    // Track the send
-    await whatsappMutation.mutateAsync()
+    if (!popup) {
+      toast.error('Failed to open WhatsApp')
+      return
+    }
 
-    // Open WhatsApp
-    window.open(whatsappUrl, '_blank')
+    await whatsappMutation.mutateAsync(phoneNumber)
+    setShowPhoneModal(false)
+  }
+
+  const handleConfirmPhoneAndSend = async () => {
+    const trimmedPhone = manualPhoneNumber.trim()
+    if (!trimmedPhone) {
+      toast.error('Please enter a phone number')
+      return
+    }
+    await openWhatsApp(trimmedPhone)
   }
 
   const columns = [
@@ -310,6 +357,43 @@ export default function Debtors() {
             >
               <Copy size={16} /> Copy
             </button>
+          </div>
+        </Modal>
+      )}
+
+      {showPhoneModal && (
+        <Modal
+          title="Enter Phone Number"
+          open={showPhoneModal}
+          onClose={() => setShowPhoneModal(false)}
+        >
+          <div className="space-y-4">
+            <p className="text-sm text-gray-600">No saved phone number was found for this client. Enter one to send now and save it for next time.</p>
+            <input
+              type="text"
+              placeholder="e.g. +2348012345678"
+              value={manualPhoneNumber}
+              onChange={(e) => setManualPhoneNumber(e.target.value)}
+              className="form-input w-full"
+              autoFocus
+            />
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={() => setShowPhoneModal(false)}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="btn-primary"
+                onClick={handleConfirmPhoneAndSend}
+                disabled={whatsappMutation.isPending}
+              >
+                {whatsappMutation.isPending ? 'Sending…' : 'Send'}
+              </button>
+            </div>
           </div>
         </Modal>
       )}

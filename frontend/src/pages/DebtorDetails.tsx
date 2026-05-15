@@ -27,6 +27,15 @@ interface DebtorDetails {
   total_outstanding: number
 }
 
+interface WhatsAppContact {
+  client_name: string
+  client_id?: string
+  phone_number: string
+  normalized_phone_number: string
+  source: string | null
+  requires_manual_entry: boolean
+}
+
 const PAYMENT_DETAILS = {
   accountNumber: '8168364881',
   bankName: 'OPAY (PAYCOM)',
@@ -56,9 +65,9 @@ export default function DebtorDetails() {
   })
 
   const whatsappMutation = useMutation({
-    mutationFn: () =>
+    mutationFn: (rawPhoneNumber: string) =>
       api.post(`/billing/debtors/${encodeURIComponent(clientName!)}/whatsapp`, {
-        phone_number: phoneNumber,
+        phone_number: rawPhoneNumber,
       }),
     onSuccess: () => {
       toast.success('WhatsApp send tracked')
@@ -90,19 +99,48 @@ export default function DebtorDetails() {
   }
 
   const handleSendWhatsApp = async () => {
-    if (!phoneNumber.trim()) {
-      setShowPhoneModal(true)
+    if (!clientName || !billText) {
+      toast.error('Generate the bill before sending')
       return
     }
 
+    try {
+      const response = await api.get<WhatsAppContact>(`/billing/debtors/${encodeURIComponent(clientName)}/whatsapp-contact`)
+      const contact = response.data
+
+      if (contact.requires_manual_entry || !contact.normalized_phone_number) {
+        setPhoneNumber('')
+        setShowPhoneModal(true)
+        return
+      }
+
+      await openWhatsApp(contact.phone_number, contact.normalized_phone_number)
+    } catch (error: any) {
+      toast.error(error?.response?.data?.detail ?? 'Failed to resolve WhatsApp number')
+    }
+  }
+
+  const openWhatsApp = async (rawPhoneNumber: string, normalizedPhoneNumber?: string) => {
+    const normalized = normalizedPhoneNumber || rawPhoneNumber.replace(/\D+/g, '')
+    if (!normalized) {
+      toast.error('Phone number not available')
+      return
+    }
+
+    toast.success(`Using WhatsApp number: ${rawPhoneNumber}`)
+
     const encodedText = encodeWhatsAppText(billText)
-    const whatsappUrl = `https://wa.me/${phoneNumber}?text=${encodedText}`
+    const whatsappUrl = `https://wa.me/${normalized}?text=${encodedText}`
+    const popup = window.open(whatsappUrl, '_blank')
 
-    // Track the send
-    await whatsappMutation.mutateAsync()
+    if (!popup) {
+      toast.error('Failed to open WhatsApp')
+      return
+    }
 
-    // Open WhatsApp
-    window.open(whatsappUrl, '_blank')
+    await whatsappMutation.mutateAsync(rawPhoneNumber)
+
+    setShowPhoneModal(false)
   }
 
   const handleConfirmPhoneAndSend = async () => {
@@ -111,16 +149,7 @@ export default function DebtorDetails() {
       return
     }
 
-    const encodedText = encodeWhatsAppText(billText)
-    const whatsappUrl = `https://wa.me/${phoneNumber}?text=${encodedText}`
-
-    // Track the send
-    await whatsappMutation.mutateAsync()
-
-    setShowPhoneModal(false)
-
-    // Open WhatsApp
-    window.open(whatsappUrl, '_blank')
+    await openWhatsApp(phoneNumber)
   }
 
   if (isLoading) return <LoadingSpinner />
@@ -246,7 +275,7 @@ export default function DebtorDetails() {
           onClose={() => setShowPhoneModal(false)}
         >
           <div className="space-y-4">
-            <p className="text-sm text-gray-600">Please enter the phone number to send WhatsApp message:</p>
+            <p className="text-sm text-gray-600">No saved phone number was found for this client. Enter one to send now and save it for next time.</p>
             <input
               type="text"
               placeholder="e.g., +234901234567 or 08012345678"

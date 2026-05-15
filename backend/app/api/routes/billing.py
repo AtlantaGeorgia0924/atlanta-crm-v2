@@ -1,7 +1,10 @@
+import re
+import uuid
+from datetime import datetime
+from typing import Optional
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from typing import Optional
-from datetime import datetime
 from app.db.supabase_client import get_supabase
 from app.core.auth import get_current_user
 from app.core.financials import (
@@ -31,6 +34,136 @@ def _best_service_name(row: dict) -> str:
     if legacy_id:
         return f"Service Job {legacy_id}"
     return "General Service"
+
+
+def _normalize_client_name(value: Optional[str]) -> str:
+    return str(value or "").strip().upper()
+
+
+def _normalize_phone_number(value: Optional[str]) -> str:
+    return re.sub(r"\D+", "", str(value or ""))
+
+
+def _find_matching_client(sb, client_name: str) -> Optional[dict]:
+    normalized_target = _normalize_client_name(client_name)
+    client_rows = sb.table("clients").select("id,name,phone").execute().data or []
+    for row in client_rows:
+        if _normalize_client_name(row.get("name")) == normalized_target:
+            return row
+    return None
+
+
+def _find_latest_service_phone(sb, client_name: str) -> Optional[str]:
+    normalized_target = _normalize_client_name(client_name)
+    try:
+        service_rows = (
+            sb.table("service_jobs")
+            .select("client_name,phone_number,service_date,source_updated_at,created_at")
+            .execute()
+            .data
+            or []
+        )
+    except Exception:
+        return None
+
+    matching_rows = []
+    for row in service_rows:
+        if _normalize_client_name(row.get("client_name")) != normalized_target:
+            continue
+        raw_phone = str(row.get("phone_number") or "").strip()
+        if not raw_phone:
+            continue
+        matching_rows.append(row)
+
+    if not matching_rows:
+        return None
+
+    matching_rows.sort(
+        key=lambda row: (
+            str(row.get("service_date") or ""),
+            str(row.get("source_updated_at") or ""),
+            str(row.get("created_at") or ""),
+        ),
+        reverse=True,
+    )
+    return str(matching_rows[0].get("phone_number") or "").strip() or None
+
+
+def _resolve_whatsapp_contact(sb, client_name: str) -> dict:
+    client_row = _find_matching_client(sb, client_name)
+    client_phone = str((client_row or {}).get("phone") or "").strip()
+    service_phone = None if client_phone else _find_latest_service_phone(sb, client_name)
+
+    raw_phone = client_phone or service_phone or ""
+    return {
+        "client_id": (client_row or {}).get("id"),
+        "client_name": (client_row or {}).get("name") or client_name,
+        "phone_number": raw_phone,
+        "normalized_phone_number": _normalize_phone_number(raw_phone),
+        "source": "clients.phone" if client_phone else "service_jobs.phone_number" if service_phone else None,
+        "requires_manual_entry": not bool(raw_phone),
+    }
+
+
+def _upsert_client_phone(sb, client_name: str, phone_number: str) -> dict:
+    existing_client = _find_matching_client(sb, client_name)
+    cleaned_phone = str(phone_number or "").strip()
+
+    if existing_client:
+        updates = {}
+        if cleaned_phone and cleaned_phone != str(existing_client.get("phone") or "").strip():
+            updates["phone"] = cleaned_phone
+        if updates:
+            response = sb.table("clients").update(updates).eq("id", existing_client.get("id")).execute()
+            return response.data[0] if response.data else {**existing_client, **updates}
+        return existing_client
+
+    new_client = {
+        "id": str(uuid.uuid4()),
+        "name": client_name.strip(),
+        "phone": cleaned_phone,
+    }
+    response = sb.table("clients").insert(new_client).execute()
+    return response.data[0] if response.data else new_client
+
+
+def _track_whatsapp_send(sb, client_name: str, phone_number: str) -> dict:
+    client_row = _upsert_client_phone(sb, client_name, phone_number)
+    sent_at = datetime.utcnow().isoformat()
+
+    try:
+        current_tracking = (
+            sb.table("clients")
+            .select("whatsapp_sent_count")
+            .eq("id", client_row.get("id"))
+            .single()
+            .execute()
+            .data
+            or {}
+        )
+        sent_count = int(current_tracking.get("whatsapp_sent_count") or 0) + 1
+        response = (
+            sb.table("clients")
+            .update({
+                "whatsapp_sent_count": sent_count,
+                "last_whatsapp_sent_at": sent_at,
+            })
+            .eq("id", client_row.get("id"))
+            .execute()
+        )
+        updated_client = response.data[0] if response.data else {**client_row, "whatsapp_sent_count": sent_count, "last_whatsapp_sent_at": sent_at}
+    except Exception:
+        sent_count = 1
+        updated_client = client_row
+
+    return {
+        "client_id": updated_client.get("id"),
+        "client_name": updated_client.get("name") or client_name,
+        "phone_number": updated_client.get("phone") or phone_number,
+        "normalized_phone_number": _normalize_phone_number(updated_client.get("phone") or phone_number),
+        "whatsapp_sent_count": sent_count,
+        "last_whatsapp_sent_at": sent_at,
+    }
 
 
 class BillingCreate(BaseModel):
@@ -294,36 +427,25 @@ class WhatsAppTracker(BaseModel):
     phone_number: Optional[str] = None
 
 
+@router.get("/debtors/{client_name}/whatsapp-contact")
+def get_debtor_whatsapp_contact(client_name: str, _user=Depends(get_current_user)):
+    sb = get_supabase()
+    return _resolve_whatsapp_contact(sb, client_name)
+
+
 @router.post("/debtors/{client_name}/whatsapp")
 def track_whatsapp_send(client_name: str, payload: WhatsAppTracker, _user=Depends(get_current_user)):
-    """Track WhatsApp send and update client tracking metrics."""
+    """Persist WhatsApp phone if provided and track a successful send."""
     sb = get_supabase()
-    
-    # Try to find existing client
-    result = sb.table("clients").select("*").ilike("id", f"sheet_import:client:{client_name}%").execute()
-    existing_client = result.data[0] if result.data else None
-    
-    whatsapp_sent_count = 1
-    if existing_client:
-        whatsapp_sent_count = (existing_client.get("whatsapp_sent_count") or 0) + 1
-        # Update existing client
-        sb.table("clients").update({
-            "whatsapp_sent_count": whatsapp_sent_count,
-            "last_whatsapp_sent_at": datetime.utcnow().isoformat(),
-        }).eq("id", existing_client.get("id")).execute()
-    else:
-        # Create new client record
-        sb.table("clients").insert({
-            "id": f"sheet_import:client:{client_name.replace(' ', '_')}_{datetime.utcnow().timestamp()}",
-            "name": client_name,
-            "phone_number": payload.phone_number or "",
-            "whatsapp_sent_count": 1,
-            "last_whatsapp_sent_at": datetime.utcnow().isoformat(),
-        }).execute()
-    
+    resolved = _resolve_whatsapp_contact(sb, client_name)
+    raw_phone = str(payload.phone_number or resolved.get("phone_number") or "").strip()
+    normalized_phone = _normalize_phone_number(raw_phone)
+
+    if not normalized_phone:
+        raise HTTPException(422, "Phone number is required")
+
+    tracked = _track_whatsapp_send(sb, client_name, raw_phone)
     return {
         "message": "WhatsApp send tracked",
-        "client_name": client_name,
-        "whatsapp_sent_count": whatsapp_sent_count,
-        "last_whatsapp_sent_at": datetime.utcnow().isoformat(),
+        **tracked,
     }
