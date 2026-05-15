@@ -38,6 +38,8 @@ export default function DebtorDetails() {
   const navigate = useNavigate()
   const qc = useQueryClient()
   const [showBillPreview, setShowBillPreview] = useState(false)
+  const [showPhoneModal, setShowPhoneModal] = useState(false)
+  const [phoneNumber, setPhoneNumber] = useState('')
   const [billText, setBillText] = useState('')
 
   const { data: status } = useQuery<{ currency?: string }>({
@@ -56,7 +58,7 @@ export default function DebtorDetails() {
   const whatsappMutation = useMutation({
     mutationFn: () =>
       api.post(`/billing/debtors/${encodeURIComponent(clientName!)}/whatsapp`, {
-        phone_number: '',
+        phone_number: phoneNumber,
       }),
     onSuccess: () => {
       toast.success('WhatsApp send tracked')
@@ -88,9 +90,8 @@ export default function DebtorDetails() {
   }
 
   const handleSendWhatsApp = async () => {
-    const phoneNumber = debtor?.items[0]?.['client_phone'] || ''
-    if (!phoneNumber) {
-      toast.error('Phone number not available')
+    if (!phoneNumber.trim()) {
+      setShowPhoneModal(true)
       return
     }
 
@@ -99,6 +100,24 @@ export default function DebtorDetails() {
 
     // Track the send
     await whatsappMutation.mutateAsync()
+
+    // Open WhatsApp
+    window.open(whatsappUrl, '_blank')
+  }
+
+  const handleConfirmPhoneAndSend = async () => {
+    if (!phoneNumber.trim()) {
+      toast.error('Please enter a phone number')
+      return
+    }
+
+    const encodedText = encodeWhatsAppText(billText)
+    const whatsappUrl = `https://wa.me/${phoneNumber}?text=${encodedText}`
+
+    // Track the send
+    await whatsappMutation.mutateAsync()
+
+    setShowPhoneModal(false)
 
     // Open WhatsApp
     window.open(whatsappUrl, '_blank')
@@ -215,6 +234,41 @@ export default function DebtorDetails() {
             >
               <Copy size={16} /> Copy
             </button>
+          </div>
+        </Modal>
+      )}
+
+      {/* Phone Number Modal */}
+      {showPhoneModal && (
+        <Modal
+          title="Enter Phone Number"
+          open={showPhoneModal}
+          onClose={() => setShowPhoneModal(false)}
+        >
+          <div className="space-y-4">
+            <p className="text-sm text-gray-600">Please enter the phone number to send WhatsApp message:</p>
+            <input
+              type="text"
+              placeholder="e.g., +234901234567 or 08012345678"
+              value={phoneNumber}
+              onChange={(e) => setPhoneNumber(e.target.value)}
+              className="form-input w-full"
+              autoFocus
+            />
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => setShowPhoneModal(false)}
+                className="btn-secondary py-2 px-4"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleConfirmPhoneAndSend}
+                className="btn-primary py-2 px-4"
+              >
+                Send
+              </button>
+            </div>
           </div>
         </Modal>
       )}

@@ -1,5 +1,3 @@
-import { formatCurrency } from './utils'
-
 interface BillingItem {
   service_name: string
   service_date: string
@@ -30,7 +28,6 @@ function formatDateVerbose(dateStr: string): string {
   const day = date.getDate()
   const dayName = dayNames[date.getDay()]
   const monthName = monthNames[date.getMonth()]
-  const year = date.getFullYear()
   
   // Add ordinal suffix
   let ordinal = 'th'
