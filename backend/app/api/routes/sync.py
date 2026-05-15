@@ -69,9 +69,9 @@ def _backup_imported_rows(sb, backup_stamp: str) -> dict:
 
 
 def _truncate_target_tables(sb) -> dict:
-    service_resp = sb.table("service_jobs").delete().gte("created_at", "1900-01-01").execute()
-    inventory_resp = sb.table("inventory_items").delete().gte("created_at", "1900-01-01").execute()
-    clients_resp = sb.table("clients").delete().gte("created_at", "1900-01-01").execute()
+    service_resp = sb.table("service_jobs").delete().like("legacy_source_id", "sheet_import:service:%").execute()
+    inventory_resp = sb.table("inventory_items").delete().like("legacy_source_id", "sheet_import:inventory:%").execute()
+    clients_resp = sb.table("clients").delete().like("id", "sheet_import:client:%").execute()
 
     return {
         "service_jobs": len(service_resp.data or []),
