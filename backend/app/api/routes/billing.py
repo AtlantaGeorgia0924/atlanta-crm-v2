@@ -252,3 +252,78 @@ def delete_billing(billing_id: str, _user=Depends(get_current_user)):
     sb = get_supabase()
     sb.table("service_jobs").delete().eq("id", billing_id).execute()
     recompute_and_persist_metrics(sb, source="supabase_after_billing_delete")
+
+
+@router.get("/debtors/{client_name}/items")
+def get_debtor_items(client_name: str, _user=Depends(get_current_user)):
+    """Get all outstanding items for a specific client (used in Debtor Details page)."""
+    sb = get_supabase()
+    debtors = compute_debtors_from_supabase(sb)
+    included_rows = debtors["included_rows"]
+    
+    # Filter rows for this client and format them
+    client_items = [
+        {
+            "id": row.get("id"),
+            "service_name": row.get("service_name"),
+            "service_date": row.get("service_date"),
+            "amount_charged": row.get("amount_charged"),
+            "paid_amount": row.get("paid_amount"),
+            "outstanding": row.get("outstanding"),
+            "payment_status": row.get("payment_status"),
+            "description": row.get("service_name") or "Service",
+        }
+        for row in included_rows
+        if row.get("client_name").strip().upper() == client_name.strip().upper()
+    ]
+    
+    # Sort by service_date descending
+    client_items.sort(key=lambda x: str(x.get("service_date") or ""), reverse=True)
+    
+    total_outstanding = sum(item.get("outstanding", 0) for item in client_items)
+    
+    return {
+        "client_name": client_name,
+        "items": client_items,
+        "item_count": len(client_items),
+        "total_outstanding": total_outstanding,
+    }
+
+
+class WhatsAppTracker(BaseModel):
+    phone_number: Optional[str] = None
+
+
+@router.post("/debtors/{client_name}/whatsapp")
+def track_whatsapp_send(client_name: str, payload: WhatsAppTracker, _user=Depends(get_current_user)):
+    """Track WhatsApp send and update client tracking metrics."""
+    sb = get_supabase()
+    
+    # Try to find existing client
+    result = sb.table("clients").select("*").ilike("id", f"sheet_import:client:{client_name}%").execute()
+    existing_client = result.data[0] if result.data else None
+    
+    whatsapp_sent_count = 1
+    if existing_client:
+        whatsapp_sent_count = (existing_client.get("whatsapp_sent_count") or 0) + 1
+        # Update existing client
+        sb.table("clients").update({
+            "whatsapp_sent_count": whatsapp_sent_count,
+            "last_whatsapp_sent_at": datetime.utcnow().isoformat(),
+        }).eq("id", existing_client.get("id")).execute()
+    else:
+        # Create new client record
+        sb.table("clients").insert({
+            "id": f"sheet_import:client:{client_name.replace(' ', '_')}_{datetime.utcnow().timestamp()}",
+            "name": client_name,
+            "phone_number": payload.phone_number or "",
+            "whatsapp_sent_count": 1,
+            "last_whatsapp_sent_at": datetime.utcnow().isoformat(),
+        }).execute()
+    
+    return {
+        "message": "WhatsApp send tracked",
+        "client_name": client_name,
+        "whatsapp_sent_count": whatsapp_sent_count,
+        "last_whatsapp_sent_at": datetime.utcnow().isoformat(),
+    }

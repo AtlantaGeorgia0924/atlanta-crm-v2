@@ -7,6 +7,7 @@ import Clients from '@/pages/Clients'
 import Billing from '@/pages/Billing'
 import Inventory from '@/pages/Inventory'
 import Debtors from '@/pages/Debtors'
+import DebtorDetails from '@/pages/DebtorDetails'
 import Expenses from '@/pages/Expenses'
 import Allowances from '@/pages/Allowances'
 import CashFlow from '@/pages/CashFlow'
@@ -37,6 +38,7 @@ export default function App() {
           <Route path="billing"     element={<Billing />} />
           <Route path="inventory"   element={<Inventory />} />
           <Route path="debtors"     element={<Debtors />} />
+          <Route path="debtors/:clientName" element={<DebtorDetails />} />
           <Route path="expenses"    element={<Expenses />} />
           <Route path="allowances"  element={<Allowances />} />
           <Route path="cashflow"    element={<CashFlow />} />
