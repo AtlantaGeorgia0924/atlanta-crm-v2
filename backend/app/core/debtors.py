@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from collections import defaultdict
-
 from app.core.dashboard_metrics import _fetch_all_rows
 from app.core.financials import compute_outstanding, to_number
 
@@ -14,8 +12,14 @@ def _normalize_status(value) -> str:
 
 
 def _normalize_client_name(value) -> str:
-    text = str(value or "").strip()
-    return text or "Unknown Client"
+    return str(value or "").strip()
+
+
+def _is_valid_client_name(value) -> bool:
+    normalized = _normalize_client_name(value)
+    if not normalized:
+        return False
+    return normalized not in {".", "..", "...", "....", ",,"}
 
 
 def compute_debtors_from_supabase(sb) -> dict:
@@ -58,8 +62,11 @@ def compute_debtors_from_supabase(sb) -> dict:
         paid = to_number(row.get("paid_amount"))
         outstanding = max(total - paid, 0.0)
         is_return = bool(row.get("is_return"))
+        has_valid_client_name = _is_valid_client_name(row.get("client_name"))
 
         include = (
+            has_valid_client_name
+            and
             status in {"UNPAID", "PART PAYMENT"}
             and status != "RETURNED"
             and outstanding > 0
@@ -67,9 +74,9 @@ def compute_debtors_from_supabase(sb) -> dict:
         )
 
         inclusion_reason = (
-            f"status={status}; outstanding={outstanding:.2f}; is_return={str(is_return).lower()}"
+            f"status={status}; outstanding={outstanding:.2f}; is_return={str(is_return).lower()}; valid_client_name={str(has_valid_client_name).lower()}"
             if include
-            else f"excluded: status={status}; outstanding={outstanding:.2f}; is_return={str(is_return).lower()}"
+            else f"excluded: status={status}; outstanding={outstanding:.2f}; is_return={str(is_return).lower()}; valid_client_name={str(has_valid_client_name).lower()}"
         )
 
         row_payload = {
@@ -132,7 +139,11 @@ def compute_debtors_from_supabase(sb) -> dict:
         if status == "PART PAYMENT":
             group["status"] = "partial"
 
-    grouped_rows = sorted(grouped.values(), key=lambda r: (-to_number(r.get("balance")), str(r.get("client_name") or "").upper()))
+    grouped_rows = [
+        row for row in grouped.values()
+        if _is_valid_client_name(row.get("client_name")) and to_number(row.get("balance")) > 0
+    ]
+    grouped_rows.sort(key=lambda r: (-to_number(r.get("balance")), str(r.get("client_name") or "").upper()))
     total_amount_owed = sum(to_number(row.get("balance")) for row in grouped_rows)
 
     return {
