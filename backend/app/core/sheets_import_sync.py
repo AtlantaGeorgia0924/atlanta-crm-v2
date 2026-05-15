@@ -77,10 +77,11 @@ def _worksheet_rows(worksheet) -> Tuple[List[Dict[str, str]], int]:
             break
     headers = values[header_idx]
     rows = []
-    for row in values[header_idx + 1:]:
+    for row_offset, row in enumerate(values[header_idx + 1:], start=1):
         padded = row + [""] * (len(headers) - len(row))
         record = {headers[i]: padded[i] for i in range(len(headers))}
         if any(str(v).strip() for v in record.values()):
+            record["__sheet_row_number"] = header_idx + 1 + row_offset
             rows.append(record)
     return rows, len(rows)
 
@@ -154,6 +155,99 @@ def _fetch_all_rows(sb, table_name: str, select_clause: str, batch_size: int = 1
             break
         start += batch_size
     return rows
+
+
+def _same_value(a, b) -> bool:
+    if a is None:
+        a = ""
+    if b is None:
+        b = ""
+    return str(a).strip() == str(b).strip()
+
+
+def _has_unsynced_app_change(row: dict) -> bool:
+    if str(row.get("sync_source") or "").lower() != "app":
+        return False
+    if not bool(row.get("sync_dirty")):
+        return False
+    updated_at = str(row.get("updated_at") or "")
+    last_synced_at = str(row.get("last_synced_at") or "")
+    if not updated_at:
+        return False
+    if not last_synced_at:
+        return True
+    return updated_at > last_synced_at
+
+
+def _incremental_sync_table(
+    sb,
+    table_name: str,
+    key_field: str,
+    payload_rows: List[dict],
+    compare_fields: List[str],
+) -> dict:
+    now_iso = datetime.utcnow().isoformat()
+    if not payload_rows:
+        return {
+            "inserted": 0,
+            "updated": 0,
+            "unchanged": 0,
+            "skipped_app_newer": 0,
+        }
+
+    existing_rows = _fetch_all_rows(
+        sb,
+        table_name,
+        f"{key_field},{','.join(compare_fields)},updated_at,last_synced_at,sync_dirty,sync_source,id,legacy_source_id",
+    )
+    existing_by_key = {str(r.get(key_field) or ""): r for r in existing_rows}
+
+    inserted = 0
+    updated = 0
+    unchanged = 0
+    skipped_app_newer = 0
+
+    for row in payload_rows:
+        key_value = str(row.get(key_field) or "")
+        if not key_value:
+            continue
+
+        existing = existing_by_key.get(key_value)
+        payload_with_tracking = {
+            **row,
+            "last_synced_at": now_iso,
+            "sync_dirty": False,
+            "sync_source": "sheet",
+            "source_updated_at": now_iso,
+        }
+
+        if not existing:
+            sb.table(table_name).insert(payload_with_tracking).execute()
+            inserted += 1
+            continue
+
+        if _has_unsynced_app_change(existing):
+            skipped_app_newer += 1
+            continue
+
+        row_changed = any(
+            not _same_value(existing.get(field), row.get(field))
+            for field in compare_fields
+        )
+
+        if not row_changed:
+            unchanged += 1
+            continue
+
+        sb.table(table_name).update(payload_with_tracking).eq(key_field, key_value).execute()
+        updated += 1
+
+    return {
+        "inserted": inserted,
+        "updated": updated,
+        "unchanged": unchanged,
+        "skipped_app_newer": skipped_app_newer,
+    }
 
 
 def import_google_sheets_to_supabase(sb) -> dict:
@@ -275,6 +369,7 @@ def import_google_sheets_to_supabase(sb) -> dict:
         service_payload.append(
             {
                 "legacy_source_id": f"sheet_import:service:{idx + 1}",
+                "sheet_row_number": int(row.get("__sheet_row_number") or 0),
                 "client_name": client_name_raw,
                 "service_name": service_name,
                 "description": description_raw,
@@ -293,7 +388,6 @@ def import_google_sheets_to_supabase(sb) -> dict:
                 "due_date": _parse_date(row.get(due_h)) if due_h else None,
                 "notes": str(row.get(notes_h) or "").strip() if notes_h else None,
                 "imei": imei_str,
-                "source_updated_at": datetime.utcnow().isoformat(),
             }
         )
 
@@ -313,13 +407,14 @@ def import_google_sheets_to_supabase(sb) -> dict:
         clients_payload.append(
             {
                 "id": f"sheet_import:client:{idx + 1}",
+                "legacy_source_id": f"sheet_import:client:{idx + 1}",
+                "sheet_row_number": int(row.get("__sheet_row_number") or 0),
                 "name": name,
                 "phone": str(row.get(client_phone_h) or "").strip() if client_phone_h else None,
                 "email": str(row.get(client_email_h) or "").strip() if client_email_h else None,
                 "address": str(row.get(client_address_h) or "").strip() if client_address_h else None,
                 "company": str(row.get(client_company_h) or "").strip() if client_company_h else None,
                 "notes": str(row.get(client_notes_h) or "").strip() if client_notes_h else None,
-                "source_updated_at": datetime.utcnow().isoformat(),
             }
         )
 
@@ -363,6 +458,7 @@ def import_google_sheets_to_supabase(sb) -> dict:
         inventory_payload.append(
             {
                 "legacy_source_id": f"sheet_import:inventory:{idx + 1}",
+                "sheet_row_number": int(row.get("__sheet_row_number") or 0),
                 "item_name": item_name,
                 "sku": inv_imei_str,
                 "imei": inv_imei_str,
@@ -373,39 +469,154 @@ def import_google_sheets_to_supabase(sb) -> dict:
                 "cost_price": cost_price,
                 "selling_price": selling_price,
                 "payment_status": normalized_status,  # Also keep payment_status for backward compatibility
-                "source_updated_at": datetime.utcnow().isoformat(),
             }
         )
 
-    # Replace previously imported snapshots, keep non-imported manual data intact.
-    sb.table("service_jobs").delete().ilike("legacy_source_id", "sheet_import:service:%").execute()
-    sb.table("inventory_items").delete().ilike("legacy_source_id", "sheet_import:inventory:%").execute()
-    sb.table("clients").delete().ilike("id", "sheet_import:client:%").execute()
-
     imei_col_missing = False
+    service_sync_result = {
+        "inserted": 0,
+        "updated": 0,
+        "unchanged": 0,
+        "skipped_app_newer": 0,
+    }
+    inventory_sync_result = {
+        "inserted": 0,
+        "updated": 0,
+        "unchanged": 0,
+        "skipped_app_newer": 0,
+    }
+    clients_sync_result = {
+        "inserted": 0,
+        "updated": 0,
+        "unchanged": 0,
+        "skipped_app_newer": 0,
+    }
+
     if service_payload:
         try:
-            _batch_upsert(sb, "service_jobs", service_payload, on_conflict="legacy_source_id")
+            service_sync_result = _incremental_sync_table(
+                sb,
+                "service_jobs",
+                "legacy_source_id",
+                service_payload,
+                [
+                    "sheet_row_number",
+                    "client_name",
+                    "service_name",
+                    "description",
+                    "quantity",
+                    "amount_charged",
+                    "paid_amount",
+                    "service_expense_amount",
+                    "service_expense_description",
+                    "service_expense_date",
+                    "calculated_profit",
+                    "payment_status",
+                    "is_return",
+                    "paid_date",
+                    "paid_at",
+                    "service_date",
+                    "due_date",
+                    "notes",
+                    "imei",
+                ],
+            )
         except Exception as e:
-            # PGRST204 means the column doesn't exist yet in the schema cache
             if "PGRST204" in str(e) and "imei" in str(e):
                 imei_col_missing = True
                 stripped = [{k: v for k, v in r.items() if k != "imei"} for r in service_payload]
-                _batch_upsert(sb, "service_jobs", stripped, on_conflict="legacy_source_id")
+                service_sync_result = _incremental_sync_table(
+                    sb,
+                    "service_jobs",
+                    "legacy_source_id",
+                    stripped,
+                    [
+                        "sheet_row_number",
+                        "client_name",
+                        "service_name",
+                        "description",
+                        "quantity",
+                        "amount_charged",
+                        "paid_amount",
+                        "service_expense_amount",
+                        "service_expense_description",
+                        "service_expense_date",
+                        "calculated_profit",
+                        "payment_status",
+                        "is_return",
+                        "paid_date",
+                        "paid_at",
+                        "service_date",
+                        "due_date",
+                        "notes",
+                    ],
+                )
             else:
                 raise
+
     if inventory_payload:
         try:
-            _batch_upsert(sb, "inventory_items", inventory_payload, on_conflict="legacy_source_id")
+            inventory_sync_result = _incremental_sync_table(
+                sb,
+                "inventory_items",
+                "legacy_source_id",
+                inventory_payload,
+                [
+                    "sheet_row_number",
+                    "item_name",
+                    "sku",
+                    "imei",
+                    "category",
+                    "description",
+                    "quantity",
+                    "unit",
+                    "cost_price",
+                    "selling_price",
+                    "payment_status",
+                ],
+            )
         except Exception as e:
             if "PGRST204" in str(e) and "imei" in str(e):
                 imei_col_missing = True
                 stripped = [{k: v for k, v in r.items() if k != "imei"} for r in inventory_payload]
-                _batch_upsert(sb, "inventory_items", stripped, on_conflict="legacy_source_id")
+                inventory_sync_result = _incremental_sync_table(
+                    sb,
+                    "inventory_items",
+                    "legacy_source_id",
+                    stripped,
+                    [
+                        "sheet_row_number",
+                        "item_name",
+                        "sku",
+                        "category",
+                        "description",
+                        "quantity",
+                        "unit",
+                        "cost_price",
+                        "selling_price",
+                        "payment_status",
+                    ],
+                )
             else:
                 raise
+
     if clients_payload:
-        _batch_upsert(sb, "clients", clients_payload, on_conflict="id")
+        clients_sync_result = _incremental_sync_table(
+            sb,
+            "clients",
+            "id",
+            clients_payload,
+            [
+                "legacy_source_id",
+                "sheet_row_number",
+                "name",
+                "phone",
+                "email",
+                "address",
+                "company",
+                "notes",
+            ],
+        )
 
     # Post-import validation: compare imported rows to sheet rows by legacy_source_id.
     imported_service_rows = _fetch_all_rows(
@@ -492,9 +703,19 @@ def import_google_sheets_to_supabase(sb) -> dict:
             "Sheet1 (Inventory)": inventory_count,
         },
         "rows_upserted": {
-            "service_jobs": len(service_payload),
-            "clients": len(clients_payload),
-            "inventory_items": len(inventory_payload),
+            "service_jobs": service_sync_result["inserted"] + service_sync_result["updated"],
+            "clients": clients_sync_result["inserted"] + clients_sync_result["updated"],
+            "inventory_items": inventory_sync_result["inserted"] + inventory_sync_result["updated"],
+        },
+        "rows_unchanged": {
+            "service_jobs": service_sync_result["unchanged"],
+            "clients": clients_sync_result["unchanged"],
+            "inventory_items": inventory_sync_result["unchanged"],
+        },
+        "rows_skipped_app_newer": {
+            "service_jobs": service_sync_result["skipped_app_newer"],
+            "clients": clients_sync_result["skipped_app_newer"],
+            "inventory_items": inventory_sync_result["skipped_app_newer"],
         },
         "rows_skipped_overflow": {
             "service_jobs": skipped_service_overflow,

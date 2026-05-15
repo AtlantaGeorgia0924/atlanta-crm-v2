@@ -6,6 +6,7 @@ import ssl
 import time
 import json
 from datetime import datetime
+from typing import List
 from fastapi import APIRouter, Depends, HTTPException
 from app.db.supabase_client import get_supabase
 from app.core.auth import get_current_user
@@ -94,22 +95,122 @@ def _clear_cached_financial_metrics(sb) -> dict:
     return {"keys_cleared": len(cached_keys), "keys": cached_keys}
 
 
-def _overwrite_worksheet(spreadsheet, tab_name: str, data: list[dict]) -> int:
+def _column_letter(index: int) -> str:
+    result = ""
+    while index > 0:
+        index, rem = divmod(index - 1, 26)
+        result = chr(65 + rem) + result
+    return result
+
+
+def _sheet_string(value):
+    if value is None:
+        return ""
+    return str(value)
+
+
+def _get_or_create_worksheet(spreadsheet, tab_name: str):
     import gspread
 
     try:
-        ws = spreadsheet.worksheet(tab_name)
+        return spreadsheet.worksheet(tab_name)
     except gspread.WorksheetNotFound:
-        ws = spreadsheet.add_worksheet(title=tab_name, rows=5000, cols=40)
+        return spreadsheet.add_worksheet(title=tab_name, rows=5000, cols=40)
 
-    ws.clear()
-    if not data:
-        return 0
 
-    headers = list(data[0].keys())
-    values = [headers] + [[str(row.get(h, "")) for h in headers] for row in data]
-    ws.update(values)
-    return len(data)
+def _extract_row_lookup(values: List[List[str]], headers: List[str]) -> dict:
+    lookup = {}
+    identity_idx = None
+    if "legacy_source_id" in headers:
+        identity_idx = headers.index("legacy_source_id")
+    elif "id" in headers:
+        identity_idx = headers.index("id")
+    if identity_idx is None:
+        return lookup
+    for row_idx, row in enumerate(values[1:], start=2):
+        if identity_idx >= len(row):
+            continue
+        key = str(row[identity_idx] or "").strip()
+        if key:
+            lookup[key] = row_idx
+    return lookup
+
+
+def _sync_dirty_rows_for_table(sb, spreadsheet, tab_name: str, table_name: str) -> dict:
+    ws = _get_or_create_worksheet(spreadsheet, tab_name)
+
+    dirty_rows = (
+        sb.table(table_name)
+        .select("*")
+        .eq("sync_dirty", True)
+        .eq("sync_source", "app")
+        .execute()
+        .data
+        or []
+    )
+
+    if not dirty_rows:
+        return {"rows_updated": 0, "rows_inserted": 0, "rows_skipped": 0}
+
+    sheet_values = ws.get_all_values() or []
+    headers = list(sheet_values[0]) if sheet_values else list(dirty_rows[0].keys())
+    if not sheet_values:
+        ws.update("A1", [headers])
+        sheet_values = [headers]
+
+    missing_headers = [h for h in dirty_rows[0].keys() if h not in headers]
+    if missing_headers:
+        headers.extend(missing_headers)
+        ws.update("A1", [headers])
+        sheet_values = ws.get_all_values() or [headers]
+
+    row_lookup = _extract_row_lookup(sheet_values, headers)
+
+    now_iso = datetime.utcnow().isoformat()
+    rows_updated = 0
+    rows_inserted = 0
+    rows_skipped = 0
+
+    for row in dirty_rows:
+        identity_value = str(row.get("legacy_source_id") or row.get("id") or "").strip()
+        sheet_row_number = int(row.get("sheet_row_number") or 0)
+        if sheet_row_number < 2 and identity_value:
+            sheet_row_number = int(row_lookup.get(identity_value) or 0)
+
+        values = [_sheet_string(row.get(header)) for header in headers]
+
+        if sheet_row_number >= 2:
+            end_col = _column_letter(len(headers))
+            ws.update(f"A{sheet_row_number}:{end_col}{sheet_row_number}", [values])
+            rows_updated += 1
+        else:
+            ws.append_row(values, value_input_option="RAW")
+            current_values = ws.get_all_values() or []
+            sheet_row_number = len(current_values)
+            rows_inserted += 1
+
+        updates = {
+            "sheet_row_number": sheet_row_number,
+            "last_synced_at": now_iso,
+            "sync_dirty": False,
+            "sync_source": "app",
+        }
+
+        try:
+            if row.get("id") is not None:
+                sb.table(table_name).update(updates).eq("id", row.get("id")).execute()
+            elif row.get("legacy_source_id"):
+                sb.table(table_name).update(updates).eq("legacy_source_id", row.get("legacy_source_id")).execute()
+            else:
+                rows_skipped += 1
+        except Exception:
+            rows_skipped += 1
+
+    return {
+        "rows_updated": rows_updated,
+        "rows_inserted": rows_inserted,
+        "rows_skipped": rows_skipped,
+    }
 
 
 def _sync_to_google_sheets(sb, services_sheet_id: str, stocks_sheet_id: str) -> dict:
@@ -136,8 +237,7 @@ def _sync_to_google_sheets(sb, services_sheet_id: str, stocks_sheet_id: str) -> 
 
     rows_written = {}
     for spreadsheet, tab_name, table_name in sheet_mapping:
-        records = sb.table(table_name).select("*").execute().data or []
-        rows_written[tab_name] = _overwrite_worksheet(spreadsheet, tab_name, records)
+        rows_written[tab_name] = _sync_dirty_rows_for_table(sb, spreadsheet, tab_name, table_name)
 
     sync_timestamp = datetime.utcnow().isoformat()
     sb.table("app_settings").upsert(
@@ -145,6 +245,7 @@ def _sync_to_google_sheets(sb, services_sheet_id: str, stocks_sheet_id: str) -> 
     ).execute()
 
     return {
+        "mode": "incremental",
         "sheets_updated": [tab_name for _, tab_name, _ in sheet_mapping],
         "rows_written": rows_written,
         "sync_timestamp": sync_timestamp,
