@@ -105,6 +105,13 @@ def _normalized_payment_status(status: str) -> str:
     return "UNPAID"
 
 
+def _is_placeholder_text(value: Optional[str]) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return True
+    return text in {".", "..", "...", "....", ",,"}
+
+
 def _fits_numeric12(value: float) -> bool:
     return abs(float(value)) <= NUMERIC12_MAX
 
@@ -197,14 +204,25 @@ def import_google_sheets_to_supabase(sb) -> dict:
 
     service_payload = []
     skipped_service_overflow = 0
+    skipped_service_placeholder = 0
     for idx, row in enumerate(service_rows):
         amount_charged = to_number(row.get(price_h)) if price_h else 0.0
         paid_amount = to_number(row.get(paid_h)) if paid_h else 0.0
         quantity = to_number(row.get(qty_h)) if qty_h else 1.0
         service_expense = to_number(row.get(expense_h)) if expense_h else 0.0
-        service_name = str(row.get(service_h) or "").strip() if service_h else ""
-        if not service_name:
-            service_name = "General Service"
+
+        client_name_raw = str(row.get(client_h) or "").strip() if client_h else ""
+        description_raw = str(row.get(service_h) or "").strip() if service_h else ""
+
+        if (
+            _is_placeholder_text(client_name_raw)
+            or _is_placeholder_text(description_raw)
+            or (amount_charged == 0 and paid_amount == 0)
+        ):
+            skipped_service_placeholder += 1
+            continue
+
+        service_name = description_raw
 
         if not all(
             _fits_numeric12(v)
@@ -257,9 +275,9 @@ def import_google_sheets_to_supabase(sb) -> dict:
         service_payload.append(
             {
                 "legacy_source_id": f"sheet_import:service:{idx + 1}",
-                "client_name": str(row.get(client_h) or "").strip() if client_h else None,
+                "client_name": client_name_raw,
                 "service_name": service_name,
-                "description": str(row.get(service_h) or "").strip() if service_h else None,
+                "description": description_raw,
                 "quantity": quantity or 1.0,
                 "amount_charged": amount_charged,
                 "paid_amount": paid_amount,
@@ -405,6 +423,18 @@ def import_google_sheets_to_supabase(sb) -> dict:
     validation_matches = 0
     validation_mismatches: List[dict] = []
     for idx, row in enumerate(service_rows):
+        expected_amount_charged = to_number(row.get(price_h)) if price_h else 0.0
+        expected_paid_amount = to_number(row.get(paid_h)) if paid_h else 0.0
+        expected_client_name = str(row.get(client_h) or "").strip() if client_h else ""
+        expected_description = str(row.get(service_h) or "").strip() if service_h else ""
+
+        if (
+            _is_placeholder_text(expected_client_name)
+            or _is_placeholder_text(expected_description)
+            or (expected_amount_charged == 0 and expected_paid_amount == 0)
+        ):
+            continue
+
         legacy_source_id = f"sheet_import:service:{idx + 1}"
         imported_row = imported_by_legacy.get(legacy_source_id)
         if not imported_row:
@@ -416,8 +446,6 @@ def import_google_sheets_to_supabase(sb) -> dict:
             )
             continue
 
-        expected_amount_charged = to_number(row.get(price_h)) if price_h else 0.0
-        expected_paid_amount = to_number(row.get(paid_h)) if paid_h else 0.0
         expected_payment_status = _normalized_payment_status(row.get(status_h, "") if status_h else "")
 
         if expected_payment_status == "PAID" and expected_paid_amount <= 0:
@@ -471,6 +499,9 @@ def import_google_sheets_to_supabase(sb) -> dict:
         "rows_skipped_overflow": {
             "service_jobs": skipped_service_overflow,
             "inventory_items": skipped_inventory_overflow,
+        },
+        "rows_skipped_placeholder": {
+            "service_jobs": skipped_service_placeholder,
         },
         "headers_detected": {
             "services": {
