@@ -2,9 +2,29 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import api from '@/lib/api'
 import LoadingSpinner from '@/components/LoadingSpinner'
 import { formatCurrency } from '@/lib/utils'
-import { RefreshCw } from 'lucide-react'
+import { DollarSign, RefreshCw, Wallet } from 'lucide-react'
 import { useState } from 'react'
 import toast from 'react-hot-toast'
+
+interface DashboardSummary {
+  amount_owed: number
+  monthly_sales: number
+  net_profit: number
+}
+
+function StatCard({ label, value, icon: Icon, color }: { label: string; value: string | number; icon: React.ElementType; color: string }) {
+  return (
+    <div className="card flex items-start gap-4">
+      <div className={`p-2 rounded-lg ${color}`}>
+        <Icon size={20} className="text-white" />
+      </div>
+      <div>
+        <p className="text-sm text-gray-500">{label}</p>
+        <p className="text-xl font-bold text-gray-900">{value}</p>
+      </div>
+    </div>
+  )
+}
 
 interface Statement {
   total_sales: number
@@ -50,6 +70,11 @@ export default function CashFlow() {
   const { data, isLoading } = useQuery<Statement>({
     queryKey: ['cashflow-statement'],
     queryFn: () => api.get('/cashflow/statement').then((r) => r.data),
+  })
+
+  const { data: dashboardSummary } = useQuery<DashboardSummary>({
+    queryKey: ['dashboard'],
+    queryFn: () => api.get('/dashboard').then((r) => r.data),
   })
 
   const { data: expenses } = useQuery<CashflowExpense[]>({
@@ -142,6 +167,27 @@ export default function CashFlow() {
           <RefreshCw size={15} className={refreshMutation.isPending ? 'animate-spin' : ''} />
           Refresh Workspace
         </button>
+      </div>
+
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+        <StatCard
+          label="Amount Owed"
+          value={formatCurrency(dashboardSummary?.amount_owed ?? 0, currency)}
+          icon={Wallet}
+          color="bg-rose-500"
+        />
+        <StatCard
+          label="Monthly Sales"
+          value={formatCurrency(dashboardSummary?.monthly_sales ?? 0, currency)}
+          icon={DollarSign}
+          color="bg-teal-500"
+        />
+        <StatCard
+          label="Net Profit"
+          value={formatCurrency(dashboardSummary?.net_profit ?? 0, currency)}
+          icon={DollarSign}
+          color="bg-emerald-600"
+        />
       </div>
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">

@@ -1,8 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 import api from '@/lib/api'
-import { formatCurrency } from '@/lib/utils'
 import LoadingSpinner from '@/components/LoadingSpinner'
-import { Users, FileText, DollarSign, AlertCircle, Package, TrendingDown, Wallet } from 'lucide-react'
+import { Users, FileText, AlertCircle, Package, TrendingDown } from 'lucide-react'
 
 interface Summary {
   clients: number
@@ -36,15 +35,9 @@ export default function Dashboard() {
     queryFn: () => api.get('/dashboard').then((r) => r.data),
   })
 
-  const { data: status } = useQuery<{ currency?: string }>({
-    queryKey: ['system-status'],
-    queryFn: () => api.get('/settings/status').then((r) => r.data),
-  })
-
   if (isLoading) return <LoadingSpinner />
 
   const s = data!
-  const currency = status?.currency ?? localStorage.getItem('currency') ?? 'NGN'
 
   return (
     <div className="p-8 space-y-6">
@@ -53,12 +46,9 @@ export default function Dashboard() {
         <StatCard label="Clients"            value={s.clients} icon={Users} color="bg-blue-500" />
         <StatCard label="Total Invoices"     value={s.total_invoices} icon={FileText} color="bg-indigo-500" />
         <StatCard label="Total Unpaid"       value={s.total_unpaid} icon={AlertCircle} color="bg-red-500" />
-        <StatCard label="Amount Owed"        value={formatCurrency(s.amount_owed, currency)} icon={Wallet} color="bg-rose-500" />
-        <StatCard label="Monthly Sales"      value={formatCurrency(s.monthly_sales, currency)} icon={DollarSign} color="bg-teal-500" />
         <StatCard label="Available Products" value={s.available_products} icon={Package} color="bg-green-600" />
         <StatCard label="Pending Products"   value={s.pending_products} icon={Package} color="bg-amber-500" />
         <StatCard label="Low Quality Stock"  value={s.low_quality_stock} icon={TrendingDown} color="bg-orange-600" />
-        <StatCard label="Net Profit"         value={formatCurrency(s.net_profit, currency)} icon={DollarSign} color="bg-emerald-600" />
       </div>
     </div>
   )
