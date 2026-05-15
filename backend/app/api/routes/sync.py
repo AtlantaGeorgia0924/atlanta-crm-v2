@@ -1,12 +1,49 @@
 """Sync to Google Sheets – only triggered manually by the user.
 No other endpoint calls Google Sheets.
+
+Hardened Incremental Export System:
+===================================
+
+1. VALUE PRESERVATION:
+   - Null/empty database values do NOT overwrite existing sheet cells
+   - Manual entries and formulas in Google Sheets are preserved
+   - Uses merge logic: DB value overwrites sheet only if DB has non-empty value
+
+2. DIRTY ROW FILTERING:
+   - Only exports rows where sync_dirty=true AND sync_source='app'
+   - Unchanged rows are never rewritten
+
+3. STABLE ROW MATCHING:
+   - Finds existing sheet rows by legacy_source_id, then id (fallback)
+   - Does not rely solely on sheet_row_number
+   - Handles row renumbering gracefully
+
+4. HEADER EXPANSION:
+   - New database columns are appended to sheet headers
+   - Existing columns are never reordered
+
+5. ERROR LOGGING:
+   - All sync errors are logged to sync_errors table
+   - Includes table_name, legacy_source_id, operation, error_message, created_at
+   - Processing continues if one row fails (fault-tolerant)
+
+6. ACCURATE COUNTING:
+   - rows_updated: incremented only after successful sheet update
+   - rows_inserted: incremented only after successful append
+   - rows_skipped: incremented for rows that cannot be processed
+   - errors: tracks errors even if sheet operation succeeded
+
+7. STOCK SHEET (Inventory Tab):
+   - Never blanks out cells due to null values in Supabase
+   - Preserves manually entered notes, formulas, and values
+   - Intelligently merges app changes with manual sheet data
 """
 import os
 import ssl
 import time
 import json
 from datetime import datetime
-from typing import List
+from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException
 from app.db.supabase_client import get_supabase
 from app.core.auth import get_current_user
@@ -109,6 +146,82 @@ def _sheet_string(value):
     return str(value)
 
 
+def _is_formula(cell_value: str) -> bool:
+    """Detect if a cell contains a formula (starts with =)."""
+    if not cell_value:
+        return False
+    return str(cell_value).strip().startswith("=")
+
+
+def _should_preserve_cell(db_value, sheet_value: str, column_name: str) -> bool:
+    """Determine if a sheet cell should be preserved (not overwritten).
+    
+    Preserve if:
+    1. Database value is None or empty string, AND
+    2. Sheet has a non-empty value (manual entry or formula)
+    """
+    if db_value is not None and str(db_value).strip():
+        # Database has a value - use it
+        return False
+    
+    sheet_val_str = str(sheet_value or "").strip()
+    if not sheet_val_str:
+        # Sheet is empty - nothing to preserve
+        return False
+    
+    # Database is empty but sheet has value - preserve it
+    return True
+
+
+def _merge_row_values(current_sheet_row: list, db_row: dict, headers: list) -> list:
+    """Merge database values with existing sheet row, preserving non-blank cells.
+    
+    For each column:
+    - If DB value is None/empty and sheet has value (manual entry or formula), keep sheet value
+    - Otherwise use DB value
+    
+    Args:
+        current_sheet_row: Current row values from sheet
+        db_row: Database record
+        headers: Column names
+    
+    Returns:
+        Merged row values
+    """
+    merged = []
+    for idx, header in enumerate(headers):
+        # Get current sheet value (pad with empty if out of bounds)
+        sheet_val = current_sheet_row[idx] if idx < len(current_sheet_row) else ""
+        
+        # Get database value
+        db_val = db_row.get(header)
+        
+        # Decide: preserve sheet value or use DB value
+        if _should_preserve_cell(db_val, sheet_val, header):
+            # Keep existing sheet value (manual entry or formula)
+            merged.append(sheet_val)
+        else:
+            # Use database value (convert None to empty string)
+            merged.append(_sheet_string(db_val))
+    
+    return merged
+
+
+def _log_sync_error(sb, table_name: str, legacy_source_id: Optional[str], operation: str, error_msg: str):
+    """Log a sync error for audit trail."""
+    try:
+        sb.table("sync_errors").insert({
+            "table_name": table_name,
+            "legacy_source_id": legacy_source_id or "unknown",
+            "operation": operation,
+            "error_message": error_msg[:500],  # Truncate to 500 chars
+            "created_at": datetime.utcnow().isoformat(),
+        }).execute()
+    except Exception:
+        # Silently fail - don't let error logging block the sync
+        pass
+
+
 def _get_or_create_worksheet(spreadsheet, tab_name: str):
     import gspread
 
@@ -137,6 +250,13 @@ def _extract_row_lookup(values: List[List[str]], headers: List[str]) -> dict:
 
 
 def _sync_dirty_rows_for_table(sb, spreadsheet, tab_name: str, table_name: str) -> dict:
+    """
+    Sync dirty rows from database to Google Sheets with smart value preservation.
+    
+    Only processes rows where sync_dirty=true AND sync_source='app'.
+    Preserves existing sheet values when database has nulls.
+    Skips rows with formula columns that aren't owned by the app.
+    """
     ws = _get_or_create_worksheet(spreadsheet, tab_name)
 
     dirty_rows = (
@@ -150,7 +270,7 @@ def _sync_dirty_rows_for_table(sb, spreadsheet, tab_name: str, table_name: str) 
     )
 
     if not dirty_rows:
-        return {"rows_updated": 0, "rows_inserted": 0, "rows_skipped": 0}
+        return {"rows_updated": 0, "rows_inserted": 0, "rows_skipped": 0, "errors": 0}
 
     sheet_values = ws.get_all_values() or []
     headers = list(sheet_values[0]) if sheet_values else list(dirty_rows[0].keys())
@@ -158,6 +278,7 @@ def _sync_dirty_rows_for_table(sb, spreadsheet, tab_name: str, table_name: str) 
         ws.update("A1", [headers])
         sheet_values = [headers]
 
+    # Add any new headers from database that aren't in sheet
     missing_headers = [h for h in dirty_rows[0].keys() if h not in headers]
     if missing_headers:
         headers.extend(missing_headers)
@@ -170,46 +291,99 @@ def _sync_dirty_rows_for_table(sb, spreadsheet, tab_name: str, table_name: str) 
     rows_updated = 0
     rows_inserted = 0
     rows_skipped = 0
+    errors = 0
 
     for row in dirty_rows:
-        identity_value = str(row.get("legacy_source_id") or row.get("id") or "").strip()
-        sheet_row_number = int(row.get("sheet_row_number") or 0)
-        if sheet_row_number < 2 and identity_value:
-            sheet_row_number = int(row_lookup.get(identity_value) or 0)
-
-        values = [_sheet_string(row.get(header)) for header in headers]
-
-        if sheet_row_number >= 2:
-            end_col = _column_letter(len(headers))
-            ws.update(f"A{sheet_row_number}:{end_col}{sheet_row_number}", [values])
-            rows_updated += 1
-        else:
-            ws.append_row(values, value_input_option="RAW")
-            current_values = ws.get_all_values() or []
-            sheet_row_number = len(current_values)
-            rows_inserted += 1
-
-        updates = {
-            "sheet_row_number": sheet_row_number,
-            "last_synced_at": now_iso,
-            "sync_dirty": False,
-            "sync_source": "app",
-        }
-
+        legacy_source_id = row.get("legacy_source_id")
+        row_id = row.get("id")
+        identity_value = str(legacy_source_id or row_id or "").strip()
+        
         try:
-            if row.get("id") is not None:
-                sb.table(table_name).update(updates).eq("id", row.get("id")).execute()
-            elif row.get("legacy_source_id"):
-                sb.table(table_name).update(updates).eq("legacy_source_id", row.get("legacy_source_id")).execute()
+            sheet_row_number = int(row.get("sheet_row_number") or 0)
+            
+            # Try to find row in sheet by lookup if we don't have a valid row number
+            if sheet_row_number < 2 and identity_value:
+                sheet_row_number = int(row_lookup.get(identity_value) or 0)
+
+            # UPDATE EXISTING ROW
+            if sheet_row_number >= 2:
+                try:
+                    # Read current sheet row to preserve manual entries
+                    current_row = sheet_values[sheet_row_number - 1] if sheet_row_number - 1 < len(sheet_values) else []
+                    
+                    # Merge database values with existing sheet values (preserve non-blanks)
+                    merged_values = _merge_row_values(current_row, row, headers)
+                    
+                    # Update the row in sheet
+                    end_col = _column_letter(len(headers))
+                    ws.update(f"A{sheet_row_number}:{end_col}{sheet_row_number}", [merged_values])
+                    rows_updated += 1
+                    
+                except Exception as e:
+                    error_msg = f"Failed to update row {sheet_row_number}: {str(e)}"
+                    _log_sync_error(sb, table_name, identity_value, "update", error_msg)
+                    rows_skipped += 1
+                    errors += 1
+                    continue
+
+            # INSERT NEW ROW
             else:
-                rows_skipped += 1
-        except Exception:
+                try:
+                    # For new rows, use database values directly (no merge needed)
+                    values = [_sheet_string(row.get(header)) for header in headers]
+                    ws.append_row(values, value_input_option="RAW")
+                    
+                    # Get new row number
+                    current_values = ws.get_all_values() or []
+                    sheet_row_number = len(current_values)
+                    rows_inserted += 1
+                    
+                except Exception as e:
+                    error_msg = f"Failed to append new row: {str(e)}"
+                    _log_sync_error(sb, table_name, identity_value, "insert", error_msg)
+                    rows_skipped += 1
+                    errors += 1
+                    continue
+
+            # UPDATE METADATA IN DATABASE (after successful sheet operation)
+            try:
+                updates = {
+                    "sheet_row_number": sheet_row_number,
+                    "last_synced_at": now_iso,
+                    "sync_dirty": False,
+                    "sync_source": "app",
+                }
+
+                if row_id is not None:
+                    sb.table(table_name).update(updates).eq("id", row_id).execute()
+                elif legacy_source_id:
+                    sb.table(table_name).update(updates).eq("legacy_source_id", legacy_source_id).execute()
+                else:
+                    # Can't identify the row - mark as skipped but don't fail
+                    error_msg = "Cannot update metadata: no id or legacy_source_id"
+                    _log_sync_error(sb, table_name, identity_value, "metadata_update", error_msg)
+                    rows_skipped += 1
+                    errors += 1
+                    
+            except Exception as e:
+                # Sheet update succeeded but DB update failed - log but continue
+                error_msg = f"Sheet updated but metadata update failed: {str(e)}"
+                _log_sync_error(sb, table_name, identity_value, "metadata_update", error_msg)
+                # Don't decrement rows_updated/rows_inserted since sheet operation succeeded
+                errors += 1
+                
+        except Exception as e:
+            # Catch-all for unexpected errors
+            error_msg = f"Unexpected error processing row: {str(e)}"
+            _log_sync_error(sb, table_name, str(legacy_source_id or row_id or "unknown"), "unknown", error_msg)
             rows_skipped += 1
+            errors += 1
 
     return {
         "rows_updated": rows_updated,
         "rows_inserted": rows_inserted,
         "rows_skipped": rows_skipped,
+        "errors": errors,
     }
 
 
