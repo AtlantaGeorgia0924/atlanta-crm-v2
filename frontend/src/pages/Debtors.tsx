@@ -104,7 +104,6 @@ export default function Debtors() {
       toast.success('WhatsApp send tracked')
       qc.invalidateQueries({ queryKey: ['debtors'] })
     },
-    onError: (e: any) => toast.error(e?.response?.data?.detail ?? 'Failed to track WhatsApp send'),
   })
 
   const totalOutstanding = debtors?.reduce((s, r) => s + Number(r.balance), 0) ?? 0
@@ -160,7 +159,7 @@ export default function Debtors() {
   const openWhatsApp = async (phoneNumber: string, normalizedPhoneNumber?: string) => {
     const normalized = normalizedPhoneNumber || phoneNumber.replace(/\D+/g, '')
     if (!normalized) {
-      toast.error('Phone number not available')
+      toast.error('Failed to send')
       return
     }
 
@@ -171,11 +170,13 @@ export default function Debtors() {
     const popup = window.open(whatsappUrl, '_blank')
 
     if (!popup) {
-      toast.error('Failed to open WhatsApp')
+      toast.error('Failed to send')
       return
     }
 
-    await whatsappMutation.mutateAsync(phoneNumber)
+    toast.success('Sent to WhatsApp')
+
+    whatsappMutation.mutate(phoneNumber)
     setShowPhoneModal(false)
   }
 
