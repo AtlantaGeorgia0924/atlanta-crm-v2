@@ -179,6 +179,42 @@ def _has_unsynced_app_change(row: dict) -> bool:
     return updated_at > last_synced_at
 
 
+def _normalize_phone(phone_str: Optional[str]) -> str:
+    """Normalize phone by removing all non-digits."""
+    return re.sub(r"\D+", "", str(phone_str or ""))
+
+
+def _normalize_name(name_str: Optional[str]) -> str:
+    """Normalize name by trimming and uppercasing."""
+    return str(name_str or "").strip().upper()
+
+
+def _find_existing_client_by_phone(existing_clients: List[dict], phone: Optional[str]) -> Optional[dict]:
+    """Find a client by phone number (first priority for matching)."""
+    if not phone:
+        return None
+    normalized_phone = _normalize_phone(phone)
+    if not normalized_phone:
+        return None
+    for client in existing_clients:
+        if _normalize_phone(client.get("phone")) == normalized_phone:
+            return client
+    return None
+
+
+def _find_existing_client_by_name(existing_clients: List[dict], name: Optional[str]) -> Optional[dict]:
+    """Find a client by normalized name (second priority for matching)."""
+    if not name:
+        return None
+    normalized_name = _normalize_name(name)
+    if not normalized_name:
+        return None
+    for client in existing_clients:
+        if _normalize_name(client.get("name")) == normalized_name:
+            return client
+    return None
+
+
 def _incremental_sync_table(
     sb,
     table_name: str,
@@ -399,18 +435,45 @@ def import_google_sheets_to_supabase(sb) -> dict:
     client_company_h = _get_first_match(client_headers, ["COMPANY", "BUSINESS"])
     client_notes_h = _get_first_match(client_headers, ["NOTES"])
 
+    # Fetch existing clients once for phone-first matching
+    existing_clients = _fetch_all_rows(
+        sb,
+        "clients",
+        "id,name,phone,email,address,company,notes",
+    )
+
     clients_payload = []
     for idx, row in enumerate(client_rows):
         name = str(row.get(client_name_h) or "").strip() if client_name_h else ""
         if not name:
             continue
+        
+        phone = str(row.get(client_phone_h) or "").strip() if client_phone_h else None
+        
+        # Phone-first matching: try to find existing client by phone, then by name
+        matched_client = _find_existing_client_by_phone(existing_clients, phone)
+        phone_matched = matched_client is not None
+        
+        if not matched_client:
+            matched_client = _find_existing_client_by_name(existing_clients, name)
+        
+        # Use matched client's ID if found, otherwise generate a new one
+        if matched_client:
+            client_id = matched_client.get("id")
+            # If phone matched, preserve the existing client name (don't rename)
+            final_name = matched_client.get("name") if phone_matched else name
+        else:
+            # Generate a sheet_import ID for new clients only
+            client_id = f"sheet_import:client:{idx + 1}"
+            final_name = name
+        
         clients_payload.append(
             {
-                "id": f"sheet_import:client:{idx + 1}",
+                "id": client_id,
                 "legacy_source_id": f"sheet_import:client:{idx + 1}",
                 "sheet_row_number": int(row.get("__sheet_row_number") or 0),
-                "name": name,
-                "phone": str(row.get(client_phone_h) or "").strip() if client_phone_h else None,
+                "name": final_name,
+                "phone": phone,
                 "email": str(row.get(client_email_h) or "").strip() if client_email_h else None,
                 "address": str(row.get(client_address_h) or "").strip() if client_address_h else None,
                 "company": str(row.get(client_company_h) or "").strip() if client_company_h else None,

@@ -44,12 +44,51 @@ def _normalize_phone_number(value: Optional[str]) -> str:
     return re.sub(r"\D+", "", str(value or ""))
 
 
-def _find_matching_client(sb, client_name: str) -> Optional[dict]:
+def _find_matching_client_by_phone(sb, phone_number: str) -> Optional[dict]:
+    """Find a client by exact phone number match (normalized)."""
+    if not phone_number:
+        return None
+    normalized_phone = _normalize_phone_number(phone_number)
+    if not normalized_phone:
+        return None
+    client_rows = sb.table("clients").select("id,name,phone").execute().data or []
+    for row in client_rows:
+        if _normalize_phone_number(row.get("phone") or "") == normalized_phone:
+            return row
+    return None
+
+
+def _find_matching_client_by_name(sb, client_name: str) -> Optional[dict]:
+    """Find a client by normalized name match."""
     normalized_target = _normalize_client_name(client_name)
+    if not normalized_target:
+        return None
     client_rows = sb.table("clients").select("id,name,phone").execute().data or []
     for row in client_rows:
         if _normalize_client_name(row.get("name")) == normalized_target:
             return row
+    return None
+
+
+def _find_matching_client(sb, client_name: str, phone_number: Optional[str] = None) -> Optional[dict]:
+    """Find a matching client with priority: phone first, then name.
+    
+    This ensures clients are deduplicated primarily by phone number.
+    If phone matches an existing client, the existing client is returned unchanged.
+    If phone doesn't match but name does, the name-matched client is returned.
+    If neither matches, returns None.
+    """
+    # Priority 1: Match by phone number if provided
+    if phone_number:
+        by_phone = _find_matching_client_by_phone(sb, phone_number)
+        if by_phone:
+            return by_phone
+    
+    # Priority 2: Match by normalized name
+    by_name = _find_matching_client_by_name(sb, client_name)
+    if by_name:
+        return by_name
+    
     return None
 
 
@@ -90,6 +129,14 @@ def _find_latest_service_phone(sb, client_name: str) -> Optional[str]:
 
 
 def _resolve_whatsapp_contact(sb, client_name: str) -> dict:
+    """Resolve WhatsApp contact information with phone-first priority.
+    
+    Priority:
+    1. Check if client phone exists in clients table (from phone-first matching)
+    2. Fall back to latest phone from service_jobs for that client
+    3. Require manual entry if neither found
+    """
+    # Try phone-first matching: pass empty phone to get name+phone lookup
     client_row = _find_matching_client(sb, client_name)
     client_phone = str((client_row or {}).get("phone") or "").strip()
     service_phone = None if client_phone else _find_latest_service_phone(sb, client_name)
@@ -106,21 +153,42 @@ def _resolve_whatsapp_contact(sb, client_name: str) -> dict:
 
 
 def _upsert_client_phone(sb, client_name: str, phone_number: str) -> dict:
-    existing_client = _find_matching_client(sb, client_name)
+    """Upsert a client with phone-first matching priority.
+    
+    Matching Priority:
+    1. If phone_number matches an existing client, keep the existing record as-is.
+       Do not update the name even if it differs.
+    2. If phone doesn't match but client_name matches, update only the phone if needed.
+    3. If neither matches, create a new client.
+    
+    This ensures phone-based deduplication and preserves existing client names.
+    """
     cleaned_phone = str(phone_number or "").strip()
-
+    cleaned_name = str(client_name or "").strip()
+    
+    # Try to find existing client: phone first, then name
+    existing_client = _find_matching_client(sb, cleaned_name, cleaned_phone)
+    
     if existing_client:
+        # If phone matches, preserve the existing client exactly as-is
+        phone_match = _find_matching_client_by_phone(sb, cleaned_phone)
+        if phone_match:
+            # Phone matched - return existing client unchanged
+            return phone_match
+        
+        # Name matched but phone didn't - update phone if it's different
         updates = {}
-        if cleaned_phone and cleaned_phone != str(existing_client.get("phone") or "").strip():
+        if cleaned_phone and _normalize_phone_number(cleaned_phone) != _normalize_phone_number(existing_client.get("phone") or ""):
             updates["phone"] = cleaned_phone
         if updates:
             response = sb.table("clients").update(updates).eq("id", existing_client.get("id")).execute()
             return response.data[0] if response.data else {**existing_client, **updates}
         return existing_client
-
+    
+    # No match found - create new client
     new_client = {
         "id": str(uuid.uuid4()),
-        "name": client_name.strip(),
+        "name": cleaned_name,
         "phone": cleaned_phone,
     }
     response = sb.table("clients").insert(new_client).execute()

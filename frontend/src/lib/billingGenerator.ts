@@ -13,6 +13,25 @@ interface PaymentDetails {
 }
 
 /**
+ * Get current time in Africa/Lagos timezone and determine greeting
+ */
+function getGreetingForCurrentTime(): string {
+  // Create a date formatter for Africa/Lagos timezone
+  const lagosTime = new Date().toLocaleString('en-US', { timeZone: 'Africa/Lagos' })
+  const date = new Date(lagosTime)
+  const hour = date.getHours()
+  
+  // Determine greeting based on hour (Africa/Lagos time)
+  if (hour >= 0 && hour < 12) {
+    return 'Good morning'
+  } else if (hour >= 12 && hour < 17) {
+    return 'Good afternoon'
+  } else {
+    return 'Good evening'
+  }
+}
+
+/**
  * Format date to verbose format like "Fri. 17th of April"
  */
 function formatDateVerbose(dateStr: string): string {
@@ -76,8 +95,9 @@ export function generateBillingText(
   const dateGenerated = formatDateVerbose(now.toISOString().slice(0, 10))
   const timeGenerated = formatTime(now)
   
-  // Greeting
-  let text = applyBoldItalic('Good afternoon') + ' ' + applyBoldItalic(clientName.toUpperCase()) + ', ' + applyBoldItalic('I trust you\'re doing well.')
+  // Greeting - dynamically determined based on current time in Africa/Lagos
+  const greeting = getGreetingForCurrentTime()
+  let text = applyBoldItalic(greeting) + ' ' + applyBoldItalic(clientName.toUpperCase()) + ', ' + applyBoldItalic('I trust you\'re doing well.')
   text += '\n' + applyBoldItalic('Here is a quick summary of your outstanding bill for your review:')
   text += '\n\n'
   
