@@ -6,6 +6,7 @@ from typing import Dict, List, Optional, Tuple
 
 from app.core.cashflow_sheet_sync import read_sheet_id
 from app.core.config import settings as app_settings
+from app.core.google_sheets_auth import build_google_service_account_credentials
 from app.core.financials import to_number
 
 NUMERIC12_MAX = 9_999_999_999.99
@@ -288,19 +289,15 @@ def _incremental_sync_table(
 
 def import_google_sheets_to_supabase(sb) -> dict:
     import gspread
-    from google.oauth2.service_account import Credentials
 
     services_sheet_id = read_sheet_id(sb, purpose="services")
     stocks_sheet_id = read_sheet_id(sb, purpose="stocks")
-    service_account_json = app_settings.GOOGLE_SERVICE_ACCOUNT_JSON
 
     if not services_sheet_id or not stocks_sheet_id:
         raise ValueError("Google Sheets not configured: missing services/stocks sheet IDs")
-    if not service_account_json or not os.path.exists(service_account_json):
-        raise ValueError("Google Sheets not configured: service account JSON missing")
 
     scopes = ["https://www.googleapis.com/auth/spreadsheets"]
-    creds = Credentials.from_service_account_file(service_account_json, scopes=scopes)
+    creds = build_google_service_account_credentials(scopes)
     gc = gspread.authorize(creds)
 
     services_book = gc.open_by_key(services_sheet_id)

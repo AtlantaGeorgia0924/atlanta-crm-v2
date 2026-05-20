@@ -10,7 +10,7 @@ class Settings(BaseSettings):
     SUPABASE_ANON_KEY: str
 
     # Google Sheets
-    GOOGLE_SERVICE_ACCOUNT_JSON: str = ""   # path to service account JSON file
+    GOOGLE_SERVICE_ACCOUNT_JSON: str = ""   # path, raw JSON, or base64-encoded JSON
     GOOGLE_SHEET_ID: str = ""
     GOOGLE_SHEET_ID_STOCKS: str = ""
     GOOGLE_SHEET_ID_SERVICES: str = ""

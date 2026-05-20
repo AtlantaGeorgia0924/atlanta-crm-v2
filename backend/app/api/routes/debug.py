@@ -1,12 +1,15 @@
 from typing import Any, Dict, List
-import os
 import re
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends
 from app.db.supabase_client import get_supabase
 from app.core.dashboard_metrics import compute_metrics_from_supabase, compute_profit_ledger, _norm_imei
 from app.core.cashflow_sheet_sync import read_sheet_id
-from app.core.config import settings as app_settings
+from app.core.google_sheets_auth import (
+    build_google_service_account_credentials,
+    validate_google_service_account_config,
+)
 from app.core.auth import get_current_user
 from app.core.financials import to_number
 from app.core.debtors import compute_debtors_from_supabase
@@ -189,17 +192,15 @@ def debug_google_sheets(_user=Depends(get_current_user)):
         "parsing_errors": parsing_errors,
     }
 
-    service_account_json = app_settings.GOOGLE_SERVICE_ACCOUNT_JSON
-    if not service_account_json or not os.path.exists(service_account_json):
-        parsing_errors.append("Service account JSON missing or invalid path")
+    is_valid, config_error = validate_google_service_account_config()
+    if not is_valid:
+        parsing_errors.append(config_error)
         return result
 
     try:
         import gspread
-        from google.oauth2.service_account import Credentials
-
         scopes = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
-        creds = Credentials.from_service_account_file(service_account_json, scopes=scopes)
+        creds = build_google_service_account_credentials(scopes)
         gc = gspread.authorize(creds)
     except Exception as exc:
         parsing_errors.append(f"Failed to initialize Google Sheets client: {exc}")

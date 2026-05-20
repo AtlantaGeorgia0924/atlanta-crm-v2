@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import Dict, List
 
 from app.core.config import settings as app_settings
+from app.core.google_sheets_auth import build_google_service_account_credentials
 from app.core.financials import to_number
 
 CASHFLOW_SUMMARY_ID = "dashboard_totals"
@@ -65,13 +66,9 @@ def read_sheet_id(sb, purpose: str = "services") -> str:
 
 def _get_cashflow_worksheet(sheet_id: str):
     import gspread
-    from google.oauth2.service_account import Credentials
 
     scopes = ["https://www.googleapis.com/auth/spreadsheets"]
-    creds = Credentials.from_service_account_file(
-        app_settings.GOOGLE_SERVICE_ACCOUNT_JSON,
-        scopes=scopes,
-    )
+    creds = build_google_service_account_credentials(scopes)
     gc = gspread.authorize(creds)
     spreadsheet = gc.open_by_key(sheet_id)
     return spreadsheet.worksheet("Cash Flow")
@@ -137,12 +134,9 @@ def _parse_cashflow_summary(rows: List[List[str]]) -> Dict[str, float]:
 
 def sync_cashflow_summary_from_sheet(sb) -> Dict[str, Dict]:
     sheet_id = read_sheet_id(sb, purpose="services")
-    service_account_json = app_settings.GOOGLE_SERVICE_ACCOUNT_JSON
 
     if not sheet_id:
         raise ValueError("Google Sheets not configured: missing google_sheet_id")
-    if not service_account_json or not os.path.exists(service_account_json):
-        raise ValueError("Google Sheets not configured: service account JSON missing")
 
     ws = _get_cashflow_worksheet(sheet_id)
     rows = ws.get_all_values()

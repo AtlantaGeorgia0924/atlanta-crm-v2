@@ -38,7 +38,6 @@ Hardened Incremental Export System:
    - Preserves manually entered notes, formulas, and values
    - Intelligently merges app changes with manual sheet data
 """
-import os
 import ssl
 import time
 import json
@@ -49,6 +48,10 @@ from app.db.supabase_client import get_supabase
 from app.core.auth import get_current_user
 from app.core.config import settings as app_settings
 from app.core.cashflow_sheet_sync import read_sheet_id
+from app.core.google_sheets_auth import (
+    build_google_service_account_credentials,
+    validate_google_service_account_config,
+)
 from app.core.metrics_refresh import recompute_and_persist_metrics
 from app.core.sheets_import_sync import import_google_sheets_to_supabase
 from app.core.service_normalization import normalize_service_jobs_data
@@ -389,13 +392,9 @@ def _sync_dirty_rows_for_table(sb, spreadsheet, tab_name: str, table_name: str) 
 
 def _sync_to_google_sheets(sb, services_sheet_id: str, stocks_sheet_id: str) -> dict:
     import gspread
-    from google.oauth2.service_account import Credentials
 
     scopes = ["https://www.googleapis.com/auth/spreadsheets"]
-    creds = Credentials.from_service_account_file(
-        app_settings.GOOGLE_SERVICE_ACCOUNT_JSON,
-        scopes=scopes,
-    )
+    creds = build_google_service_account_credentials(scopes)
     gc = gspread.authorize(creds)
     services_spreadsheet = gc.open_by_key(services_sheet_id)
     stocks_spreadsheet = gc.open_by_key(stocks_sheet_id)
@@ -432,12 +431,11 @@ def sync_to_sheets(_user=Depends(get_current_user)):
     sb = get_supabase()
     services_sheet_id = read_sheet_id(sb, purpose="services")
     stocks_sheet_id = read_sheet_id(sb, purpose="stocks")
-    service_account_json = app_settings.GOOGLE_SERVICE_ACCOUNT_JSON
-
     if not services_sheet_id or not stocks_sheet_id:
         raise HTTPException(400, "Google Sheets not configured: set GOOGLE_SHEET_ID_SERVICES and GOOGLE_SHEET_ID_STOCKS (or matching app settings keys).")
-    if not service_account_json or not os.path.exists(service_account_json):
-        raise HTTPException(400, "Google Sheets not configured: service account JSON file not found. Set GOOGLE_SERVICE_ACCOUNT_JSON.")
+    is_valid, config_error = validate_google_service_account_config()
+    if not is_valid:
+        raise HTTPException(400, config_error)
     try:
         return _sync_to_google_sheets(sb, services_sheet_id, stocks_sheet_id)
     except (ssl.SSLError, OSError, ConnectionError) as e:
@@ -488,6 +486,10 @@ def refresh_from_google_sheets(_user=Depends(get_current_user)):
             if attempt < 2:
                 time.sleep(2 ** attempt)   # 1s, 2s back-off
             continue
+        except ValueError as e:
+            if "Google Sheets not configured" in str(e):
+                raise HTTPException(400, str(e))
+            raise HTTPException(500, f"Google Sheets refresh failed: {str(e)}")
         except Exception as e:
             raise HTTPException(500, f"Google Sheets refresh failed: {str(e)}")
     else:
@@ -539,6 +541,10 @@ def reset_imported_data_and_rebuild(_user=Depends(get_current_user)):
         # Normalize all service_jobs data (payment status, amounts, dates, returns)
         normalization_result = normalize_service_jobs_data(sb)
         metrics = recompute_and_persist_metrics(sb, source="reset_imported_data_rebuild")
+    except ValueError as e:
+        if "Google Sheets not configured" in str(e):
+            raise HTTPException(400, f"Reset imported data and rebuild failed: {str(e)}")
+        raise HTTPException(500, f"Reset imported data and rebuild failed: {str(e)}")
     except Exception as e:
         raise HTTPException(500, f"Reset imported data and rebuild failed: {str(e)}")
 
