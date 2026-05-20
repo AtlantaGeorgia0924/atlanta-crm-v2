@@ -5,10 +5,34 @@ import os
 from app.core.config import settings as app_settings
 
 
+class GoogleSheetsConfigError(ValueError):
+    pass
+
+
+def detect_google_service_account_mode(raw_value: str | None = None) -> str:
+    value = str(raw_value if raw_value is not None else app_settings.GOOGLE_SERVICE_ACCOUNT_JSON or "").strip()
+    if not value:
+        return "empty"
+    expanded_path = os.path.expanduser(value)
+    if os.path.exists(expanded_path):
+        return "path"
+    try:
+        json.loads(value)
+        return "raw_json"
+    except Exception:
+        pass
+    try:
+        decoded = base64.b64decode(value).decode("utf-8")
+        json.loads(decoded)
+        return "base64_json"
+    except Exception:
+        return "invalid"
+
+
 def _load_service_account_info(raw_value: str) -> dict:
     value = str(raw_value or "").strip()
     if not value:
-        raise ValueError(
+        raise GoogleSheetsConfigError(
             "Google Sheets not configured: GOOGLE_SERVICE_ACCOUNT_JSON is empty. "
             "Set it to a JSON file path, raw JSON, or base64-encoded JSON."
         )
@@ -32,7 +56,7 @@ def _load_service_account_info(raw_value: str) -> dict:
     except Exception:
         pass
 
-    raise ValueError(
+    raise GoogleSheetsConfigError(
         "Google Sheets not configured: invalid GOOGLE_SERVICE_ACCOUNT_JSON. "
         "Provide a valid file path, raw JSON object, or base64-encoded JSON."
     )
@@ -40,14 +64,23 @@ def _load_service_account_info(raw_value: str) -> dict:
 
 def validate_google_service_account_config() -> tuple[bool, str]:
     try:
-        _load_service_account_info(app_settings.GOOGLE_SERVICE_ACCOUNT_JSON)
+        scopes = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
+        build_google_service_account_credentials(scopes)
         return True, ""
-    except ValueError as exc:
+    except GoogleSheetsConfigError as exc:
         return False, str(exc)
 
 
 def build_google_service_account_credentials(scopes: list[str]):
     from google.oauth2.service_account import Credentials
 
-    info = _load_service_account_info(app_settings.GOOGLE_SERVICE_ACCOUNT_JSON)
-    return Credentials.from_service_account_info(info, scopes=scopes)
+    try:
+        info = _load_service_account_info(app_settings.GOOGLE_SERVICE_ACCOUNT_JSON)
+        return Credentials.from_service_account_info(info, scopes=scopes)
+    except GoogleSheetsConfigError:
+        raise
+    except Exception as exc:
+        raise GoogleSheetsConfigError(
+            "Google Sheets not configured: service account JSON is present but invalid "
+            f"({str(exc)}). Re-paste the exact service account JSON in backend env."
+        )

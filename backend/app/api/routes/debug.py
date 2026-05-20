@@ -8,6 +8,7 @@ from app.core.dashboard_metrics import compute_metrics_from_supabase, compute_pr
 from app.core.cashflow_sheet_sync import read_sheet_id
 from app.core.google_sheets_auth import (
     build_google_service_account_credentials,
+    detect_google_service_account_mode,
     validate_google_service_account_config,
 )
 from app.core.auth import get_current_user
@@ -171,6 +172,7 @@ def debug_google_sheets(_user=Depends(get_current_user)):
     stocks_sheet_id = read_sheet_id(sb, purpose="stocks")
 
     result: Dict[str, Any] = {
+        "service_account_mode": detect_google_service_account_mode(),
         "spreadsheet_id_used": {
             "services": services_sheet_id,
             "stocks": stocks_sheet_id,

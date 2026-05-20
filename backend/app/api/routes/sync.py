@@ -49,6 +49,7 @@ from app.core.auth import get_current_user
 from app.core.config import settings as app_settings
 from app.core.cashflow_sheet_sync import read_sheet_id
 from app.core.google_sheets_auth import (
+    GoogleSheetsConfigError,
     build_google_service_account_credentials,
     validate_google_service_account_config,
 )
@@ -438,11 +439,15 @@ def sync_to_sheets(_user=Depends(get_current_user)):
         raise HTTPException(400, config_error)
     try:
         return _sync_to_google_sheets(sb, services_sheet_id, stocks_sheet_id)
+    except GoogleSheetsConfigError as e:
+        raise HTTPException(400, str(e))
     except (ssl.SSLError, OSError, ConnectionError) as e:
         # Retry once on transient SSL errors
         try:
             time.sleep(2)
             return _sync_to_google_sheets(sb, services_sheet_id, stocks_sheet_id)
+        except GoogleSheetsConfigError as e2:
+            raise HTTPException(400, str(e2))
         except Exception as e2:
             raise HTTPException(500, f"Sync failed (SSL/network error): {str(e2)}")
     except Exception as e:
@@ -486,7 +491,7 @@ def refresh_from_google_sheets(_user=Depends(get_current_user)):
             if attempt < 2:
                 time.sleep(2 ** attempt)   # 1s, 2s back-off
             continue
-        except ValueError as e:
+        except (ValueError, GoogleSheetsConfigError) as e:
             if "Google Sheets not configured" in str(e):
                 raise HTTPException(400, str(e))
             raise HTTPException(500, f"Google Sheets refresh failed: {str(e)}")
@@ -541,7 +546,7 @@ def reset_imported_data_and_rebuild(_user=Depends(get_current_user)):
         # Normalize all service_jobs data (payment status, amounts, dates, returns)
         normalization_result = normalize_service_jobs_data(sb)
         metrics = recompute_and_persist_metrics(sb, source="reset_imported_data_rebuild")
-    except ValueError as e:
+    except (ValueError, GoogleSheetsConfigError) as e:
         if "Google Sheets not configured" in str(e):
             raise HTTPException(400, f"Reset imported data and rebuild failed: {str(e)}")
         raise HTTPException(500, f"Reset imported data and rebuild failed: {str(e)}")
