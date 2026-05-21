@@ -18,7 +18,10 @@ Report output includes:
 from __future__ import annotations
 
 import json
+import logging
 import os
+import re
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -29,6 +32,15 @@ from supabase import Client, create_client
 
 
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"))
+
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logger = logging.getLogger("migrate_supabase_readonly")
+
+
+def log_event(event: str, **fields: Any) -> None:
+    payload = {"event": event, **fields}
+    logger.info(json.dumps(payload, default=str))
 
 
 def env_required(key: str) -> str:
@@ -44,6 +56,7 @@ DEST_SUPABASE_URL = env_required("DEST_SUPABASE_URL")
 DEST_SUPABASE_SERVICE_ROLE_KEY = env_required("DEST_SUPABASE_SERVICE_ROLE_KEY")
 MIGRATION_MODE = os.getenv("MIGRATION_MODE", "upsert").strip().lower()
 BATCH_SIZE = int(os.getenv("MIGRATION_BATCH_SIZE", "500"))
+RETRIES = int(os.getenv("MIGRATION_RETRIES", "4"))
 
 if MIGRATION_MODE not in {"upsert", "skip_existing"}:
     raise RuntimeError("MIGRATION_MODE must be one of: upsert, skip_existing")
@@ -83,13 +96,16 @@ def parse_date(value: Any) -> str | None:
         try:
             return datetime.strptime(text, fmt).date().isoformat()
         except ValueError:
-            pass
-    return text[:10]
+            continue
+    log_event("malformed_date", raw_value=text)
+    return None
 
 
 def normalize_payment_status(value: Any) -> str:
     text = str(value or "").strip().upper()
-    if text in {"PAID", "PARTIAL", "UNPAID"}:
+    if text in {"PAID", "PARTIAL", "PART PAYMENT", "UNPAID", "RETURNED"}:
+        if text == "PARTIAL":
+            return "PART PAYMENT"
         return text
     if text in {"PAYED"}:
         return "PAID"
@@ -128,12 +144,56 @@ class MigrationRunner:
         self.source = source
         self.dest = dest
 
+    def _execute_with_retry(self, fn, operation: str, table_name: str):
+        last_exc = None
+        for attempt in range(RETRIES):
+            try:
+                return fn()
+            except Exception as exc:
+                last_exc = exc
+                if attempt == RETRIES - 1:
+                    break
+                time.sleep(0.5 * (attempt + 1))
+                log_event(
+                    "retry",
+                    operation=operation,
+                    table=table_name,
+                    attempt=attempt + 1,
+                    error=str(exc),
+                )
+        raise RuntimeError(
+            f"Operation failed after retries: {operation} on {table_name}: {last_exc}"
+        )
+
+    def _log_sync_error(self, table_name: str, legacy_source_id: Any, operation: str, error_message: str) -> None:
+        payload = {
+            "table_name": table_name,
+            "legacy_source_id": None if legacy_source_id is None else str(legacy_source_id),
+            "operation": operation,
+            "error_message": str(error_message)[:500],
+            "created_at": datetime.utcnow().isoformat(),
+        }
+        try:
+            self.dest.table("sync_errors").insert(payload).execute()
+        except Exception as exc:
+            log_event(
+                "sync_error_log_failed",
+                table=table_name,
+                operation=operation,
+                original_error=error_message,
+                logger_error=str(exc),
+            )
+
     def read_all_rows(self, table: str) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
         start = 0
         while True:
             end = start + BATCH_SIZE - 1
-            response = self.source.table(table).select("*").range(start, end).execute()
+            response = self._execute_with_retry(
+                lambda: self.source.table(table).select("*").range(start, end).execute(),
+                operation="read_source_batch",
+                table_name=table,
+            )
             chunk = response.data or []
             rows.extend(chunk)
             if len(chunk) < BATCH_SIZE:
@@ -147,7 +207,11 @@ class MigrationRunner:
         found: set[Any] = set()
         for i in range(0, len(keys), BATCH_SIZE):
             sub = keys[i:i + BATCH_SIZE]
-            result = self.dest.table(table).select(key_field).in_(key_field, sub).execute()
+            result = self._execute_with_retry(
+                lambda sub=sub: self.dest.table(table).select(key_field).in_(key_field, sub).execute(),
+                operation="read_destination_keys",
+                table_name=table,
+            )
             for row in (result.data or []):
                 found.add(row.get(key_field))
         return found
@@ -160,6 +224,7 @@ class MigrationRunner:
             "rows_inserted": 0,
             "rows_updated": 0,
             "rows_skipped": 0,
+            "conflicts": 0,
             "errors": [],
         }
 
@@ -168,6 +233,7 @@ class MigrationRunner:
             report["rows_read"] = len(source_rows)
 
             transformed: list[dict[str, Any]] = []
+            seen_source_keys: set[Any] = set()
             for raw in source_rows:
                 mapped = plan.map_row(raw)
                 if mapped is None:
@@ -176,6 +242,17 @@ class MigrationRunner:
                 if plan.key_field not in mapped or mapped.get(plan.key_field) is None:
                     report["rows_skipped"] += 1
                     continue
+                source_key = mapped.get(plan.key_field)
+                if source_key in seen_source_keys:
+                    report["conflicts"] += 1
+                    self._log_sync_error(
+                        plan.dest_table,
+                        source_key,
+                        "source_duplicate_key",
+                        f"Duplicate key in source payload for {plan.key_field}",
+                    )
+                    continue
+                seen_source_keys.add(source_key)
                 transformed.append(mapped)
 
             keys = [row[plan.key_field] for row in transformed]
@@ -189,7 +266,11 @@ class MigrationRunner:
                     batch = to_insert[i:i + BATCH_SIZE]
                     if not batch:
                         continue
-                    self.dest.table(plan.dest_table).insert(batch).execute()
+                    self._execute_with_retry(
+                        lambda batch=batch: self.dest.table(plan.dest_table).insert(batch).execute(),
+                        operation="insert_skip_existing",
+                        table_name=plan.dest_table,
+                    )
                 report["rows_inserted"] = len(to_insert)
                 return report
 
@@ -201,7 +282,11 @@ class MigrationRunner:
                 batch = transformed[i:i + BATCH_SIZE]
                 if not batch:
                     continue
-                self.dest.table(plan.dest_table).upsert(batch, on_conflict=plan.key_field).execute()
+                self._execute_with_retry(
+                    lambda batch=batch: self.dest.table(plan.dest_table).upsert(batch, on_conflict=plan.key_field).execute(),
+                    operation="upsert_batch",
+                    table_name=plan.dest_table,
+                )
 
             report["rows_inserted"] = len(rows_insert)
             report["rows_updated"] = len(rows_update)
@@ -209,6 +294,7 @@ class MigrationRunner:
 
         except Exception as exc:
             report["errors"].append(str(exc))
+            self._log_sync_error(plan.dest_table, None, "run_plan", str(exc))
             return report
 
 
@@ -281,10 +367,18 @@ def map_service_job(row: dict[str, Any]) -> dict[str, Any] | None:
     paid_date = parse_date(row.get("paid_date") or row.get("payment_date"))
 
     is_return = bool(row.get("is_return", False))
-    if is_return:
-        amount_charged = -abs(amount_charged)
-        expense_amount = -abs(expense_amount)
-        calculated_profit = amount_charged - expense_amount
+    if is_return or payment_status == "RETURNED":
+        is_return = True
+        payment_status = "RETURNED"
+        paid_amount = 0.0
+
+    if payment_status == "PAID" and paid_amount <= 0:
+        paid_amount = amount_charged
+    if payment_status in {"UNPAID", "RETURNED"}:
+        paid_amount = 0.0
+
+    realized_revenue = paid_amount if payment_status in {"PAID", "PART PAYMENT"} else 0.0
+    calculated_profit = realized_revenue - expense_amount
 
     return {
         "legacy_source_id": legacy_id,
@@ -313,11 +407,15 @@ def map_client(row: dict[str, Any]) -> dict[str, Any] | None:
     client_id = as_key(row.get("id"))
     if not client_id:
         return None
+    phone = row.get("phone")
+    if phone is not None:
+        phone = re.sub(r"\D+", "", str(phone)) or None
+
     return {
         "id": client_id,
         "name": row.get("name") or "Unknown",
         "email": row.get("email"),
-        "phone": row.get("phone"),
+        "phone": phone,
         "address": row.get("address"),
         "company": row.get("company"),
         "notes": row.get("notes"),
@@ -333,7 +431,15 @@ def map_manual_expense(row: dict[str, Any]) -> dict[str, Any] | None:
     if not expense_id:
         return None
     return {
-        "id": expense_id,
+        payment_status = normalize_payment_status(row.get("payment_status"))
+        paid_amount = parse_float(row.get("paid_amount"), 0.0)
+        if payment_status in {"UNPAID", "RETURNED"}:
+            realized_revenue = 0.0
+        elif payment_status == "PART PAYMENT":
+            realized_revenue = paid_amount
+        else:
+            realized_revenue = selling_price
+        product_profit = realized_revenue - cost_price - expense_amount
         "category": row.get("category") or "Uncategorised",
         "description": row.get("description"),
         "amount": parse_float(row.get("amount"), 0.0),
@@ -431,13 +537,35 @@ def print_report(report: list[dict[str, Any]]) -> None:
         "errors": total_errors,
     }
 
+                destination_clients_by_phone: dict[str, str] = {}
+                if plan.dest_table == "clients":
+                    try:
+                        dest_clients = self._execute_with_retry(
+                            lambda: self.dest.table("clients").select("id,phone").execute(),
+                            operation="read_destination_clients",
+                            table_name="clients",
+                        ).data or []
+                        for client in dest_clients:
+                            normalized_phone = re.sub(r"\D+", "", str(client.get("phone") or ""))
+                            if normalized_phone:
+                                destination_clients_by_phone[normalized_phone] = str(client.get("id"))
+                    except Exception as exc:
+                        log_event("destination_client_lookup_failed", error=str(exc))
+
     print("\n=== Totals ===")
     print(json.dumps(summary, indent=2))
 
 
 def main() -> None:
-    print("Starting read-only source -> destination migration")
-    print(f"Mode: {MIGRATION_MODE}")
+
+                    if plan.dest_table == "clients":
+                        normalized_phone = re.sub(r"\D+", "", str(mapped.get("phone") or ""))
+                        if normalized_phone and normalized_phone in destination_clients_by_phone:
+                            mapped["id"] = destination_clients_by_phone[normalized_phone]
+                        elif normalized_phone:
+                            destination_clients_by_phone[normalized_phone] = str(mapped.get("id"))
+
+    log_event("migration_start", mode=MIGRATION_MODE, batch_size=BATCH_SIZE)
 
     src = source_client()
     dst = dest_client()
@@ -456,9 +584,10 @@ def main() -> None:
 
     report: list[dict[str, Any]] = []
     for plan in plans:
-        print(f"\nMigrating {plan.source_table} -> {plan.dest_table}")
+        log_event("table_start", source=plan.source_table, destination=plan.dest_table)
         table_report = runner.run_plan(plan)
         report.append(table_report)
+        log_event("table_end", **table_report)
 
     print_report(report)
 

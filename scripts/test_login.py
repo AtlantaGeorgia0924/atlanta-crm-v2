@@ -3,21 +3,27 @@
 
 import sys
 import os
-sys.path.insert(0, "/Users/mac/crm-app/backend")
+from dotenv import load_dotenv
+
+ROOT = os.path.join(os.path.dirname(__file__), "..")
+load_dotenv(os.path.join(ROOT, "backend", ".env"))
+load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 
 from supabase import create_client
 
-# Credentials from your setup
-SUPABASE_URL = "https://rwyplndwzrqdsyhsyjue.supabase.co"
-SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY") or "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJ3eXBsbmR3enJxZHN5aHN5anVlIiwicm9sZSI6ImFub24iLCJpYXQiOjE3MTI0NDcxMjUsImV4cCI6MTkyODA4MDcyNX0.iKVp67sRf0UKnSYVCGBmSLBSGjbJUUZEfaBR0Q3NxWE"
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")
+email = os.getenv("TEST_LOGIN_EMAIL")
+password = os.getenv("TEST_LOGIN_PASSWORD")
 
-email = "georgeayo721@gmail.com"
-password = "Atlanta1"
+if not SUPABASE_URL or not SUPABASE_ANON_KEY or not email or not password:
+    print("Missing required env vars: SUPABASE_URL, SUPABASE_ANON_KEY, TEST_LOGIN_EMAIL, TEST_LOGIN_PASSWORD")
+    sys.exit(1)
 
 print(f"Testing login with:")
 print(f"  URL: {SUPABASE_URL}")
 print(f"  Email: {email}")
-print(f"  Password: {password}")
+print("  Password: ********")
 print()
 
 try:
