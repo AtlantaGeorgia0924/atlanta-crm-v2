@@ -2,14 +2,19 @@ import { useEffect, useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useForm } from 'react-hook-form'
 import { useSearchParams } from 'react-router-dom'
-import { FixedSizeList as List, ListChildComponentProps } from 'react-window'
-import { ChevronDown, ChevronLeft, ChevronRight, Plus, Search, Trash2 } from 'lucide-react'
+import {
+  Calendar, ChevronDown, ChevronLeft, ChevronRight,
+  Copy, CreditCard, MessageCircle, Pencil, Plus,
+  RotateCcw, Search, Trash2, X,
+} from 'lucide-react'
 import toast from 'react-hot-toast'
 
 import api from '@/lib/api'
 import LoadingSpinner from '@/components/LoadingSpinner'
 import Modal from '@/components/Modal'
 import { formatCurrency, statusBadgeClass, statusLabel } from '@/lib/utils'
+
+// ─── Types ────────────────────────────────────────────────────────────────────
 
 interface BillingRow {
   id: string
@@ -73,7 +78,7 @@ interface ClientSuggestion {
   notes?: string
 }
 
-const ROW_HEIGHT = 54
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function getDefaultMonth(): string {
   const d = new Date()
@@ -90,6 +95,14 @@ function monthBounds(month: string): { from: string; to: string } {
   }
 }
 
+function formatMonthLabel(monthStr: string): string {
+  const [year, m] = monthStr.split('-').map(Number)
+  return new Date(year, m - 1, 1).toLocaleDateString(undefined, {
+    month: 'long',
+    year: 'numeric',
+  })
+}
+
 function labelForDate(dateStr: string): string {
   if (!dateStr || dateStr === 'Unknown') return 'Unknown Date'
   const d = new Date(`${dateStr}T00:00:00`)
@@ -98,7 +111,9 @@ function labelForDate(dateStr: string): string {
   yesterday.setDate(today.getDate() - 1)
 
   const isSame = (a: Date, b: Date) =>
-    a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate()
+    a.getFullYear() === b.getFullYear() &&
+    a.getMonth() === b.getMonth() &&
+    a.getDate() === b.getDate()
 
   if (isSame(d, today)) return 'Today'
   if (isSame(d, yesterday)) return 'Yesterday'
@@ -110,6 +125,16 @@ function labelForDate(dateStr: string): string {
   })
 }
 
+function normalizePhone(raw?: string): string {
+  if (!raw) return ''
+  const digits = raw.replace(/\D/g, '')
+  if (digits.startsWith('234')) return digits
+  if (digits.startsWith('0') && digits.length === 11) return '234' + digits.slice(1)
+  return digits
+}
+
+// ─── Component ────────────────────────────────────────────────────────────────
+
 export default function Billing() {
   const qc = useQueryClient()
   const [searchParams, setSearchParams] = useSearchParams()
@@ -120,6 +145,9 @@ export default function Billing() {
   const [showClientDropdown, setShowClientDropdown] = useState(false)
   const [selectedClientId, setSelectedClientId] = useState('')
   const [collapsedDates, setCollapsedDates] = useState<Record<string, boolean>>({})
+  const [expandedRows, setExpandedRows] = useState<Set<string>>(new Set())
+  const [applyPayRow, setApplyPayRow] = useState<BillingRow | null>(null)
+  const [applyPayAmount, setApplyPayAmount] = useState('')
 
   const page = Number(searchParams.get('page') || '1')
   const statusFilter = searchParams.get('payment_status') || ''
@@ -136,9 +164,7 @@ export default function Billing() {
 
   const { register, handleSubmit, reset, setValue, formState: { errors } } = useForm<FormValues>()
 
-  useEffect(() => {
-    setSearchInput(search)
-  }, [search])
+  useEffect(() => { setSearchInput(search) }, [search])
 
   useEffect(() => {
     const id = setTimeout(() => {
@@ -264,12 +290,7 @@ export default function Billing() {
       qc.invalidateQueries({ queryKey: ['billing-grouped'] })
       qc.invalidateQueries({ queryKey: ['debtors'] })
       qc.invalidateQueries({ queryKey: ['dashboard'] })
-      setShowForm(false)
-      setEditRow(null)
-      setSelectedClientId('')
-      setClientSearch('')
-      setShowClientDropdown(false)
-      reset()
+      closeForm()
     },
     onError: (e: any) => {
       const detail = e?.response?.data?.detail
@@ -288,6 +309,29 @@ export default function Billing() {
       toast.success('Deleted')
       qc.invalidateQueries({ queryKey: ['billing-grouped'] })
     },
+  })
+
+  const applyPaymentMutation = useMutation({
+    mutationFn: ({ id, amount_paid }: { id: string; amount_paid: number }) =>
+      api.put(`/billing/${id}`, { amount_paid }),
+    onSuccess: () => {
+      toast.success('Payment applied')
+      qc.invalidateQueries({ queryKey: ['billing-grouped'] })
+      qc.invalidateQueries({ queryKey: ['debtors'] })
+      qc.invalidateQueries({ queryKey: ['dashboard'] })
+      setApplyPayRow(null)
+      setApplyPayAmount('')
+    },
+    onError: (e: any) => toast.error(e?.response?.data?.detail ?? 'Payment update failed'),
+  })
+
+  const markReturnedMutation = useMutation({
+    mutationFn: (id: string) => api.put(`/billing/${id}`, { status: 'RETURNED' }),
+    onSuccess: () => {
+      toast.success('Marked as returned')
+      qc.invalidateQueries({ queryKey: ['billing-grouped'] })
+    },
+    onError: (e: any) => toast.error(e?.response?.data?.detail ?? 'Update failed'),
   })
 
   const openEdit = (row: BillingRow) => {
@@ -309,10 +353,7 @@ export default function Billing() {
   const grouped: BillingGroup[] = useMemo(() => groupedData?.groups ?? [], [groupedData])
 
   const totalSummary = useMemo(() => {
-    let totalAmount = 0
-    let totalPaid = 0
-    let totalOutstanding = 0
-    let jobs = 0
+    let totalAmount = 0, totalPaid = 0, totalOutstanding = 0, jobs = 0
     for (const g of grouped) {
       totalAmount += Number(g.summary.total_amount || 0)
       totalPaid += Number(g.summary.total_paid || 0)
@@ -321,6 +362,18 @@ export default function Billing() {
     }
     return { totalAmount, totalPaid, totalOutstanding, jobs }
   }, [grouped])
+
+  const activeRange = useMemo(() => {
+    const today = new Date().toISOString().slice(0, 10)
+    const d = new Date()
+    d.setDate(d.getDate() - d.getDay())
+    const weekStart = d.toISOString().slice(0, 10)
+    const monthStart = new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString().slice(0, 10)
+    if (dateFrom === today && dateTo === today) return 'today'
+    if (dateFrom === weekStart && dateTo === today) return 'week'
+    if (dateFrom === monthStart && dateTo === today) return 'month'
+    return null
+  }, [dateFrom, dateTo])
 
   const shiftMonth = (delta: number) => {
     const [y, m] = month.split('-').map(Number)
@@ -338,7 +391,7 @@ export default function Billing() {
   const applyQuickRange = (type: 'today' | 'week' | 'month') => {
     const now = new Date()
     let from = ''
-    let to = now.toISOString().slice(0, 10)
+    const to = now.toISOString().slice(0, 10)
 
     if (type === 'today') {
       from = to
@@ -377,186 +430,348 @@ export default function Billing() {
     reset()
   }
 
+  const toggleRow = (id: string) =>
+    setExpandedRows((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+
+  const generateBillText = (row: BillingRow): string =>
+    [
+      `*SERVICE INVOICE*`,
+      `Client: ${row.client_name}`,
+      row.phone_number ? `Phone: ${row.phone_number}` : '',
+      `Service: ${row.service_name}`,
+      `Amount: ${formatCurrency(row.total_amount, currency)}`,
+      `Paid: ${formatCurrency(row.amount_paid, currency)}`,
+      `Balance: ${formatCurrency(row.balance, currency)}`,
+      `Status: ${statusLabel(row.status)}`,
+      (row.invoice_date || row.service_date)
+        ? `Date: ${(row.invoice_date || row.service_date)!.slice(0, 10)}`
+        : '',
+    ]
+      .filter(Boolean)
+      .join('\n')
+
+  const openWhatsApp = (row: BillingRow) => {
+    const text = encodeURIComponent(generateBillText(row))
+    const phone = normalizePhone(row.phone_number)
+    window.open(`https://wa.me/${phone}?text=${text}`, '_blank', 'noopener,noreferrer')
+  }
+
+  const copyBill = async (row: BillingRow) => {
+    try {
+      await navigator.clipboard.writeText(generateBillText(row))
+      toast.success('Bill copied to clipboard')
+    } catch {
+      toast.error('Copy failed')
+    }
+  }
+
+  const hasActiveFilters = !!(search || dateFrom || dateTo || statusFilter || paidState || minAmount || maxAmount || returned)
+
+  // ─── Render ─────────────────────────────────────────────────────────────────
+
   return (
-    <div className="p-8 space-y-5">
-      <div className="flex items-center justify-between gap-3 flex-wrap">
+    <div className="p-6 space-y-4">
+
+      {/* ── Header ── */}
+      <div className="flex items-center justify-between gap-3">
         <h1 className="text-2xl font-bold">Service / Billing</h1>
-        <button onClick={() => {
-          setEditRow(null)
-          setClientSearch('')
-          setSelectedClientId('')
-          setShowClientDropdown(false)
-          reset({
-            quantity: 1,
-            unit_price: 0,
-            amount_paid: 0,
-            service_expense: 0,
-            invoice_date: new Date().toISOString().slice(0, 10),
-            due_date: '',
-            notes: '',
-          } as FormValues)
-          setShowForm(true)
-        }} className="btn-primary">
+        <button
+          onClick={() => {
+            setEditRow(null)
+            setClientSearch('')
+            setSelectedClientId('')
+            setShowClientDropdown(false)
+            reset({
+              quantity: 1,
+              unit_price: 0,
+              amount_paid: 0,
+              service_expense: 0,
+              invoice_date: new Date().toISOString().slice(0, 10),
+              due_date: '',
+              notes: '',
+            } as FormValues)
+            setShowForm(true)
+          }}
+          className="btn-primary"
+        >
           <Plus size={15} /> New Invoice
         </button>
       </div>
 
-      <div className="rounded-xl border p-3 bg-white" style={{ borderColor: '#e7d89f' }}>
-        <div className="flex items-center justify-between gap-2 flex-wrap">
-          <div className="flex items-center gap-2">
-            <button className="btn-secondary py-1 px-2" onClick={() => shiftMonth(-1)}><ChevronLeft size={15} /></button>
+      {/* ── Date Nav + Quick Ranges ── */}
+      <div className="rounded-xl border bg-white px-4 py-3 flex items-center justify-between gap-3 flex-wrap" style={{ borderColor: '#e7d89f' }}>
+        <div className="flex items-center gap-1">
+          <button
+            className="rounded-lg border p-1.5 hover:bg-gray-50 transition-colors"
+            style={{ borderColor: '#d4af37' }}
+            onClick={() => shiftMonth(-1)}
+            title="Previous month"
+          >
+            <ChevronLeft size={15} />
+          </button>
+          <button
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-sm font-semibold hover:bg-[#fffdf5] transition-colors"
+            style={{ borderColor: '#d4af37' }}
+            onClick={() => {
+              const val = prompt('Go to month (YYYY-MM):', month)
+              if (!val) return
+              const bounds = monthBounds(val)
+              const next = new URLSearchParams(searchParams)
+              next.set('month', val)
+              next.set('from_date', bounds.from)
+              next.set('to_date', bounds.to)
+              next.set('page', '1')
+              setSearchParams(next, { replace: true })
+            }}
+            title="Click to jump to a specific month"
+          >
+            <Calendar size={13} className="text-[#D4AF37]" />
+            {formatMonthLabel(month)}
+          </button>
+          <button
+            className="rounded-lg border p-1.5 hover:bg-gray-50 transition-colors"
+            style={{ borderColor: '#d4af37' }}
+            onClick={() => shiftMonth(1)}
+            title="Next month"
+          >
+            <ChevronRight size={15} />
+          </button>
+        </div>
+
+        <div className="flex rounded-lg border overflow-hidden text-xs font-medium" style={{ borderColor: '#d4af37' }}>
+          {(['today', 'week', 'month'] as const).map((type, i) => (
+            <button
+              key={type}
+              onClick={() => applyQuickRange(type)}
+              className={`px-3 py-1.5 transition-colors border-r last:border-r-0 ${
+                activeRange === type
+                  ? 'bg-black text-white'
+                  : 'bg-white text-gray-600 hover:bg-[#fffdf5]'
+              }`}
+              style={{ borderColor: '#d4af37' }}
+            >
+              {['Today', 'This Week', 'This Month'][i]}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* ── Compact Filters (2 rows) ── */}
+      <div className="rounded-xl border bg-white px-4 py-3 space-y-2" style={{ borderColor: '#e7d89f' }}>
+        {/* Row 1: Search + status filters */}
+        <div className="flex gap-2 flex-wrap items-center">
+          <div className="relative flex-1 min-w-48" style={{ maxWidth: '65%' }}>
+            <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
             <input
-              type="month"
-              className="form-input"
-              value={month}
-              onChange={(e) => {
-                const val = e.target.value
-                const bounds = monthBounds(val)
-                const next = new URLSearchParams(searchParams)
-                next.set('month', val)
-                next.set('from_date', bounds.from)
-                next.set('to_date', bounds.to)
-                next.set('page', '1')
-                setSearchParams(next, { replace: true })
-              }}
+              className="form-input pl-9 py-2 text-sm w-full"
+              placeholder="Search clients, phone, service, notes, ID…"
+              value={searchInput}
+              onChange={(e) => setSearchInput(e.target.value)}
             />
-            <button className="btn-secondary py-1 px-2" onClick={() => shiftMonth(1)}><ChevronRight size={15} /></button>
           </div>
-          <div className="flex items-center gap-2">
-            <button className="btn-secondary py-1 px-2 text-xs" onClick={() => applyQuickRange('today')}>Today</button>
-            <button className="btn-secondary py-1 px-2 text-xs" onClick={() => applyQuickRange('week')}>This Week</button>
-            <button className="btn-secondary py-1 px-2 text-xs" onClick={() => applyQuickRange('month')}>This Month</button>
-          </div>
+          <select className="form-input py-2 text-sm" style={{ minWidth: '9rem' }} value={statusFilter} onChange={(e) => setParam('payment_status', e.target.value)}>
+            <option value="">All statuses</option>
+            <option value="PAID">Paid</option>
+            <option value="PART PAYMENT">Part Payment</option>
+            <option value="UNPAID">Unpaid</option>
+            <option value="RETURNED">Returned</option>
+          </select>
+          <select className="form-input py-2 text-sm" style={{ minWidth: '8.5rem' }} value={paidState} onChange={(e) => setParam('paid_state', e.target.value)}>
+            <option value="">All paid states</option>
+            <option value="paid">Paid only</option>
+            <option value="unpaid">Unpaid / partial</option>
+          </select>
+          <select className="form-input py-2 text-sm" style={{ minWidth: '8rem' }} value={returned} onChange={(e) => setParam('is_return', e.target.value)}>
+            <option value="">All returns</option>
+            <option value="false">Not returned</option>
+            <option value="true">Returned</option>
+          </select>
         </div>
+
+        {/* Row 2: Date + amount range */}
+        <div className="flex gap-2 flex-wrap items-center">
+          <div className="flex items-center gap-1">
+            <span className="text-xs text-gray-400 whitespace-nowrap">From</span>
+            <input type="date" className="form-input py-1.5 text-xs" value={dateFrom} onChange={(e) => setParam('from_date', e.target.value)} />
+          </div>
+          <div className="flex items-center gap-1">
+            <span className="text-xs text-gray-400 whitespace-nowrap">To</span>
+            <input type="date" className="form-input py-1.5 text-xs" value={dateTo} onChange={(e) => setParam('to_date', e.target.value)} />
+          </div>
+          <input type="number" min="0" className="form-input py-1.5 text-xs" style={{ width: '7rem' }} placeholder="Min amount" value={minAmount} onChange={(e) => setParam('min_amount', e.target.value)} />
+          <input type="number" min="0" className="form-input py-1.5 text-xs" style={{ width: '7rem' }} placeholder="Max amount" value={maxAmount} onChange={(e) => setParam('max_amount', e.target.value)} />
+          {hasActiveFilters && (
+            <button type="button" className="flex items-center gap-1 text-xs text-gray-500 hover:text-red-600 border rounded-lg px-2 py-1.5 hover:border-red-300 transition-colors ml-auto" style={{ borderColor: '#e5e7eb' }} onClick={clearFilters}>
+              <X size={12} /> Clear filters
+            </button>
+          )}
+        </div>
+
+        {/* Active filter badges */}
+        {hasActiveFilters && (
+          <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
+            {search && <FilterBadge label={`"${search}"`} onRemove={() => { setSearchInput(''); setParam('search') }} />}
+            {dateFrom && <FilterBadge label={`From ${dateFrom}`} onRemove={() => setParam('from_date')} />}
+            {dateTo && <FilterBadge label={`To ${dateTo}`} onRemove={() => setParam('to_date')} />}
+            {statusFilter && <FilterBadge label={statusFilter} onRemove={() => setParam('payment_status')} />}
+            {paidState && <FilterBadge label={`Paid: ${paidState}`} onRemove={() => setParam('paid_state')} />}
+            {minAmount && <FilterBadge label={`Min ${minAmount}`} onRemove={() => setParam('min_amount')} />}
+            {maxAmount && <FilterBadge label={`Max ${maxAmount}`} onRemove={() => setParam('max_amount')} />}
+            {returned && <FilterBadge label={returned === 'true' ? 'Returned' : 'Not returned'} onRemove={() => setParam('is_return')} />}
+          </div>
+        )}
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3">
-        <div className="relative lg:col-span-2">
-          <Search size={14} className="absolute left-3 top-3 text-gray-400" />
-          <input className="form-input pl-8" placeholder="Search client, phone, service, notes, record id..." value={searchInput} onChange={(e) => setSearchInput(e.target.value)} />
-        </div>
-        <select className="form-input" value={statusFilter} onChange={(e) => setParam('payment_status', e.target.value)}>
-          <option value="">All payment status</option>
-          <option value="PAID">PAID</option>
-          <option value="PART PAYMENT">PART PAYMENT</option>
-          <option value="UNPAID">UNPAID</option>
-          <option value="RETURNED">RETURNED</option>
-        </select>
-        <select className="form-input" value={paidState} onChange={(e) => setParam('paid_state', e.target.value)}>
-          <option value="">All paid states</option>
-          <option value="paid">Paid only</option>
-          <option value="unpaid">Unpaid/partial</option>
-        </select>
-        <input type="date" className="form-input" value={dateFrom} onChange={(e) => setParam('from_date', e.target.value)} />
-        <input type="date" className="form-input" value={dateTo} onChange={(e) => setParam('to_date', e.target.value)} />
-        <input type="number" min="0" className="form-input" placeholder="Min amount" value={minAmount} onChange={(e) => setParam('min_amount', e.target.value)} />
-        <input type="number" min="0" className="form-input" placeholder="Max amount" value={maxAmount} onChange={(e) => setParam('max_amount', e.target.value)} />
-        <select className="form-input" value={returned} onChange={(e) => setParam('is_return', e.target.value)}>
-          <option value="">All return states</option>
-          <option value="false">Not returned</option>
-          <option value="true">Returned</option>
-        </select>
-        <button type="button" className="btn-secondary" onClick={clearFilters}>Clear Filters</button>
-      </div>
-
-      {(search || dateFrom || dateTo || statusFilter || paidState || minAmount || maxAmount || returned) && (
-        <div className="flex flex-wrap items-center gap-2 text-xs">
-          <span className="text-gray-500">Active filters:</span>
-          {search && <span className="rounded-full border px-2 py-1" style={{ borderColor: '#d4af37' }}>Search: {search}</span>}
-          {dateFrom && <span className="rounded-full border px-2 py-1" style={{ borderColor: '#d4af37' }}>From: {dateFrom}</span>}
-          {dateTo && <span className="rounded-full border px-2 py-1" style={{ borderColor: '#d4af37' }}>To: {dateTo}</span>}
-          {statusFilter && <span className="rounded-full border px-2 py-1" style={{ borderColor: '#d4af37' }}>Status: {statusFilter}</span>}
-          {paidState && <span className="rounded-full border px-2 py-1" style={{ borderColor: '#d4af37' }}>Paid: {paidState}</span>}
-          {minAmount && <span className="rounded-full border px-2 py-1" style={{ borderColor: '#d4af37' }}>Min: {minAmount}</span>}
-          {maxAmount && <span className="rounded-full border px-2 py-1" style={{ borderColor: '#d4af37' }}>Max: {maxAmount}</span>}
-          {returned && <span className="rounded-full border px-2 py-1" style={{ borderColor: '#d4af37' }}>Returned: {returned}</span>}
-        </div>
-      )}
-
+      {/* ── Summary Cards ── */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-        <div className="card p-3">
-          <p className="text-xs text-gray-500">Jobs</p>
-          <p className="text-xl font-semibold">{totalSummary.jobs}</p>
-        </div>
-        <div className="card p-3">
-          <p className="text-xs text-gray-500">Total Amount</p>
-          <p className="text-xl font-semibold">{formatCurrency(totalSummary.totalAmount, currency)}</p>
-        </div>
-        <div className="card p-3">
-          <p className="text-xs text-gray-500">Paid</p>
-          <p className="text-xl font-semibold">{formatCurrency(totalSummary.totalPaid, currency)}</p>
-        </div>
-        <div className="card p-3">
-          <p className="text-xs text-gray-500">Outstanding</p>
-          <p className="text-xl font-semibold text-red-600">{formatCurrency(totalSummary.totalOutstanding, currency)}</p>
-        </div>
+        <SummaryCard label="Jobs" value={String(totalSummary.jobs)} />
+        <SummaryCard label="Total Amount" value={formatCurrency(totalSummary.totalAmount, currency)} />
+        <SummaryCard label="Paid" value={formatCurrency(totalSummary.totalPaid, currency)} valueClass="text-emerald-700" />
+        <SummaryCard
+          label="Outstanding"
+          value={formatCurrency(totalSummary.totalOutstanding, currency)}
+          prominent
+          valueClass={totalSummary.totalOutstanding > 0 ? 'text-amber-700' : 'text-emerald-600'}
+        />
       </div>
 
-      {isLoading ? <LoadingSpinner /> : (
+      {/* ── Grouped sections ── */}
+      {isLoading ? (
+        <LoadingSpinner />
+      ) : (
         <div className="space-y-3">
           {grouped.length === 0 && (
-            <div className="rounded-xl border p-6 text-sm text-gray-500" style={{ borderColor: '#e7d89f' }}>
+            <div className="rounded-xl border p-8 text-sm text-gray-400 text-center" style={{ borderColor: '#e7d89f' }}>
               No jobs found for the current filters.
             </div>
           )}
+
           {grouped.map((group: BillingGroup) => {
             const collapsed = !!collapsedDates[group.service_date]
-            const height = Math.min(360, Math.max(ROW_HEIGHT * group.items.length + 6, 60))
+            const hasOutstanding = Number(group.summary.total_outstanding) > 0
+
             return (
               <section key={group.service_date} className="rounded-xl border bg-white" style={{ borderColor: '#e7d89f' }}>
-                <button
-                  className="w-full text-left px-4 py-3 border-b flex items-center justify-between"
-                  style={{ borderColor: '#f1e7bf' }}
-                  onClick={() => setCollapsedDates((prev) => ({ ...prev, [group.service_date]: !collapsed }))}
-                >
-                  <div>
-                    <p className="font-semibold text-gray-900">{labelForDate(group.service_date)}</p>
-                    <p className="text-xs text-gray-500">{group.service_date}</p>
-                  </div>
-                  <div className="flex items-center gap-5 text-xs text-gray-600">
-                    <span>{group.summary.job_count} jobs</span>
-                    <span>Total {formatCurrency(group.summary.total_amount, currency)}</span>
-                    <span>Paid {formatCurrency(group.summary.total_paid, currency)}</span>
-                    <span className="text-red-600">Outstanding {formatCurrency(group.summary.total_outstanding, currency)}</span>
-                    <ChevronDown size={15} className={`transition-transform ${collapsed ? '-rotate-90' : ''}`} />
-                  </div>
-                </button>
+
+                {/* Sticky group header */}
+                <div className="sticky top-0 z-10 bg-white border-b rounded-t-xl" style={{ borderColor: '#f1e7bf' }}>
+                  <button
+                    className="w-full flex items-center justify-between gap-3 px-4 py-3 text-left"
+                    onClick={() => setCollapsedDates((prev) => ({ ...prev, [group.service_date]: !collapsed }))}
+                  >
+                    <div className="flex items-center gap-2 min-w-0">
+                      <ChevronDown size={14} className={`shrink-0 text-gray-400 transition-transform ${collapsed ? '-rotate-90' : ''}`} />
+                      <span className="font-semibold text-sm text-gray-900">{labelForDate(group.service_date)}</span>
+                      <span className="text-xs text-gray-400 hidden sm:inline">{group.service_date}</span>
+                    </div>
+                    <div className="flex items-center gap-3 shrink-0 text-xs text-gray-500">
+                      <span className="hidden sm:inline">{group.summary.job_count} jobs</span>
+                      <span className="hidden lg:inline"><span className="text-gray-400">Total </span>{formatCurrency(group.summary.total_amount, currency)}</span>
+                      <span className="hidden lg:inline text-emerald-600">{formatCurrency(group.summary.total_paid, currency)} paid</span>
+                      {hasOutstanding ? (
+                        <span className="font-semibold text-amber-700 bg-amber-50 border border-amber-200 px-2 py-0.5 rounded-full">
+                          {formatCurrency(group.summary.total_outstanding, currency)} due
+                        </span>
+                      ) : (
+                        <span className="text-emerald-600 text-xs font-medium">✓ Settled</span>
+                      )}
+                    </div>
+                  </button>
+                </div>
 
                 {!collapsed && (
-                  <div className="p-1">
-                    <List
-                      height={height}
-                      width={1200}
-                      itemCount={group.items.length}
-                      itemSize={ROW_HEIGHT}
+                  <div>
+                    {/* Column headers */}
+                    <div
+                      className="grid items-center gap-2 px-4 py-1.5 text-xs font-medium text-gray-400 uppercase tracking-wide border-b"
+                      style={{ gridTemplateColumns: '1.8fr 1.8fr 1fr 1fr 1fr 1fr 6rem', borderColor: '#f7f1d8' }}
                     >
-                      {({ index, style }: ListChildComponentProps) => {
-                        const row = group.items[index]
-                        return (
-                          <div style={style} className="px-3">
-                            <div className="grid grid-cols-12 items-center gap-2 border-b py-2 text-sm" style={{ borderColor: '#f7f1d8' }}>
-                              <div className="col-span-2 truncate font-medium" title={row.client_name}>{row.client_name}</div>
-                              <div className="col-span-2 truncate" title={row.service_name}>{row.service_name}</div>
-                              <div className="col-span-2">{formatCurrency(row.total_amount, currency)}</div>
-                              <div className="col-span-2">{formatCurrency(row.amount_paid, currency)}</div>
-                              <div className="col-span-2 text-red-600">{formatCurrency(row.balance, currency)}</div>
-                              <div className="col-span-1"><span className={statusBadgeClass(row.status)}>{statusLabel(row.status)}</span></div>
-                              <div className="col-span-1 flex justify-end gap-1">
-                                <button className="btn-secondary py-1 px-2 text-xs" onClick={() => openEdit(row)}>Edit</button>
-                                <button
-                                  className="text-red-500 hover:text-red-700"
-                                  onClick={() => {
-                                    if (confirm('Delete invoice?')) deleteMutation.mutate(row.id)
-                                  }}
-                                >
-                                  <Trash2 size={14} />
-                                </button>
-                              </div>
+                      <span>Client</span>
+                      <span>Service</span>
+                      <span>Total</span>
+                      <span>Paid</span>
+                      <span>Balance</span>
+                      <span>Status</span>
+                      <span />
+                    </div>
+
+                    {group.items.map((row, idx) => {
+                      const expanded = expandedRows.has(row.id)
+                      const isLast = idx === group.items.length - 1
+                      const balancePositive = Number(row.balance) > 0
+
+                      return (
+                        <div
+                          key={row.id}
+                          className={`${!isLast ? 'border-b' : ''}`}
+                          style={{ borderColor: '#f7f1d8' }}
+                        >
+                          {/* Main row */}
+                          <div
+                            className="group grid items-center gap-2 px-4 py-3 text-sm hover:bg-[#fffdf5] cursor-pointer transition-colors"
+                            style={{ gridTemplateColumns: '1.8fr 1.8fr 1fr 1fr 1fr 1fr 6rem' }}
+                            onClick={() => toggleRow(row.id)}
+                          >
+                            <span className="truncate font-medium text-gray-900" title={row.client_name}>{row.client_name}</span>
+                            <span className="truncate text-gray-600" title={row.service_name}>{row.service_name}</span>
+                            <span className="text-gray-800 tabular-nums">{formatCurrency(row.total_amount, currency)}</span>
+                            <span className="text-emerald-700 tabular-nums">{formatCurrency(row.amount_paid, currency)}</span>
+                            <span className={`tabular-nums font-medium ${balancePositive ? 'text-amber-700' : 'text-gray-300'}`}>
+                              {balancePositive ? formatCurrency(row.balance, currency) : '—'}
+                            </span>
+                            <span>
+                              <span className={statusBadgeClass(row.status)}>{statusLabel(row.status)}</span>
+                            </span>
+                            {/* Row quick actions — visible on hover */}
+                            <div
+                              className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity"
+                              onClick={(e) => e.stopPropagation()}
+                            >
+                              <ActionBtn title="Edit" icon={<Pencil size={13} />} onClick={() => openEdit(row)} />
+                              <ActionBtn title="Apply Payment" icon={<CreditCard size={13} />} onClick={() => { setApplyPayRow(row); setApplyPayAmount(String(row.amount_paid)) }} />
+                              <ActionBtn title="WhatsApp Bill" icon={<MessageCircle size={13} />} onClick={() => openWhatsApp(row)} colorClass="hover:text-green-600" />
+                              <ActionBtn title="Copy Bill" icon={<Copy size={13} />} onClick={() => copyBill(row)} />
+                              <ActionBtn title="Mark Returned" icon={<RotateCcw size={13} />} onClick={() => { if (confirm('Mark as returned?')) markReturnedMutation.mutate(row.id) }} />
+                              <ActionBtn title="Delete" icon={<Trash2 size={13} />} onClick={() => { if (confirm('Delete invoice?')) deleteMutation.mutate(row.id) }} colorClass="hover:text-red-600" />
                             </div>
                           </div>
-                        )
-                      }}
-                    </List>
+
+                          {/* Expandable detail panel */}
+                          {expanded && (
+                            <div
+                              className="px-6 pb-3 pt-2 bg-[#fffdf5] border-t text-xs text-gray-600 space-y-2"
+                              style={{ borderColor: '#f7f1d8' }}
+                              onClick={(e) => e.stopPropagation()}
+                            >
+                              <div className="flex flex-wrap gap-x-6 gap-y-1 text-gray-500">
+                                {row.phone_number && <span>📱 <strong className="text-gray-700">{row.phone_number}</strong></span>}
+                                {(row.invoice_date || row.service_date) && <span>📅 {(row.invoice_date || row.service_date)!.slice(0, 10)}</span>}
+                                <span>Qty: <strong className="text-gray-700">{row.quantity}</strong></span>
+                                <span>Unit price: <strong className="text-gray-700">{formatCurrency(Number(row.total_amount) / (Number(row.quantity) || 1), currency)}</strong></span>
+                                <span>ID: <span className="font-mono text-gray-400">{row.id.slice(0, 8)}…</span></span>
+                              </div>
+                              {row.notes && <p className="italic text-gray-400">📝 {row.notes}</p>}
+                              {/* Inline action buttons */}
+                              <div className="flex flex-wrap gap-2 pt-1">
+                                <InlineBtn icon={<Pencil size={11} />} label="Edit" onClick={() => openEdit(row)} />
+                                <InlineBtn icon={<CreditCard size={11} />} label="Apply Payment" onClick={() => { setApplyPayRow(row); setApplyPayAmount(String(row.amount_paid)) }} />
+                                <InlineBtn icon={<MessageCircle size={11} />} label="WhatsApp" onClick={() => openWhatsApp(row)} extraClass="text-green-700 hover:bg-green-50" />
+                                <InlineBtn icon={<Copy size={11} />} label="Copy Bill" onClick={() => copyBill(row)} />
+                                {row.status !== 'RETURNED' && (
+                                  <InlineBtn icon={<RotateCcw size={11} />} label="Mark Returned" onClick={() => { if (confirm('Mark as returned?')) markReturnedMutation.mutate(row.id) }} />
+                                )}
+                                <InlineBtn icon={<Trash2 size={11} />} label="Delete" onClick={() => { if (confirm('Delete invoice?')) deleteMutation.mutate(row.id) }} extraClass="text-red-600 hover:bg-red-50" />
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      )
+                    })}
                   </div>
                 )}
               </section>
@@ -571,6 +786,7 @@ export default function Billing() {
         </div>
       )}
 
+      {/* ── New / Edit Invoice Modal ── */}
       <Modal
         title={editRow ? 'Edit Invoice' : 'New Invoice'}
         open={showForm}
@@ -604,7 +820,7 @@ export default function Billing() {
               onFocus={() => setShowClientDropdown(true)}
             />
             {showClientDropdown && clientSearch.trim() && suggestions.length > 0 && (
-              <div className="absolute z-20 mt-1 w-full rounded-lg border bg-white shadow" style={{ borderColor: '#d4af37' }}>
+              <div className="absolute z-20 mt-1 w-full rounded-lg border bg-white shadow-lg" style={{ borderColor: '#d4af37' }}>
                 {suggestions.map((s) => (
                   <button
                     type="button"
@@ -620,7 +836,7 @@ export default function Billing() {
                     }}
                   >
                     <div className="font-medium">{s.name}</div>
-                    <div className="text-xs text-gray-500">{s.phone || 'No phone'} - {s.email || 'No email'}</div>
+                    <div className="text-xs text-gray-500">{s.phone || 'No phone'} · {s.email || 'No email'}</div>
                   </button>
                 ))}
               </div>
@@ -637,12 +853,14 @@ export default function Billing() {
           </div>
           <div>
             <label className="form-label">Quantity</label>
-            <input type="number" step="0.01" min="0.01" className="form-input" {...register('quantity', { valueAsNumber: true, min: { value: 0.01, message: 'Quantity must be greater than zero' } })} />
+            <input type="number" step="0.01" min="0.01" className="form-input"
+              {...register('quantity', { valueAsNumber: true, min: { value: 0.01, message: 'Must be > 0' } })} />
             {errors.quantity && <p className="text-xs text-red-500">{errors.quantity.message as string}</p>}
           </div>
           <div>
             <label className="form-label">Unit Price</label>
-            <input type="number" step="0.01" min="0.01" className="form-input" {...register('unit_price', { valueAsNumber: true, required: 'Required', min: { value: 0.01, message: 'Unit Price must be greater than zero' } })} />
+            <input type="number" step="0.01" min="0.01" className="form-input"
+              {...register('unit_price', { valueAsNumber: true, required: 'Required', min: { value: 0.01, message: 'Must be > 0' } })} />
             {errors.unit_price && <p className="text-xs text-red-500">{errors.unit_price.message as string}</p>}
           </div>
           <div>
@@ -667,6 +885,138 @@ export default function Billing() {
           </div>
         </form>
       </Modal>
+
+      {/* ── Apply Payment Modal ── */}
+      <Modal
+        title="Apply Payment"
+        open={!!applyPayRow}
+        onClose={() => { setApplyPayRow(null); setApplyPayAmount('') }}
+        size="sm"
+        footer={(
+          <div className="flex justify-end gap-2">
+            <button type="button" className="btn-secondary" onClick={() => { setApplyPayRow(null); setApplyPayAmount('') }}>Cancel</button>
+            <button
+              type="button"
+              className="btn-primary"
+              disabled={applyPaymentMutation.isPending}
+              onClick={() => {
+                if (!applyPayRow) return
+                const val = parseFloat(applyPayAmount)
+                if (!Number.isFinite(val) || val < 0) { toast.error('Enter a valid amount'); return }
+                applyPaymentMutation.mutate({ id: applyPayRow.id, amount_paid: val })
+              }}
+            >
+              {applyPaymentMutation.isPending ? 'Saving...' : 'Apply'}
+            </button>
+          </div>
+        )}
+      >
+        {applyPayRow && (
+          <div className="space-y-4">
+            <div className="rounded-lg border bg-gray-50 px-4 py-3 text-sm space-y-1" style={{ borderColor: '#e7d89f' }}>
+              <p><span className="text-gray-500">Client:</span> <strong>{applyPayRow.client_name}</strong></p>
+              <p><span className="text-gray-500">Service:</span> {applyPayRow.service_name}</p>
+              <p><span className="text-gray-500">Total:</span> {formatCurrency(applyPayRow.total_amount, currency)}</p>
+              <p><span className="text-gray-500">Currently paid:</span> <span className="text-emerald-600 font-medium">{formatCurrency(applyPayRow.amount_paid, currency)}</span></p>
+              <p><span className="text-gray-500">Balance:</span> <span className="text-amber-700 font-semibold">{formatCurrency(applyPayRow.balance, currency)}</span></p>
+            </div>
+            <div>
+              <label className="form-label">New Total Amount Paid</label>
+              <input
+                type="number"
+                min="0"
+                step="0.01"
+                className="form-input"
+                value={applyPayAmount}
+                onChange={(e) => setApplyPayAmount(e.target.value)}
+                autoFocus
+              />
+              <p className="text-xs text-gray-400 mt-1">Set the total paid so far (not just the new payment).</p>
+            </div>
+          </div>
+        )}
+      </Modal>
     </div>
+  )
+}
+
+// ─── Sub-components ──────────────────────────────────────────────────────────
+
+function FilterBadge({ label, onRemove }: { label: string; onRemove: () => void }) {
+  return (
+    <span className="inline-flex items-center gap-1 text-xs rounded-full border bg-white px-2 py-0.5" style={{ borderColor: '#d4af37' }}>
+      {label}
+      <button type="button" onClick={onRemove} className="text-gray-400 hover:text-gray-700 ml-0.5 leading-none">
+        <X size={10} />
+      </button>
+    </span>
+  )
+}
+
+function SummaryCard({
+  label,
+  value,
+  prominent = false,
+  valueClass = '',
+}: {
+  label: string
+  value: string
+  prominent?: boolean
+  valueClass?: string
+}) {
+  return (
+    <div
+      className={`rounded-xl border px-4 py-3 bg-white ${prominent ? 'ring-1 ring-amber-200' : ''}`}
+      style={{ borderColor: prominent ? '#d4af37' : '#e7d89f' }}
+    >
+      <p className={`text-xs text-gray-500 mb-0.5 ${prominent ? 'font-medium uppercase tracking-wide' : ''}`}>{label}</p>
+      <p className={`font-bold ${prominent ? 'text-2xl' : 'text-lg'} ${valueClass}`}>{value}</p>
+    </div>
+  )
+}
+
+function ActionBtn({
+  title,
+  icon,
+  onClick,
+  colorClass = 'hover:text-[#D4AF37]',
+}: {
+  title: string
+  icon: React.ReactNode
+  onClick: () => void
+  colorClass?: string
+}) {
+  return (
+    <button
+      title={title}
+      type="button"
+      className={`p-1 rounded text-gray-400 transition-colors ${colorClass}`}
+      onClick={onClick}
+    >
+      {icon}
+    </button>
+  )
+}
+
+function InlineBtn({
+  icon,
+  label,
+  onClick,
+  extraClass = '',
+}: {
+  icon: React.ReactNode
+  label: string
+  onClick: () => void
+  extraClass?: string
+}) {
+  return (
+    <button
+      type="button"
+      className={`inline-flex items-center gap-1 text-xs border rounded px-2 py-1 hover:bg-white transition-colors text-gray-600 ${extraClass}`}
+      style={{ borderColor: '#d4af37' }}
+      onClick={onClick}
+    >
+      {icon} {label}
+    </button>
   )
 }
