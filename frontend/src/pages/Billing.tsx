@@ -122,14 +122,14 @@ export default function Billing() {
   const [collapsedDates, setCollapsedDates] = useState<Record<string, boolean>>({})
 
   const page = Number(searchParams.get('page') || '1')
-  const statusFilter = searchParams.get('status') || ''
-  const search = searchParams.get('q') || ''
-  const dateFrom = searchParams.get('from') || ''
-  const dateTo = searchParams.get('to') || ''
+  const statusFilter = searchParams.get('payment_status') || ''
+  const search = searchParams.get('search') || ''
+  const dateFrom = searchParams.get('from_date') || ''
+  const dateTo = searchParams.get('to_date') || ''
   const month = searchParams.get('month') || getDefaultMonth()
   const minAmount = searchParams.get('min_amount') || ''
   const maxAmount = searchParams.get('max_amount') || ''
-  const returned = searchParams.get('returned') || ''
+  const returned = searchParams.get('is_return') || ''
   const paidState = searchParams.get('paid_state') || ''
 
   const [searchInput, setSearchInput] = useState(search)
@@ -144,8 +144,8 @@ export default function Billing() {
     const id = setTimeout(() => {
       const next = new URLSearchParams(searchParams)
       const trimmed = searchInput.trim()
-      if (trimmed) next.set('q', trimmed)
-      else next.delete('q')
+      if (trimmed) next.set('search', trimmed)
+      else next.delete('search')
       next.set('page', '1')
       setSearchParams(next, { replace: true })
     }, 300)
@@ -167,14 +167,13 @@ export default function Billing() {
         params: {
           page,
           page_size: 200,
-          status: statusFilter || undefined,
-          q: undefined,
+          payment_status: statusFilter || undefined,
           search: search || undefined,
-          date_from: dateFrom || undefined,
-          date_to: dateTo || undefined,
+          from_date: dateFrom || undefined,
+          to_date: dateTo || undefined,
           min_amount: minAmount || undefined,
           max_amount: maxAmount || undefined,
-          returned: returned === '' ? undefined : returned === 'true',
+          is_return: returned === '' ? undefined : returned === 'true',
           paid_state: paidState || undefined,
         },
       }).then((r) => r.data),
@@ -330,8 +329,8 @@ export default function Billing() {
     const bounds = monthBounds(nextMonth)
     const next = new URLSearchParams(searchParams)
     next.set('month', nextMonth)
-    next.set('from', bounds.from)
-    next.set('to', bounds.to)
+    next.set('from_date', bounds.from)
+    next.set('to_date', bounds.to)
     next.set('page', '1')
     setSearchParams(next, { replace: true })
   }
@@ -355,9 +354,17 @@ export default function Billing() {
     }
 
     const next = new URLSearchParams(searchParams)
-    next.set('from', from)
-    next.set('to', to)
+    next.set('from_date', from)
+    next.set('to_date', to)
     next.set('page', '1')
+    setSearchParams(next, { replace: true })
+  }
+
+  const clearFilters = () => {
+    const next = new URLSearchParams(searchParams)
+    ;['search', 'from_date', 'to_date', 'payment_status', 'paid_state', 'min_amount', 'max_amount', 'is_return', 'month'].forEach((k) => next.delete(k))
+    next.set('page', '1')
+    setSearchInput('')
     setSearchParams(next, { replace: true })
   }
 
@@ -407,8 +414,8 @@ export default function Billing() {
                 const bounds = monthBounds(val)
                 const next = new URLSearchParams(searchParams)
                 next.set('month', val)
-                next.set('from', bounds.from)
-                next.set('to', bounds.to)
+                next.set('from_date', bounds.from)
+                next.set('to_date', bounds.to)
                 next.set('page', '1')
                 setSearchParams(next, { replace: true })
               }}
@@ -428,7 +435,7 @@ export default function Billing() {
           <Search size={14} className="absolute left-3 top-3 text-gray-400" />
           <input className="form-input pl-8" placeholder="Search client, phone, service, notes, record id..." value={searchInput} onChange={(e) => setSearchInput(e.target.value)} />
         </div>
-        <select className="form-input" value={statusFilter} onChange={(e) => setParam('status', e.target.value)}>
+        <select className="form-input" value={statusFilter} onChange={(e) => setParam('payment_status', e.target.value)}>
           <option value="">All payment status</option>
           <option value="PAID">PAID</option>
           <option value="PART PAYMENT">PART PAYMENT</option>
@@ -440,16 +447,31 @@ export default function Billing() {
           <option value="paid">Paid only</option>
           <option value="unpaid">Unpaid/partial</option>
         </select>
-        <input type="date" className="form-input" value={dateFrom} onChange={(e) => setParam('from', e.target.value)} />
-        <input type="date" className="form-input" value={dateTo} onChange={(e) => setParam('to', e.target.value)} />
+        <input type="date" className="form-input" value={dateFrom} onChange={(e) => setParam('from_date', e.target.value)} />
+        <input type="date" className="form-input" value={dateTo} onChange={(e) => setParam('to_date', e.target.value)} />
         <input type="number" min="0" className="form-input" placeholder="Min amount" value={minAmount} onChange={(e) => setParam('min_amount', e.target.value)} />
         <input type="number" min="0" className="form-input" placeholder="Max amount" value={maxAmount} onChange={(e) => setParam('max_amount', e.target.value)} />
-        <select className="form-input" value={returned} onChange={(e) => setParam('returned', e.target.value)}>
+        <select className="form-input" value={returned} onChange={(e) => setParam('is_return', e.target.value)}>
           <option value="">All return states</option>
           <option value="false">Not returned</option>
           <option value="true">Returned</option>
         </select>
+        <button type="button" className="btn-secondary" onClick={clearFilters}>Clear Filters</button>
       </div>
+
+      {(search || dateFrom || dateTo || statusFilter || paidState || minAmount || maxAmount || returned) && (
+        <div className="flex flex-wrap items-center gap-2 text-xs">
+          <span className="text-gray-500">Active filters:</span>
+          {search && <span className="rounded-full border px-2 py-1" style={{ borderColor: '#d4af37' }}>Search: {search}</span>}
+          {dateFrom && <span className="rounded-full border px-2 py-1" style={{ borderColor: '#d4af37' }}>From: {dateFrom}</span>}
+          {dateTo && <span className="rounded-full border px-2 py-1" style={{ borderColor: '#d4af37' }}>To: {dateTo}</span>}
+          {statusFilter && <span className="rounded-full border px-2 py-1" style={{ borderColor: '#d4af37' }}>Status: {statusFilter}</span>}
+          {paidState && <span className="rounded-full border px-2 py-1" style={{ borderColor: '#d4af37' }}>Paid: {paidState}</span>}
+          {minAmount && <span className="rounded-full border px-2 py-1" style={{ borderColor: '#d4af37' }}>Min: {minAmount}</span>}
+          {maxAmount && <span className="rounded-full border px-2 py-1" style={{ borderColor: '#d4af37' }}>Max: {maxAmount}</span>}
+          {returned && <span className="rounded-full border px-2 py-1" style={{ borderColor: '#d4af37' }}>Returned: {returned}</span>}
+        </div>
+      )}
 
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
         <div className="card p-3">

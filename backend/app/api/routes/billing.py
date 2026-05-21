@@ -301,13 +301,17 @@ class BillingUpdate(BaseModel):
 @router.get("")
 def list_billing(
     status: Optional[str] = Query(None),
+    payment_status: Optional[str] = Query(None),
     client_id: Optional[str] = Query(None),
     search: Optional[str] = Query(None),
     date_from: Optional[str] = Query(None),
     date_to: Optional[str] = Query(None),
+    from_date: Optional[str] = Query(None),
+    to_date: Optional[str] = Query(None),
     min_amount: Optional[float] = Query(None),
     max_amount: Optional[float] = Query(None),
     returned: Optional[bool] = Query(None),
+    is_return: Optional[bool] = Query(None),
     paid_state: Optional[str] = Query(None),
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
@@ -321,24 +325,28 @@ def list_billing(
         .order("service_date", desc=True)
         .range(offset, offset + page_size - 1)
     )
-    if status:
-        normalized = status.strip().upper()
+    normalized_status_input = (payment_status or status or "").strip()
+    if normalized_status_input:
+        normalized = normalized_status_input.upper()
         if normalized in {"PARTIAL", "PART PAYMENT"}:
             query = query.in_("payment_status", ["PARTIAL", "PART PAYMENT"])
         else:
             query = query.eq("payment_status", normalized)
     if client_id:
         query = query.eq("client_id", client_id)
-    if date_from:
-        query = query.gte("service_date", _iso_date_or_none(date_from))
-    if date_to:
-        query = query.lte("service_date", _iso_date_or_none(date_to))
+    effective_from = from_date or date_from
+    effective_to = to_date or date_to
+    if effective_from:
+        query = query.gte("service_date", _iso_date_or_none(effective_from))
+    if effective_to:
+        query = query.lte("service_date", _iso_date_or_none(effective_to))
     if min_amount is not None:
         query = query.gte("amount_charged", min_amount)
     if max_amount is not None:
         query = query.lte("amount_charged", max_amount)
-    if returned is not None:
-        query = query.eq("is_return", returned)
+    effective_is_return = is_return if is_return is not None else returned
+    if effective_is_return is not None:
+        query = query.eq("is_return", effective_is_return)
 
     if paid_state:
         normalized_paid = paid_state.strip().lower()
@@ -405,13 +413,17 @@ def list_billing(
 @router.get("/grouped")
 def list_billing_grouped(
     status: Optional[str] = Query(None),
+    payment_status: Optional[str] = Query(None),
     client_id: Optional[str] = Query(None),
     search: Optional[str] = Query(None),
     date_from: Optional[str] = Query(None),
     date_to: Optional[str] = Query(None),
+    from_date: Optional[str] = Query(None),
+    to_date: Optional[str] = Query(None),
     min_amount: Optional[float] = Query(None),
     max_amount: Optional[float] = Query(None),
     returned: Optional[bool] = Query(None),
+    is_return: Optional[bool] = Query(None),
     paid_state: Optional[str] = Query(None),
     page: int = Query(1, ge=1),
     page_size: int = Query(200, ge=1, le=500),
@@ -427,24 +439,28 @@ def list_billing_grouped(
         .range(offset, offset + page_size - 1)
     )
 
-    if status:
-        normalized = status.strip().upper()
+    normalized_status_input = (payment_status or status or "").strip()
+    if normalized_status_input:
+        normalized = normalized_status_input.upper()
         if normalized in {"PARTIAL", "PART PAYMENT"}:
             query = query.in_("payment_status", ["PARTIAL", "PART PAYMENT"])
         else:
             query = query.eq("payment_status", normalized)
     if client_id:
         query = query.eq("client_id", client_id)
-    if date_from:
-        query = query.gte("service_date", _iso_date_or_none(date_from))
-    if date_to:
-        query = query.lte("service_date", _iso_date_or_none(date_to))
+    effective_from = from_date or date_from
+    effective_to = to_date or date_to
+    if effective_from:
+        query = query.gte("service_date", _iso_date_or_none(effective_from))
+    if effective_to:
+        query = query.lte("service_date", _iso_date_or_none(effective_to))
     if min_amount is not None:
         query = query.gte("amount_charged", min_amount)
     if max_amount is not None:
         query = query.lte("amount_charged", max_amount)
-    if returned is not None:
-        query = query.eq("is_return", returned)
+    effective_is_return = is_return if is_return is not None else returned
+    if effective_is_return is not None:
+        query = query.eq("is_return", effective_is_return)
     if paid_state:
         normalized_paid = paid_state.strip().lower()
         if normalized_paid == "paid":
