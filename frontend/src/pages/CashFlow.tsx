@@ -5,10 +5,11 @@ import { formatCurrency } from '@/lib/utils'
 import { DollarSign, RefreshCw, Wallet } from 'lucide-react'
 import { useRef, useState } from 'react'
 import toast from 'react-hot-toast'
+import { useRealtimeCashflow } from '@/lib/realtime'
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 const PAGE_SIZE = 50                      // default page size (backend max = 100)
-const REFETCH_INTERVAL_MS = 60_000        // background refresh every 60 s
+const REFETCH_INTERVAL_MS = 180_000       // background poll (realtime covers fast updates)
 
 function StatCard({ label, value, icon: Icon, color }: { label: string; value: string | number; icon: React.ElementType; color: string }) {
   return (
@@ -132,7 +133,8 @@ export default function CashFlow() {
   const queryKey = ['cashflow-page-data', expensePage, withdrawalsPage, PAGE_SIZE] as const
 
   // ── Main query ──────────────────────────────────────────────────────────────
-  // - refetchInterval: background refresh every 60 s (multi-admin consistency).
+  // - refetchInterval: background poll every 180 s (realtime subscription covers
+  //   most updates; polling is a safety-net for reconnect and missed events).
   // - refetchOnWindowFocus: true keeps multi-tab views in sync automatically.
   const { data: pageData, isLoading, isError, refetch } = useQuery<CashflowPageData>({
     queryKey,
@@ -149,6 +151,10 @@ export default function CashFlow() {
     refetchInterval: REFETCH_INTERVAL_MS,
     refetchOnWindowFocus: true,
   })
+
+  // ── Realtime invalidation ───────────────────────────────────────────────────
+  useRealtimeCashflow(() => qc.invalidateQueries({ queryKey: ['cashflow-page-data'] }))
+
   const currency = pageData?.currency ?? localStorage.getItem('currency') ?? 'NGN'
 
   const refreshMutation = useMutation({

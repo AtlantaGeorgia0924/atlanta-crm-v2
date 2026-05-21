@@ -2,15 +2,17 @@
 
 Architecture notes:
 - /cashflow/page-data is the single aggregated endpoint for the CashFlow page.
-- Statement metrics are cached in-process for STATEMENT_CACHE_TTL_SECONDS to avoid
-  re-hitting app_settings on every request.  The cache is invalidated whenever
-  create_expense, reverse_expense or withdraw_allowance mutates financial state.
+- Statement metrics are cached via Redis (STATEMENT_CACHE_KEY) with 60 s TTL,
+    shared across all Render instances.  Falls back to in-process cache when Redis
+    is unavailable.
+- Every financial mutation calls emit_financial_event() which in one call:
+        invalidates all financial caches, writes audit log, structured-logs the event,
+        and enqueues a background metrics rebuild job via RQ.
 - Expenses and withdrawals are paginated (default 50, max 100).  Only the fields
-  consumed by the frontend are projected to keep payloads lightweight.
+    consumed by the frontend are projected to keep payloads lightweight.
 - Slow-query logging warns when /page-data exceeds SLOW_QUERY_THRESHOLD_MS.
-- Every mutation writes a row to cashflow_audit_log for full auditability.
-- page-data is built with partial-response protection: if expenses or withdrawals
-  query fails, the remaining sections are still returned with an error marker.
+- page-data has partial-response protection: if expenses or withdrawals fail,
+    the remaining sections still return with section-level error keys.
 """
 import logging
 import time
@@ -18,7 +20,7 @@ from datetime import datetime
 from typing import Any, Optional
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from app.db.supabase_client import get_supabase
@@ -26,78 +28,20 @@ from app.core.auth import get_current_user
 from app.core.financials import to_number
 from app.core.dashboard_metrics import app_settings_payload, compute_metrics_from_supabase
 from app.core.metrics_refresh import recompute_and_persist_metrics
+from app.core.cache import get_statement_cache, set_statement_cache
+from app.core.financial_events import emit_financial_event
+from app.core.logging_config import record_latency
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-# ── In-process statement cache ────────────────────────────────────────────────
-# Simple TTL cache keyed by supabase project URL to be multi-process safe on
-# restarts. On Render, each dyno is a single process so this works well.
-_STATEMENT_CACHE: dict[str, tuple[float, dict]] = {}
-STATEMENT_CACHE_TTL_SECONDS = 60          # cache lifetime in seconds
-SLOW_QUERY_THRESHOLD_MS = 1000            # warn if page-data exceeds 1 s
+SLOW_QUERY_THRESHOLD_MS = 1000
 PAGE_SIZE_DEFAULT = 50
 PAGE_SIZE_MAX = 100
 
-# Fields returned to the frontend for each table (projection keeps payloads small).
 _EXPENSE_FIELDS = "id,amount,description,expense_date,is_reversed,reversed_at"
 _WITHDRAWAL_FIELDS = "id,week_key,amount,withdrawn_at,status"
-
-
-# ── Statement cache helpers ───────────────────────────────────────────────────
-
-def _cache_key(sb) -> str:
-    """Return a stable per-project cache key."""
-    try:
-        return sb.supabase_url
-    except Exception:
-        return "default"
-
-
-def _cache_get(sb) -> Optional[dict]:
-    key = _cache_key(sb)
-    entry = _STATEMENT_CACHE.get(key)
-    if not entry:
-        return None
-    stored_at, data = entry
-    if time.monotonic() - stored_at > STATEMENT_CACHE_TTL_SECONDS:
-        _STATEMENT_CACHE.pop(key, None)
-        return None
-    return data
-
-
-def _cache_set(sb, statement: dict) -> None:
-    _STATEMENT_CACHE[_cache_key(sb)] = (time.monotonic(), statement)
-
-
-def _cache_invalidate(sb) -> None:
-    _STATEMENT_CACHE.pop(_cache_key(sb), None)
-
-
-# ── Audit log writer ──────────────────────────────────────────────────────────
-
-def _write_audit(
-    sb,
-    action: str,
-    amount: float,
-    performed_by: str,
-    related_record_id: Optional[str],
-    detail: Optional[dict] = None,
-) -> None:
-    try:
-        sb.table("cashflow_audit_log").insert(
-            {
-                "action": action,
-                "amount": amount,
-                "performed_by": performed_by,
-                "related_record_id": related_record_id,
-                "detail": detail,
-                "created_at": datetime.utcnow().isoformat(),
-            }
-        ).execute()
-    except Exception as exc:
-        logger.warning("audit_log_write_failed action=%s error=%s", action, exc)
 
 
 # ── Statement helpers ─────────────────────────────────────────────────────────
@@ -156,7 +100,7 @@ def _read_statement_from_settings(sb):
 
 
 def _statement_or_fallback(sb):
-    cached = _cache_get(sb)
+    cached = get_statement_cache()
     if cached is not None:
         return cached
 
@@ -174,7 +118,7 @@ def _statement_or_fallback(sb):
     else:
         result = statement
 
-    _cache_set(sb, result)
+    set_statement_cache(result)
     return result
 
 
@@ -336,6 +280,8 @@ def get_cashflow_page_data(
             elapsed_ms, expense_page, withdrawals_page, page_size,
         )
 
+    record_latency("cashflow.page_data", elapsed_ms)
+
     response: dict[str, Any] = {
         "statement": statement,
         "expenses": expenses,
@@ -383,16 +329,13 @@ def create_cashflow_expense(payload: CashflowExpenseCreate, _user=Depends(get_cu
 
     inserted = sb.table("cashflow_expenses").insert(row).execute().data or []
 
-    _cache_invalidate(sb)
-    recompute_and_persist_metrics(sb, source="supabase_after_cashflow_expense")
-
     record = inserted[0] if inserted else row
-    _write_audit(
+    emit_financial_event(
         sb,
-        action="expense_created",
-        amount=amount,
+        "expense_created",
         performed_by=str(_user.id),
-        related_record_id=str(record.get("id", "")),
+        record_id=str(record.get("id", "")),
+        amount=amount,
         detail={"description": payload.description},
     )
     return record
@@ -424,15 +367,13 @@ def reverse_cashflow_expense(expense_id: str, _user=Depends(get_current_user)):
     )
 
     _cache_invalidate(sb)
-    recompute_and_persist_metrics(sb, source="supabase_after_expense_reversal")
-
     record = updated[0] if updated else {"id": expense_id, "is_reversed": True}
-    _write_audit(
+    emit_financial_event(
         sb,
-        action="expense_reversed",
-        amount=to_number(existing.get("amount")),
+        "expense_reversed",
         performed_by=str(_user.id),
-        related_record_id=expense_id,
+        record_id=expense_id,
+        amount=to_number(existing.get("amount")),
     )
     return record
 
@@ -488,15 +429,13 @@ def withdraw_allowance(payload: AllowanceWithdrawRequest, _user=Depends(get_curr
     inserted = sb.table("allowance_withdrawals").insert(row).execute().data or []
 
     _cache_invalidate(sb)
-    recompute_and_persist_metrics(sb, source="supabase_after_allowance_withdrawal")
-
     record = inserted[0] if inserted else row
-    _write_audit(
+    emit_financial_event(
         sb,
-        action="allowance_withdrawn",
-        amount=requested_amount,
+        "allowance_withdrawn",
         performed_by=str(_user.id),
-        related_record_id=str(record.get("id", "")),
+        record_id=str(record.get("id", "")),
+        amount=requested_amount,
         detail={"week_key": week_key},
     )
     return record

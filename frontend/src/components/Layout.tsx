@@ -3,7 +3,7 @@ import { useMemo, useState } from 'react'
 import {
   LayoutDashboard, Users, FileText, Package,
   AlertCircle, DollarSign, TrendingDown, BarChart2,
-  Settings, RefreshCw, Sheet, LogOut,
+  Settings, RefreshCw, Sheet, LogOut, ClipboardList,
 } from 'lucide-react'
 import { useAuthStore } from '@/store/authStore'
 import api from '@/lib/api'
@@ -19,6 +19,7 @@ const nav = [
   { to: '/expenses',   label: 'Expenses',     icon: TrendingDown },
   { to: '/allowances', label: 'Allowances',   icon: DollarSign },
   { to: '/cashflow',   label: 'Cash Flow',    icon: BarChart2 },
+  { to: '/cashflow/audit', label: 'Audit Log', icon: ClipboardList },
   { to: '/settings',   label: 'Settings',     icon: Settings },
 ]
 

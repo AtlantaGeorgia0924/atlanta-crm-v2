@@ -12,6 +12,7 @@ import Expenses from '@/pages/Expenses'
 import Allowances from '@/pages/Allowances'
 import CashFlow from '@/pages/CashFlow'
 import Settings from '@/pages/Settings'
+import CashFlowAudit from '@/pages/CashFlowAudit'
 
 function RequireAuth({ children }: { children: JSX.Element }) {
   const token = useAuthStore((s) => s.token)
@@ -42,6 +43,7 @@ export default function App() {
           <Route path="expenses"    element={<Expenses />} />
           <Route path="allowances"  element={<Allowances />} />
           <Route path="cashflow"    element={<CashFlow />} />
+          <Route path="cashflow/audit" element={<CashFlowAudit />} />
           <Route path="settings"    element={<Settings />} />
         </Route>
       </Routes>

@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     # App
     ALLOWED_ORIGINS: str = "http://localhost:5173,https://your-vercel-app.vercel.app"
     ENV: str = "development"
+    REDIS_URL: str = ""
 
     @property
     def origins(self) -> list[str]:
