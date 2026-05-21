@@ -6,11 +6,7 @@ import { DollarSign, RefreshCw, Wallet } from 'lucide-react'
 import { useState } from 'react'
 import toast from 'react-hot-toast'
 
-interface DashboardSummary {
-  amount_owed: number
-  monthly_sales: number
-  net_profit: number
-}
+const PAGE_SIZE = 50
 
 function StatCard({ label, value, icon: Icon, color }: { label: string; value: string | number; icon: React.ElementType; color: string }) {
   return (
@@ -27,6 +23,8 @@ function StatCard({ label, value, icon: Icon, color }: { label: string; value: s
 }
 
 interface Statement {
+  amount_owed: number
+  monthly_sales: number
   total_sales: number
   total_collected: number
   total_outstanding: number
@@ -62,85 +60,234 @@ interface AllowanceWithdrawal {
   status: 'YES' | 'NO'
 }
 
+interface PaginatedResult<T> {
+  items: T[]
+  page: number
+  page_size: number
+  total_count: number
+  total_pages: number
+}
+
+interface CashflowPageData {
+  statement: Statement
+  expenses: PaginatedResult<CashflowExpense>
+  withdrawals: PaginatedResult<AllowanceWithdrawal>
+  currency: string
+}
+
+function formatLagosDateTime(value?: string) {
+  if (!value) return '-'
+  return new Intl.DateTimeFormat('en-NG', {
+    timeZone: 'Africa/Lagos',
+    dateStyle: 'medium',
+    timeStyle: 'short',
+  }).format(new Date(value))
+}
+
 export default function CashFlow() {
   const qc = useQueryClient()
   const [expenseAmount, setExpenseAmount] = useState('')
   const [expenseDescription, setExpenseDescription] = useState('')
+  const [expensePage, setExpensePage] = useState(1)
+  const [withdrawalsPage, setWithdrawalsPage] = useState(1)
+  const [reversingIds, setReversingIds] = useState<Set<string>>(new Set())
 
-  const { data, isLoading } = useQuery<Statement>({
-    queryKey: ['cashflow-statement'],
-    queryFn: () => api.get('/cashflow/statement').then((r) => r.data),
-  })
+  const queryKey = ['cashflow-page-data', expensePage, withdrawalsPage, PAGE_SIZE] as const
 
-  const { data: dashboardSummary } = useQuery<DashboardSummary>({
-    queryKey: ['dashboard'],
-    queryFn: () => api.get('/dashboard').then((r) => r.data),
+  const { data: pageData, isLoading, isError, refetch } = useQuery<CashflowPageData>({
+    queryKey,
+    queryFn: () =>
+      api
+        .get('/cashflow/page-data', {
+          params: {
+            expense_page: expensePage,
+            withdrawals_page: withdrawalsPage,
+            page_size: PAGE_SIZE,
+          },
+        })
+        .then((r) => r.data),
   })
-
-  const { data: expenses } = useQuery<CashflowExpense[]>({
-    queryKey: ['cashflow-expenses'],
-    queryFn: () => api.get('/cashflow/expenses').then((r) => r.data),
-  })
-
-  const { data: withdrawals } = useQuery<AllowanceWithdrawal[]>({
-    queryKey: ['allowance-withdrawals'],
-    queryFn: () => api.get('/cashflow/allowance-withdrawals').then((r) => r.data),
-  })
-
-  const { data: status } = useQuery<{ currency?: string }>({
-    queryKey: ['system-status'],
-    queryFn: () => api.get('/settings/status').then((r) => r.data),
-  })
-  const currency = status?.currency ?? localStorage.getItem('currency') ?? 'NGN'
+  const currency = pageData?.currency ?? localStorage.getItem('currency') ?? 'NGN'
 
   const refreshMutation = useMutation({
     mutationFn: () => api.post('/sync/refresh-workspace'),
     onSuccess: () => {
       toast.success('Metrics refreshed from Supabase')
-      qc.invalidateQueries({ queryKey: ['cashflow-statement'] })
-      qc.invalidateQueries({ queryKey: ['dashboard'] })
+      qc.invalidateQueries({ queryKey: ['cashflow-page-data'] })
     },
   })
 
   const createExpenseMutation = useMutation({
-    mutationFn: () =>
+    mutationFn: ({ amount, description }: { amount: number; description: string | null }) =>
       api.post('/cashflow/expenses', {
-        amount: Number(expenseAmount),
-        description: expenseDescription || null,
+        amount,
+        description,
       }),
-    onSuccess: () => {
-      toast.success('Expense added')
+    onMutate: async ({ amount, description }) => {
+      await qc.cancelQueries({ queryKey })
+      const previous = qc.getQueryData<CashflowPageData>(queryKey)
+
+      if (previous) {
+        const optimistic: CashflowExpense = {
+          id: `temp-${Date.now()}`,
+          amount,
+          description: description ?? undefined,
+          expense_date: new Date().toISOString(),
+          is_reversed: false,
+        }
+        const nextItems = expensePage === 1 ? [optimistic, ...previous.expenses.items].slice(0, PAGE_SIZE) : previous.expenses.items
+        const nextCount = previous.expenses.total_count + 1
+
+        qc.setQueryData<CashflowPageData>(queryKey, {
+          ...previous,
+          expenses: {
+            ...previous.expenses,
+            items: nextItems,
+            total_count: nextCount,
+            total_pages: Math.max(1, Math.ceil(nextCount / PAGE_SIZE)),
+          },
+        })
+      }
+
       setExpenseAmount('')
       setExpenseDescription('')
-      qc.invalidateQueries({ queryKey: ['cashflow-expenses'] })
-      qc.invalidateQueries({ queryKey: ['cashflow-statement'] })
+      return { previous }
     },
-    onError: (e: any) => toast.error(e?.response?.data?.detail ?? 'Failed to add expense'),
+    onSuccess: () => {
+      toast.success('Expense added')
+    },
+    onError: (e: any, _vars, context) => {
+      if (context?.previous) {
+        qc.setQueryData(queryKey, context.previous)
+      }
+      toast.error(e?.response?.data?.detail ?? 'Failed to add expense')
+    },
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: ['cashflow-page-data'] })
+    },
   })
 
   const reverseExpenseMutation = useMutation({
     mutationFn: (expenseId: string) => api.post(`/cashflow/expenses/${expenseId}/reverse`),
+    onMutate: async (expenseId: string) => {
+      setReversingIds((prev) => new Set(prev).add(expenseId))
+      await qc.cancelQueries({ queryKey })
+      const previous = qc.getQueryData<CashflowPageData>(queryKey)
+
+      if (previous) {
+        qc.setQueryData<CashflowPageData>(queryKey, {
+          ...previous,
+          expenses: {
+            ...previous.expenses,
+            items: previous.expenses.items.map((item) =>
+              item.id === expenseId ? { ...item, is_reversed: true, reversed_at: new Date().toISOString() } : item,
+            ),
+          },
+        })
+      }
+
+      return { previous, expenseId }
+    },
     onSuccess: () => {
       toast.success('Expense reversed')
-      qc.invalidateQueries({ queryKey: ['cashflow-expenses'] })
-      qc.invalidateQueries({ queryKey: ['cashflow-statement'] })
     },
-    onError: (e: any) => toast.error(e?.response?.data?.detail ?? 'Failed to reverse expense'),
+    onError: (e: any, _vars, context) => {
+      if (context?.previous) {
+        qc.setQueryData(queryKey, context.previous)
+      }
+      toast.error(e?.response?.data?.detail ?? 'Failed to reverse expense')
+    },
+    onSettled: (_data, _error, expenseId) => {
+      setReversingIds((prev) => {
+        const next = new Set(prev)
+        next.delete(expenseId)
+        return next
+      })
+      qc.invalidateQueries({ queryKey: ['cashflow-page-data'] })
+    },
   })
 
   const withdrawAllowanceMutation = useMutation({
     mutationFn: () => api.post('/cashflow/allowance-withdrawals/withdraw', {}),
+    onMutate: async () => {
+      await qc.cancelQueries({ queryKey })
+      const previous = qc.getQueryData<CashflowPageData>(queryKey)
+
+      if (previous) {
+        const optimistic: AllowanceWithdrawal = {
+          id: `temp-${Date.now()}`,
+          week_key: 'Current Week',
+          amount: previous.statement.next_week_allowance,
+          withdrawn_at: new Date().toISOString(),
+          status: 'YES',
+        }
+        const nextItems = withdrawalsPage === 1 ? [optimistic, ...previous.withdrawals.items].slice(0, PAGE_SIZE) : previous.withdrawals.items
+        const nextCount = previous.withdrawals.total_count + 1
+
+        qc.setQueryData<CashflowPageData>(queryKey, {
+          ...previous,
+          statement: {
+            ...previous.statement,
+            next_week_allowance: 0,
+          },
+          withdrawals: {
+            ...previous.withdrawals,
+            items: nextItems,
+            total_count: nextCount,
+            total_pages: Math.max(1, Math.ceil(nextCount / PAGE_SIZE)),
+          },
+        })
+      }
+
+      return { previous }
+    },
     onSuccess: () => {
       toast.success('Allowance withdrawn')
-      qc.invalidateQueries({ queryKey: ['allowance-withdrawals'] })
-      qc.invalidateQueries({ queryKey: ['cashflow-statement'] })
     },
-    onError: (e: any) => toast.error(e?.response?.data?.detail ?? 'Allowance withdrawal failed'),
+    onError: (e: any, _vars, context) => {
+      if (context?.previous) {
+        qc.setQueryData(queryKey, context.previous)
+      }
+      toast.error(e?.response?.data?.detail ?? 'Allowance withdrawal failed')
+    },
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: ['cashflow-page-data'] })
+    },
   })
 
   if (isLoading) return <LoadingSpinner />
 
-  const statement = data ?? {
+  if (isError) {
+    return (
+      <div className="p-8">
+        <div className="card space-y-3">
+          <h2 className="text-lg font-semibold text-red-700">Could not load Cash Flow data</h2>
+          <p className="text-sm text-gray-600">Please check your connection and try again.</p>
+          <button className="btn-secondary" onClick={() => refetch()}>
+            Retry
+          </button>
+        </div>
+      </div>
+    )
+  }
+
+  if (!pageData?.statement) {
+    return (
+      <div className="p-8">
+        <div className="card space-y-3">
+          <h2 className="text-lg font-semibold">No Cash Flow statement available</h2>
+          <p className="text-sm text-gray-600">Refresh workspace to generate financial metrics.</p>
+          <button className="btn-secondary" onClick={() => refreshMutation.mutate()} disabled={refreshMutation.isPending}>
+            {refreshMutation.isPending ? 'Refreshing...' : 'Refresh Workspace'}
+          </button>
+        </div>
+      </div>
+    )
+  }
+
+  const statement = pageData?.statement ?? {
+    amount_owed: 0,
+    monthly_sales: 0,
     total_sales: 0,
     total_collected: 0,
     total_outstanding: 0,
@@ -158,6 +305,8 @@ export default function CashFlow() {
     net_profit_of_the_month: 0,
     net_profit_left_this_month: 0,
   }
+  const expenses = pageData?.expenses.items ?? []
+  const withdrawals = pageData?.withdrawals.items ?? []
 
   return (
     <div className="p-8 space-y-6">
@@ -172,19 +321,19 @@ export default function CashFlow() {
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
         <StatCard
           label="Amount Owed"
-          value={formatCurrency(dashboardSummary?.amount_owed ?? 0, currency)}
+          value={formatCurrency(statement.amount_owed, currency)}
           icon={Wallet}
           color="bg-rose-500"
         />
         <StatCard
           label="Monthly Sales"
-          value={formatCurrency(dashboardSummary?.monthly_sales ?? 0, currency)}
+          value={formatCurrency(statement.monthly_sales, currency)}
           icon={DollarSign}
           color="bg-teal-500"
         />
         <StatCard
           label="Net Profit"
-          value={formatCurrency(dashboardSummary?.net_profit ?? 0, currency)}
+          value={formatCurrency(statement.net_profit, currency)}
           icon={DollarSign}
           color="bg-emerald-600"
         />
@@ -229,7 +378,12 @@ export default function CashFlow() {
             <button
               className="btn-primary"
               disabled={!Number(expenseAmount) || createExpenseMutation.isPending}
-              onClick={() => createExpenseMutation.mutate()}
+              onClick={() =>
+                createExpenseMutation.mutate({
+                  amount: Number(expenseAmount),
+                  description: expenseDescription || null,
+                })
+              }
             >
               {createExpenseMutation.isPending ? 'Saving...' : 'Save Expense'}
             </button>
@@ -252,7 +406,28 @@ export default function CashFlow() {
       </div>
 
       <div className="card">
-        <h2 className="text-lg font-semibold mb-3">Expense History</h2>
+        <div className="mb-3 flex items-center justify-between">
+          <h2 className="text-lg font-semibold">Expense History</h2>
+          <div className="flex items-center gap-2 text-xs text-gray-600">
+            <button
+              className="btn-secondary"
+              disabled={expensePage <= 1}
+              onClick={() => setExpensePage((p) => Math.max(1, p - 1))}
+            >
+              Previous
+            </button>
+            <span>
+              Page {pageData?.expenses.page ?? 1} of {pageData?.expenses.total_pages ?? 1}
+            </span>
+            <button
+              className="btn-secondary"
+              disabled={expensePage >= (pageData?.expenses.total_pages ?? 1)}
+              onClick={() => setExpensePage((p) => Math.min(pageData?.expenses.total_pages ?? p, p + 1))}
+            >
+              Next
+            </button>
+          </div>
+        </div>
         <div className="overflow-x-auto">
           <table className="min-w-full text-sm">
             <thead>
@@ -265,9 +440,16 @@ export default function CashFlow() {
               </tr>
             </thead>
             <tbody>
-              {(expenses ?? []).map((row) => (
+              {expenses.length === 0 && (
+                <tr>
+                  <td colSpan={5} className="py-4 text-center text-sm text-gray-500">
+                    No expenses yet.
+                  </td>
+                </tr>
+              )}
+              {expenses.map((row) => (
                 <tr key={row.id} className="border-b">
-                  <td className="py-2 pr-3">{new Date(row.expense_date).toLocaleString()}</td>
+                  <td className="py-2 pr-3">{formatLagosDateTime(row.expense_date)}</td>
                   <td className="py-2 pr-3">{row.description || '-'}</td>
                   <td className="py-2 pr-3">{formatCurrency(row.amount, currency)}</td>
                   <td className="py-2 pr-3">{row.is_reversed ? 'Reversed' : 'Active'}</td>
@@ -276,9 +458,9 @@ export default function CashFlow() {
                       <button
                         className="btn-secondary"
                         onClick={() => reverseExpenseMutation.mutate(row.id)}
-                        disabled={reverseExpenseMutation.isPending}
+                        disabled={reversingIds.has(row.id)}
                       >
-                        Reverse
+                        {reversingIds.has(row.id) ? 'Reversing...' : 'Reverse'}
                       </button>
                     )}
                   </td>
@@ -290,7 +472,28 @@ export default function CashFlow() {
       </div>
 
       <div className="card">
-        <h2 className="text-lg font-semibold mb-3">Allowance Withdrawal History</h2>
+        <div className="mb-3 flex items-center justify-between">
+          <h2 className="text-lg font-semibold">Allowance Withdrawal History</h2>
+          <div className="flex items-center gap-2 text-xs text-gray-600">
+            <button
+              className="btn-secondary"
+              disabled={withdrawalsPage <= 1}
+              onClick={() => setWithdrawalsPage((p) => Math.max(1, p - 1))}
+            >
+              Previous
+            </button>
+            <span>
+              Page {pageData?.withdrawals.page ?? 1} of {pageData?.withdrawals.total_pages ?? 1}
+            </span>
+            <button
+              className="btn-secondary"
+              disabled={withdrawalsPage >= (pageData?.withdrawals.total_pages ?? 1)}
+              onClick={() => setWithdrawalsPage((p) => Math.min(pageData?.withdrawals.total_pages ?? p, p + 1))}
+            >
+              Next
+            </button>
+          </div>
+        </div>
         <div className="overflow-x-auto">
           <table className="min-w-full text-sm">
             <thead>
@@ -302,11 +505,18 @@ export default function CashFlow() {
               </tr>
             </thead>
             <tbody>
-              {(withdrawals ?? []).map((row) => (
+              {withdrawals.length === 0 && (
+                <tr>
+                  <td colSpan={4} className="py-4 text-center text-sm text-gray-500">
+                    No allowance withdrawals yet.
+                  </td>
+                </tr>
+              )}
+              {withdrawals.map((row) => (
                 <tr key={row.id} className="border-b">
                   <td className="py-2 pr-3">{row.week_key}</td>
                   <td className="py-2 pr-3">{formatCurrency(row.amount, currency)}</td>
-                  <td className="py-2 pr-3">{row.withdrawn_at ? new Date(row.withdrawn_at).toLocaleString() : '-'}</td>
+                  <td className="py-2 pr-3">{formatLagosDateTime(row.withdrawn_at)}</td>
                   <td className="py-2 pr-3">{row.status}</td>
                 </tr>
               ))}

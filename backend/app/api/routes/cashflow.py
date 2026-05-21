@@ -45,7 +45,7 @@ def _read_statement_from_settings(sb):
         or []
     )
     kv = {row.get("key"): row.get("value") for row in rows}
-    return {
+    statement = {
         "total_sales": to_number(kv.get("finance_total_sales")),
         "total_collected": to_number(kv.get("finance_total_collected")),
         "total_outstanding": to_number(kv.get("finance_total_outstanding")),
@@ -63,6 +63,9 @@ def _read_statement_from_settings(sb):
         "net_profit_of_the_month": to_number(kv.get("finance_net_profit_of_the_month")),
         "net_profit_left_this_month": to_number(kv.get("finance_net_profit_left_this_month")),
     }
+    statement["amount_owed"] = statement["total_outstanding"]
+    statement["monthly_sales"] = statement["total_sales"]
+    return statement
 
 
 def _statement_or_fallback(sb):
@@ -73,8 +76,47 @@ def _statement_or_fallback(sb):
             app_settings_payload(metrics, source="supabase_auto_fallback"),
             on_conflict="key",
         ).execute()
-        return metrics["financial"]
+        financial = dict(metrics["financial"])
+        financial["amount_owed"] = to_number(financial.get("total_outstanding"))
+        financial["monthly_sales"] = to_number(financial.get("total_sales"))
+        return financial
     return statement
+
+
+def _read_currency(sb) -> str:
+    row = (
+        sb.table("app_settings")
+        .select("value")
+        .eq("key", "currency")
+        .limit(1)
+        .execute()
+        .data
+        or []
+    )
+    if not row:
+        return "NGN"
+    return str(row[0].get("value") or "NGN")
+
+
+def _paginate_table(sb, table_name: str, order_by: str, page: int, page_size: int):
+    offset = (page - 1) * page_size
+    response = (
+        sb.table(table_name)
+        .select("*", count="exact")
+        .order(order_by, desc=True)
+        .range(offset, offset + page_size - 1)
+        .execute()
+    )
+    items = response.data or []
+    total_count = int(response.count or 0)
+    total_pages = max(1, (total_count + page_size - 1) // page_size)
+    return {
+        "items": items,
+        "page": page,
+        "page_size": page_size,
+        "total_count": total_count,
+        "total_pages": total_pages,
+    }
 
 
 def _current_week_key(now: datetime) -> str:
@@ -140,6 +182,27 @@ def trigger_refresh(_user=Depends(get_current_user)):
 def get_cashflow_statement(_user=Depends(get_current_user)):
     sb = get_supabase()
     return _statement_or_fallback(sb)
+
+
+@router.get("/page-data")
+def get_cashflow_page_data(
+    expense_page: int = Query(1, ge=1),
+    withdrawals_page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    _user=Depends(get_current_user),
+):
+    sb = get_supabase()
+    statement = _statement_or_fallback(sb)
+    currency = _read_currency(sb)
+    expenses = _paginate_table(sb, "cashflow_expenses", "expense_date", expense_page, page_size)
+    withdrawals = _paginate_table(sb, "allowance_withdrawals", "withdrawn_at", withdrawals_page, page_size)
+
+    return {
+        "statement": statement,
+        "expenses": expenses,
+        "withdrawals": withdrawals,
+        "currency": currency,
+    }
 
 
 @router.get("/expenses")
