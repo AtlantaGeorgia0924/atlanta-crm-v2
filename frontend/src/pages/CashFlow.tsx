@@ -3,10 +3,12 @@ import api from '@/lib/api'
 import LoadingSpinner from '@/components/LoadingSpinner'
 import { formatCurrency } from '@/lib/utils'
 import { DollarSign, RefreshCw, Wallet } from 'lucide-react'
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import toast from 'react-hot-toast'
 
-const PAGE_SIZE = 50
+// ── Constants ─────────────────────────────────────────────────────────────────
+const PAGE_SIZE = 50                      // default page size (backend max = 100)
+const REFETCH_INTERVAL_MS = 60_000        // background refresh every 60 s
 
 function StatCard({ label, value, icon: Icon, color }: { label: string; value: string | number; icon: React.ElementType; color: string }) {
   return (
@@ -18,6 +20,14 @@ function StatCard({ label, value, icon: Icon, color }: { label: string; value: s
         <p className="text-sm text-gray-500">{label}</p>
         <p className="text-xl font-bold text-gray-900">{value}</p>
       </div>
+    </div>
+  )
+}
+
+function SectionError({ message }: { message: string }) {
+  return (
+    <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+      {message}
     </div>
   )
 }
@@ -68,11 +78,30 @@ interface PaginatedResult<T> {
   total_pages: number
 }
 
+// Backend returns section-level error keys when a sub-query fails (partial-response).
 interface CashflowPageData {
-  statement: Statement
+  statement: Statement | null
+  statement_error?: string
   expenses: PaginatedResult<CashflowExpense>
+  expenses_error?: string
   withdrawals: PaginatedResult<AllowanceWithdrawal>
+  withdrawals_error?: string
   currency: string
+  elapsed_ms?: number
+}
+
+// ── Safe defaults ─────────────────────────────────────────────────────────────
+const EMPTY_STATEMENT: Statement = {
+  amount_owed: 0, monthly_sales: 0, total_sales: 0, total_collected: 0,
+  total_outstanding: 0, total_expenses: 0, total_service_expenses: 0,
+  total_allowances: 0, gross_profit: 0, net_profit: 0, profit_seen_this_week: 0,
+  expenses_of_the_week: 0, net_profit_of_the_week: 0, next_week_allowance: 0,
+  profit_seen_this_month: 0, expenses_of_the_month: 0, net_profit_of_the_month: 0,
+  net_profit_left_this_month: 0,
+}
+
+function emptyPaginated<T>(): PaginatedResult<T> {
+  return { items: [], page: 1, page_size: PAGE_SIZE, total_count: 0, total_pages: 1 }
 }
 
 function formatLagosDateTime(value?: string) {
@@ -92,8 +121,19 @@ export default function CashFlow() {
   const [withdrawalsPage, setWithdrawalsPage] = useState(1)
   const [reversingIds, setReversingIds] = useState<Set<string>>(new Set())
 
+  // Ref-based mutation locks to guard against rapid-click race conditions.
+  // These complement the `isPending` disabled state but fire before re-render.
+  const createLockRef = useRef(false)
+  const withdrawLockRef = useRef(false)
+
+  // ── Stable cache key ─────────────────────────────────────────────────────────────
+  // PAGE_SIZE is part of the key so a future dynamic page-size change creates
+  // a distinct cache entry rather than reusing stale paginated data.
   const queryKey = ['cashflow-page-data', expensePage, withdrawalsPage, PAGE_SIZE] as const
 
+  // ── Main query ──────────────────────────────────────────────────────────────
+  // - refetchInterval: background refresh every 60 s (multi-admin consistency).
+  // - refetchOnWindowFocus: true keeps multi-tab views in sync automatically.
   const { data: pageData, isLoading, isError, refetch } = useQuery<CashflowPageData>({
     queryKey,
     queryFn: () =>
@@ -106,6 +146,8 @@ export default function CashFlow() {
           },
         })
         .then((r) => r.data),
+    refetchInterval: REFETCH_INTERVAL_MS,
+    refetchOnWindowFocus: true,
   })
   const currency = pageData?.currency ?? localStorage.getItem('currency') ?? 'NGN'
 
@@ -124,6 +166,10 @@ export default function CashFlow() {
         description,
       }),
     onMutate: async ({ amount, description }) => {
+      // Ref lock — prevents duplicate calls fired before React re-renders the disabled button.
+      if (createLockRef.current) return
+      createLockRef.current = true
+
       await qc.cancelQueries({ queryKey })
       const previous = qc.getQueryData<CashflowPageData>(queryKey)
 
@@ -163,6 +209,8 @@ export default function CashFlow() {
       toast.error(e?.response?.data?.detail ?? 'Failed to add expense')
     },
     onSettled: () => {
+      createLockRef.current = false
+      // Backend is authoritative — always re-sync after mutation.
       qc.invalidateQueries({ queryKey: ['cashflow-page-data'] })
     },
   })
@@ -170,6 +218,8 @@ export default function CashFlow() {
   const reverseExpenseMutation = useMutation({
     mutationFn: (expenseId: string) => api.post(`/cashflow/expenses/${expenseId}/reverse`),
     onMutate: async (expenseId: string) => {
+      // Per-row lock; already checked at call site but guard here too.
+      if (reversingIds.has(expenseId)) return
       setReversingIds((prev) => new Set(prev).add(expenseId))
       await qc.cancelQueries({ queryKey })
       const previous = qc.getQueryData<CashflowPageData>(queryKey)
@@ -203,6 +253,7 @@ export default function CashFlow() {
         next.delete(expenseId)
         return next
       })
+      // Backend is authoritative — always re-sync after mutation.
       qc.invalidateQueries({ queryKey: ['cashflow-page-data'] })
     },
   })
@@ -210,6 +261,10 @@ export default function CashFlow() {
   const withdrawAllowanceMutation = useMutation({
     mutationFn: () => api.post('/cashflow/allowance-withdrawals/withdraw', {}),
     onMutate: async () => {
+      // Ref lock — prevents duplicate calls fired before React re-renders.
+      if (withdrawLockRef.current) return
+      withdrawLockRef.current = true
+
       await qc.cancelQueries({ queryKey })
       const previous = qc.getQueryData<CashflowPageData>(queryKey)
 
@@ -217,7 +272,7 @@ export default function CashFlow() {
         const optimistic: AllowanceWithdrawal = {
           id: `temp-${Date.now()}`,
           week_key: 'Current Week',
-          amount: previous.statement.next_week_allowance,
+          amount: previous.statement?.next_week_allowance ?? 0,
           withdrawn_at: new Date().toISOString(),
           status: 'YES',
         }
@@ -226,10 +281,9 @@ export default function CashFlow() {
 
         qc.setQueryData<CashflowPageData>(queryKey, {
           ...previous,
-          statement: {
-            ...previous.statement,
-            next_week_allowance: 0,
-          },
+          statement: previous.statement
+            ? { ...previous.statement, next_week_allowance: 0 }
+            : null,
           withdrawals: {
             ...previous.withdrawals,
             items: nextItems,
@@ -251,6 +305,8 @@ export default function CashFlow() {
       toast.error(e?.response?.data?.detail ?? 'Allowance withdrawal failed')
     },
     onSettled: () => {
+      withdrawLockRef.current = false
+      // Backend is authoritative — always re-sync after mutation.
       qc.invalidateQueries({ queryKey: ['cashflow-page-data'] })
     },
   })
@@ -271,7 +327,7 @@ export default function CashFlow() {
     )
   }
 
-  if (!pageData?.statement) {
+  if (!pageData?.statement && !pageData?.statement_error) {
     return (
       <div className="p-8">
         <div className="card space-y-3">
@@ -285,28 +341,11 @@ export default function CashFlow() {
     )
   }
 
-  const statement = pageData?.statement ?? {
-    amount_owed: 0,
-    monthly_sales: 0,
-    total_sales: 0,
-    total_collected: 0,
-    total_outstanding: 0,
-    total_expenses: 0,
-    total_service_expenses: 0,
-    total_allowances: 0,
-    gross_profit: 0,
-    net_profit: 0,
-    profit_seen_this_week: 0,
-    expenses_of_the_week: 0,
-    net_profit_of_the_week: 0,
-    next_week_allowance: 0,
-    profit_seen_this_month: 0,
-    expenses_of_the_month: 0,
-    net_profit_of_the_month: 0,
-    net_profit_left_this_month: 0,
-  }
-  const expenses = pageData?.expenses.items ?? []
-  const withdrawals = pageData?.withdrawals.items ?? []
+  // Backend financial calculations are authoritative. Optimistic updates are
+  // temporary only — onSettled always invalidates and re-fetches.
+  const statement: Statement = pageData?.statement ?? EMPTY_STATEMENT
+  const expenses = pageData?.expenses ?? emptyPaginated<CashflowExpense>()
+  const withdrawals = pageData?.withdrawals ?? emptyPaginated<AllowanceWithdrawal>()
 
   return (
     <div className="p-8 space-y-6">
@@ -318,44 +357,50 @@ export default function CashFlow() {
         </button>
       </div>
 
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-        <StatCard
-          label="Amount Owed"
-          value={formatCurrency(statement.amount_owed, currency)}
-          icon={Wallet}
-          color="bg-rose-500"
-        />
-        <StatCard
-          label="Monthly Sales"
-          value={formatCurrency(statement.monthly_sales, currency)}
-          icon={DollarSign}
-          color="bg-teal-500"
-        />
-        <StatCard
-          label="Net Profit"
-          value={formatCurrency(statement.net_profit, currency)}
-          icon={DollarSign}
-          color="bg-emerald-600"
-        />
-      </div>
-
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        {[
-          { label: 'Profit Seen This Week', value: statement.profit_seen_this_week, color: 'text-green-600' },
-          { label: 'Expenses of the Week', value: statement.expenses_of_the_week, color: 'text-orange-600' },
-          { label: 'Net Profit of the Week', value: statement.net_profit_of_the_week, color: statement.net_profit_of_the_week >= 0 ? 'text-emerald-700' : 'text-red-700' },
-          { label: 'Next Week Allowance', value: statement.next_week_allowance, color: 'text-blue-700' },
-          { label: 'Profit Seen This Month', value: statement.profit_seen_this_month, color: 'text-green-700' },
-          { label: 'Expenses of the Month', value: statement.expenses_of_the_month, color: 'text-orange-700' },
-          { label: 'Net Profit of the Month', value: statement.net_profit_of_the_month, color: statement.net_profit_of_the_month >= 0 ? 'text-emerald-700' : 'text-red-700' },
-          { label: 'Net Profit Left This Month', value: statement.net_profit_left_this_month, color: statement.net_profit_left_this_month >= 0 ? 'text-sky-700' : 'text-red-700' },
-        ].map(({ label, value, color }) => (
-          <div key={label} className="card text-center">
-            <p className="text-xs text-gray-500">{label}</p>
-            <p className={`text-xl font-bold ${color}`}>{formatCurrency(value, currency)}</p>
+      {pageData?.statement_error ? (
+        <SectionError message={`Statement unavailable: ${pageData.statement_error}`} />
+      ) : (
+        <>
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+            <StatCard
+              label="Amount Owed"
+              value={formatCurrency(statement.amount_owed, currency)}
+              icon={Wallet}
+              color="bg-rose-500"
+            />
+            <StatCard
+              label="Monthly Sales"
+              value={formatCurrency(statement.monthly_sales, currency)}
+              icon={DollarSign}
+              color="bg-teal-500"
+            />
+            <StatCard
+              label="Net Profit"
+              value={formatCurrency(statement.net_profit, currency)}
+              icon={DollarSign}
+              color="bg-emerald-600"
+            />
           </div>
-        ))}
-      </div>
+
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+            {[
+              { label: 'Profit Seen This Week', value: statement.profit_seen_this_week, color: 'text-green-600' },
+              { label: 'Expenses of the Week', value: statement.expenses_of_the_week, color: 'text-orange-600' },
+              { label: 'Net Profit of the Week', value: statement.net_profit_of_the_week, color: statement.net_profit_of_the_week >= 0 ? 'text-emerald-700' : 'text-red-700' },
+              { label: 'Next Week Allowance', value: statement.next_week_allowance, color: 'text-blue-700' },
+              { label: 'Profit Seen This Month', value: statement.profit_seen_this_month, color: 'text-green-700' },
+              { label: 'Expenses of the Month', value: statement.expenses_of_the_month, color: 'text-orange-700' },
+              { label: 'Net Profit of the Month', value: statement.net_profit_of_the_month, color: statement.net_profit_of_the_month >= 0 ? 'text-emerald-700' : 'text-red-700' },
+              { label: 'Net Profit Left This Month', value: statement.net_profit_left_this_month, color: statement.net_profit_left_this_month >= 0 ? 'text-sky-700' : 'text-red-700' },
+            ].map(({ label, value, color }) => (
+              <div key={label} className="card text-center">
+                <p className="text-xs text-gray-500">{label}</p>
+                <p className={`text-xl font-bold ${color}`}>{formatCurrency(value, currency)}</p>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <div className="card space-y-3">
@@ -378,12 +423,13 @@ export default function CashFlow() {
             <button
               className="btn-primary"
               disabled={!Number(expenseAmount) || createExpenseMutation.isPending}
-              onClick={() =>
+              onClick={() => {
+                if (createLockRef.current || createExpenseMutation.isPending) return
                 createExpenseMutation.mutate({
                   amount: Number(expenseAmount),
                   description: expenseDescription || null,
                 })
-              }
+              }}
             >
               {createExpenseMutation.isPending ? 'Saving...' : 'Save Expense'}
             </button>
@@ -398,7 +444,10 @@ export default function CashFlow() {
           <button
             className="btn-secondary"
             disabled={withdrawAllowanceMutation.isPending}
-            onClick={() => withdrawAllowanceMutation.mutate()}
+            onClick={() => {
+              if (withdrawLockRef.current || withdrawAllowanceMutation.isPending) return
+              withdrawAllowanceMutation.mutate()
+            }}
           >
             {withdrawAllowanceMutation.isPending ? 'Processing...' : 'Withdraw Allowance'}
           </button>
@@ -417,17 +466,20 @@ export default function CashFlow() {
               Previous
             </button>
             <span>
-              Page {pageData?.expenses.page ?? 1} of {pageData?.expenses.total_pages ?? 1}
+              Page {expenses.page} of {expenses.total_pages}
             </span>
             <button
               className="btn-secondary"
-              disabled={expensePage >= (pageData?.expenses.total_pages ?? 1)}
-              onClick={() => setExpensePage((p) => Math.min(pageData?.expenses.total_pages ?? p, p + 1))}
+              disabled={expensePage >= expenses.total_pages}
+              onClick={() => setExpensePage((p) => Math.min(expenses.total_pages, p + 1))}
             >
               Next
             </button>
           </div>
         </div>
+        {pageData?.expenses_error ? (
+          <SectionError message={`Could not load expenses: ${pageData.expenses_error}`} />
+        ) : (
         <div className="overflow-x-auto">
           <table className="min-w-full text-sm">
             <thead>
@@ -440,14 +492,14 @@ export default function CashFlow() {
               </tr>
             </thead>
             <tbody>
-              {expenses.length === 0 && (
+              {expenses.items.length === 0 && (
                 <tr>
                   <td colSpan={5} className="py-4 text-center text-sm text-gray-500">
                     No expenses yet.
                   </td>
                 </tr>
               )}
-              {expenses.map((row) => (
+              {expenses.items.map((row) => (
                 <tr key={row.id} className="border-b">
                   <td className="py-2 pr-3">{formatLagosDateTime(row.expense_date)}</td>
                   <td className="py-2 pr-3">{row.description || '-'}</td>
@@ -457,8 +509,11 @@ export default function CashFlow() {
                     {!row.is_reversed && (
                       <button
                         className="btn-secondary"
-                        onClick={() => reverseExpenseMutation.mutate(row.id)}
                         disabled={reversingIds.has(row.id)}
+                        onClick={() => {
+                          if (reversingIds.has(row.id)) return
+                          reverseExpenseMutation.mutate(row.id)
+                        }}
                       >
                         {reversingIds.has(row.id) ? 'Reversing...' : 'Reverse'}
                       </button>
@@ -469,6 +524,7 @@ export default function CashFlow() {
             </tbody>
           </table>
         </div>
+        )}
       </div>
 
       <div className="card">
@@ -483,17 +539,20 @@ export default function CashFlow() {
               Previous
             </button>
             <span>
-              Page {pageData?.withdrawals.page ?? 1} of {pageData?.withdrawals.total_pages ?? 1}
+              Page {withdrawals.page} of {withdrawals.total_pages}
             </span>
             <button
               className="btn-secondary"
-              disabled={withdrawalsPage >= (pageData?.withdrawals.total_pages ?? 1)}
-              onClick={() => setWithdrawalsPage((p) => Math.min(pageData?.withdrawals.total_pages ?? p, p + 1))}
+              disabled={withdrawalsPage >= withdrawals.total_pages}
+              onClick={() => setWithdrawalsPage((p) => Math.min(withdrawals.total_pages, p + 1))}
             >
               Next
             </button>
           </div>
         </div>
+        {pageData?.withdrawals_error ? (
+          <SectionError message={`Could not load withdrawals: ${pageData.withdrawals_error}`} />
+        ) : (
         <div className="overflow-x-auto">
           <table className="min-w-full text-sm">
             <thead>
@@ -505,14 +564,14 @@ export default function CashFlow() {
               </tr>
             </thead>
             <tbody>
-              {withdrawals.length === 0 && (
+              {withdrawals.items.length === 0 && (
                 <tr>
                   <td colSpan={4} className="py-4 text-center text-sm text-gray-500">
                     No allowance withdrawals yet.
                   </td>
                 </tr>
               )}
-              {withdrawals.map((row) => (
+              {withdrawals.items.map((row) => (
                 <tr key={row.id} className="border-b">
                   <td className="py-2 pr-3">{row.week_key}</td>
                   <td className="py-2 pr-3">{formatCurrency(row.amount, currency)}</td>
@@ -523,6 +582,7 @@ export default function CashFlow() {
             </tbody>
           </table>
         </div>
+        )}
       </div>
     </div>
   )
