@@ -229,10 +229,32 @@ export default function Billing() {
         clientId = createClientRes?.data?.id || ''
       }
 
+      const quantity = Number(values.quantity)
+      const unitPrice = Number(values.unit_price)
+      const amountPaid = Number(values.amount_paid)
+      const serviceExpense = Number(values.service_expense)
+
+      if (!Number.isFinite(unitPrice) || unitPrice <= 0) {
+        throw new Error('Unit Price must be greater than zero')
+      }
+
+      const normalizedClientName = String(values.client_name || '').trim()
+      const normalizedServiceName = String(values.service_name || '').trim()
+      if (!normalizedClientName || !normalizedServiceName) {
+        throw new Error('Client Name and Service Name are required')
+      }
+
       const payload = {
         ...values,
-        amount_paid: Number.isFinite(values.amount_paid) ? values.amount_paid : 0,
-        service_expense: Number.isFinite(values.service_expense) ? values.service_expense : 0,
+        client_name: normalizedClientName,
+        service_name: normalizedServiceName,
+        quantity: Number.isFinite(quantity) && quantity > 0 ? quantity : 1,
+        unit_price: unitPrice,
+        amount_paid: Number.isFinite(amountPaid) && amountPaid >= 0 ? amountPaid : 0,
+        service_expense: Number.isFinite(serviceExpense) && serviceExpense >= 0 ? serviceExpense : 0,
+        invoice_date: values.invoice_date?.trim() ? values.invoice_date : undefined,
+        due_date: values.due_date?.trim() ? values.due_date : undefined,
+        notes: values.notes?.trim() ? values.notes : undefined,
         client_id: clientId || undefined,
       }
 
@@ -250,7 +272,15 @@ export default function Billing() {
       setShowClientDropdown(false)
       reset()
     },
-    onError: (e: any) => toast.error(e?.response?.data?.detail ?? 'Save failed'),
+    onError: (e: any) => {
+      const detail = e?.response?.data?.detail
+      if (Array.isArray(detail) && detail.length > 0) {
+        const first = detail[0]
+        toast.error(String(first?.msg || first?.message || 'Save failed'))
+        return
+      }
+      toast.error(String(detail || e?.message || 'Save failed'))
+    },
   })
 
   const deleteMutation = useMutation({
@@ -349,7 +379,15 @@ export default function Billing() {
           setClientSearch('')
           setSelectedClientId('')
           setShowClientDropdown(false)
-          reset()
+          reset({
+            quantity: 1,
+            unit_price: 0,
+            amount_paid: 0,
+            service_expense: 0,
+            invoice_date: new Date().toISOString().slice(0, 10),
+            due_date: '',
+            notes: '',
+          } as FormValues)
           setShowForm(true)
         }} className="btn-primary">
           <Plus size={15} /> New Invoice
@@ -577,11 +615,13 @@ export default function Billing() {
           </div>
           <div>
             <label className="form-label">Quantity</label>
-            <input type="number" step="0.01" className="form-input" {...register('quantity', { valueAsNumber: true })} />
+            <input type="number" step="0.01" min="0.01" className="form-input" {...register('quantity', { valueAsNumber: true, min: { value: 0.01, message: 'Quantity must be greater than zero' } })} />
+            {errors.quantity && <p className="text-xs text-red-500">{errors.quantity.message as string}</p>}
           </div>
           <div>
             <label className="form-label">Unit Price</label>
-            <input type="number" step="0.01" className="form-input" {...register('unit_price', { valueAsNumber: true, required: 'Required' })} />
+            <input type="number" step="0.01" min="0.01" className="form-input" {...register('unit_price', { valueAsNumber: true, required: 'Required', min: { value: 0.01, message: 'Unit Price must be greater than zero' } })} />
+            {errors.unit_price && <p className="text-xs text-red-500">{errors.unit_price.message as string}</p>}
           </div>
           <div>
             <label className="form-label">Amount Paid</label>
