@@ -18,6 +18,39 @@ from app.core.metrics_refresh import recompute_and_persist_metrics
 router = APIRouter()
 
 
+def _iso_date_or_none(value: Optional[str]) -> Optional[str]:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    return text[:10]
+
+
+def _log_billing_audit(
+    sb,
+    *,
+    action: str,
+    entity_id: str,
+    performed_by: str,
+    before_value: Optional[dict] = None,
+    after_value: Optional[dict] = None,
+    detail: Optional[dict] = None,
+) -> None:
+    try:
+        sb.table("crm_audit_log").insert(
+            {
+                "action": action,
+                "entity_type": "service_job",
+                "entity_id": entity_id,
+                "performed_by": performed_by,
+                "before_value": before_value,
+                "after_value": after_value,
+                "detail": detail,
+            }
+        ).execute()
+    except Exception:
+        pass
+
+
 def _best_service_name(row: dict) -> str:
     candidates = [
         row.get("service_name"),
@@ -269,6 +302,13 @@ class BillingUpdate(BaseModel):
 def list_billing(
     status: Optional[str] = Query(None),
     client_id: Optional[str] = Query(None),
+    search: Optional[str] = Query(None),
+    date_from: Optional[str] = Query(None),
+    date_to: Optional[str] = Query(None),
+    min_amount: Optional[float] = Query(None),
+    max_amount: Optional[float] = Query(None),
+    returned: Optional[bool] = Query(None),
+    paid_state: Optional[str] = Query(None),
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
     _user=Depends(get_current_user),
@@ -289,6 +329,42 @@ def list_billing(
             query = query.eq("payment_status", normalized)
     if client_id:
         query = query.eq("client_id", client_id)
+    if date_from:
+        query = query.gte("service_date", _iso_date_or_none(date_from))
+    if date_to:
+        query = query.lte("service_date", _iso_date_or_none(date_to))
+    if min_amount is not None:
+        query = query.gte("amount_charged", min_amount)
+    if max_amount is not None:
+        query = query.lte("amount_charged", max_amount)
+    if returned is not None:
+        query = query.eq("is_return", returned)
+
+    if paid_state:
+        normalized_paid = paid_state.strip().lower()
+        if normalized_paid == "paid":
+            query = query.eq("payment_status", "PAID")
+        elif normalized_paid in {"unpaid", "not_paid"}:
+            query = query.neq("payment_status", "PAID")
+
+    if search:
+        term = search.strip()
+        if term:
+            try:
+                uuid.UUID(term)
+                query = query.eq("id", term)
+            except Exception:
+                pass
+            # Cross-column search for scalability (client, phone, service, notes, id)
+            query = query.or_(
+                f"client_name.ilike.%{term}%,"
+                f"phone_number.ilike.%{term}%,"
+                f"service_name.ilike.%{term}%,"
+                f"description.ilike.%{term}%,"
+                f"notes.ilike.%{term}%,"
+                f"legacy_source_id.ilike.%{term}%"
+            )
+
     result = query.execute()
     rows = []
     for row in (result.data or []):
@@ -319,6 +395,118 @@ def list_billing(
     return {
         "items": rows,
         "data": rows,
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "total_pages": total_pages,
+    }
+
+
+@router.get("/grouped")
+def list_billing_grouped(
+    status: Optional[str] = Query(None),
+    client_id: Optional[str] = Query(None),
+    search: Optional[str] = Query(None),
+    date_from: Optional[str] = Query(None),
+    date_to: Optional[str] = Query(None),
+    min_amount: Optional[float] = Query(None),
+    max_amount: Optional[float] = Query(None),
+    returned: Optional[bool] = Query(None),
+    paid_state: Optional[str] = Query(None),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(200, ge=1, le=500),
+    _user=Depends(get_current_user),
+):
+    sb = get_supabase()
+    offset = (page - 1) * page_size
+    query = (
+        sb.table("service_jobs")
+        .select("*", count="exact")
+        .order("service_date", desc=True)
+        .order("created_at", desc=True)
+        .range(offset, offset + page_size - 1)
+    )
+
+    if status:
+        normalized = status.strip().upper()
+        if normalized in {"PARTIAL", "PART PAYMENT"}:
+            query = query.in_("payment_status", ["PARTIAL", "PART PAYMENT"])
+        else:
+            query = query.eq("payment_status", normalized)
+    if client_id:
+        query = query.eq("client_id", client_id)
+    if date_from:
+        query = query.gte("service_date", _iso_date_or_none(date_from))
+    if date_to:
+        query = query.lte("service_date", _iso_date_or_none(date_to))
+    if min_amount is not None:
+        query = query.gte("amount_charged", min_amount)
+    if max_amount is not None:
+        query = query.lte("amount_charged", max_amount)
+    if returned is not None:
+        query = query.eq("is_return", returned)
+    if paid_state:
+        normalized_paid = paid_state.strip().lower()
+        if normalized_paid == "paid":
+            query = query.eq("payment_status", "PAID")
+        elif normalized_paid in {"unpaid", "not_paid"}:
+            query = query.neq("payment_status", "PAID")
+    if search:
+        term = search.strip()
+        if term:
+            try:
+                uuid.UUID(term)
+                query = query.eq("id", term)
+            except Exception:
+                pass
+            query = query.or_(
+                f"client_name.ilike.%{term}%,"
+                f"phone_number.ilike.%{term}%,"
+                f"service_name.ilike.%{term}%,"
+                f"description.ilike.%{term}%,"
+                f"notes.ilike.%{term}%,"
+                f"legacy_source_id.ilike.%{term}%"
+            )
+
+    result = query.execute()
+    rows = result.data or []
+
+    groups: dict[str, dict] = {}
+    for row in rows:
+        service_date = str(row.get("service_date") or "")[:10] or "Unknown"
+        total = to_number(row.get("amount_charged"))
+        paid = to_number(row.get("paid_amount"))
+        balance = compute_outstanding(total, paid)
+
+        group = groups.setdefault(
+            service_date,
+            {
+                "service_date": service_date,
+                "items": [],
+                "summary": {
+                    "job_count": 0,
+                    "total_amount": 0.0,
+                    "total_paid": 0.0,
+                    "total_outstanding": 0.0,
+                },
+            },
+        )
+        row["total_amount"] = total
+        row["amount_paid"] = paid
+        row["balance"] = balance
+        row["status"] = compute_payment_status(total, paid).lower()
+        row["service_name"] = _best_service_name(row)
+        group["items"].append(row)
+        group["summary"]["job_count"] += 1
+        group["summary"]["total_amount"] += total
+        group["summary"]["total_paid"] += paid
+        group["summary"]["total_outstanding"] += balance
+
+    grouped = sorted(groups.values(), key=lambda g: g["service_date"], reverse=True)
+    total = int(result.count or 0)
+    total_pages = max(1, (total + page_size - 1) // page_size)
+    return {
+        "groups": grouped,
         "total": total,
         "page": page,
         "page_size": page_size,
@@ -403,13 +591,34 @@ def create_billing(payload: BillingCreate, _user=Depends(get_current_user)):
         "notes": data.get("notes"),
     }
     result = sb.table("service_jobs").insert(mapped).execute()
+    created = result.data[0]
+    _log_billing_audit(
+        sb,
+        action="invoice_created",
+        entity_id=str(created.get("id")),
+        performed_by=str(_user.id),
+        before_value=None,
+        after_value={
+            "amount_charged": to_number(created.get("amount_charged")),
+            "paid_amount": to_number(created.get("paid_amount")),
+            "payment_status": str(created.get("payment_status") or ""),
+        },
+        detail={
+            "client_name": created.get("client_name"),
+            "service_name": created.get("service_name"),
+        },
+    )
     recompute_and_persist_metrics(sb, source="supabase_after_billing_create")
-    return result.data[0]
+    return created
 
 
 @router.put("/{billing_id}")
 def update_billing(billing_id: str, payload: BillingUpdate, _user=Depends(get_current_user)):
     sb = get_supabase()
+    existing_before = sb.table("service_jobs").select("*").eq("id", billing_id).single().execute().data
+    if not existing_before:
+        raise HTTPException(404, "Billing row not found")
+
     data = payload.model_dump(exclude_none=True)
     if not data:
         raise HTTPException(400, "No fields to update")
@@ -444,8 +653,43 @@ def update_billing(billing_id: str, payload: BillingUpdate, _user=Depends(get_cu
             data["paid_date"] = None
 
     result = sb.table("service_jobs").update(data).eq("id", billing_id).execute()
+    updated = result.data[0]
+
+    _log_billing_audit(
+        sb,
+        action="invoice_updated",
+        entity_id=billing_id,
+        performed_by=str(_user.id),
+        before_value={
+            "amount_charged": to_number(existing_before.get("amount_charged")),
+            "paid_amount": to_number(existing_before.get("paid_amount")),
+            "payment_status": str(existing_before.get("payment_status") or ""),
+        },
+        after_value={
+            "amount_charged": to_number(updated.get("amount_charged")),
+            "paid_amount": to_number(updated.get("paid_amount")),
+            "payment_status": str(updated.get("payment_status") or ""),
+        },
+        detail={"fields_updated": sorted(list(data.keys()))},
+    )
+
+    before_paid = to_number(existing_before.get("paid_amount"))
+    after_paid = to_number(updated.get("paid_amount"))
+    before_status = str(existing_before.get("payment_status") or "")
+    after_status = str(updated.get("payment_status") or "")
+    if before_paid != after_paid or before_status != after_status:
+        _log_billing_audit(
+            sb,
+            action="payment_updated",
+            entity_id=billing_id,
+            performed_by=str(_user.id),
+            before_value={"paid_amount": before_paid, "payment_status": before_status},
+            after_value={"paid_amount": after_paid, "payment_status": after_status},
+            detail={"reason": "billing_update"},
+        )
+
     recompute_and_persist_metrics(sb, source="supabase_after_billing_update")
-    return result.data[0]
+    return updated
 
 
 @router.delete("/{billing_id}", status_code=204)

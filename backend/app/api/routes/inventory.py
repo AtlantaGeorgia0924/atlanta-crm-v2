@@ -164,6 +164,95 @@ class GroupAssignment(BaseModel):
     group_name: str
 
 
+class SellProductPayload(BaseModel):
+    quantity: float
+    selling_price: Optional[float] = None
+    client_name: str
+    client_phone: Optional[str] = None
+    payment_status: str
+    paid_amount: float = 0
+    notes: Optional[str] = None
+
+
+class ReverseSalePayload(BaseModel):
+    sale_item_id: str
+    reason: Optional[str] = None
+
+
+def _normalize_payment_status(value: Optional[str]) -> str:
+    normalized = str(value or "").strip().upper()
+    if normalized == "PARTIAL":
+        return "PART PAYMENT"
+    if normalized in {"PAID", "PART PAYMENT", "UNPAID"}:
+        return normalized
+    return "UNPAID"
+
+
+def _normalize_phone(value: Optional[str]) -> str:
+    return "".join(ch for ch in str(value or "") if ch.isdigit())
+
+
+def _upsert_client(sb, client_name: str, client_phone: Optional[str]) -> Optional[str]:
+    name = str(client_name or "").strip()
+    phone = _normalize_phone(client_phone)
+    if not name:
+        return None
+
+    rows = sb.table("clients").select("id,name,phone").execute().data or []
+    if phone:
+        for row in rows:
+            if _normalize_phone(row.get("phone")) == phone:
+                return str(row.get("id"))
+
+    normalized_name = name.upper()
+    for row in rows:
+        if str(row.get("name") or "").strip().upper() == normalized_name:
+            if phone and _normalize_phone(row.get("phone")) != phone:
+                sb.table("clients").update({"phone": client_phone}).eq("id", row.get("id")).execute()
+            return str(row.get("id"))
+
+    created = (
+        sb.table("clients")
+        .insert({
+            "id": str(uuid.uuid4()),
+            "name": name,
+            "phone": client_phone,
+        })
+        .execute()
+        .data
+        or []
+    )
+    return str(created[0].get("id")) if created else None
+
+
+def _log_inventory_audit(
+    sb,
+    *,
+    action: str,
+    entity_type: str,
+    entity_id: str,
+    performed_by: str,
+    before_value: Optional[dict] = None,
+    after_value: Optional[dict] = None,
+    detail: Optional[dict] = None,
+) -> None:
+    try:
+        sb.table("crm_audit_log").insert(
+            {
+                "action": action,
+                "entity_type": entity_type,
+                "entity_id": entity_id,
+                "performed_by": performed_by,
+                "before_value": before_value,
+                "after_value": after_value,
+                "detail": detail,
+            }
+        ).execute()
+    except Exception:
+        # Audit failures should never block the primary operation.
+        pass
+
+
 @router.get("")
 def list_inventory(
     category: Optional[str] = Query(None),
@@ -362,9 +451,146 @@ def get_item(item_id: str, _user=Depends(get_current_user)):
     return _serialize_item(result.data)
 
 
+@router.get("/{item_id}/transactions")
+def get_item_transactions(
+    item_id: str,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    _user=Depends(get_current_user),
+):
+    sb = get_supabase()
+    offset = (page - 1) * page_size
+    result = (
+        sb.table("inventory_transactions")
+        .select("*", count="exact")
+        .eq("inventory_item_id", item_id)
+        .order("created_at", desc=True)
+        .range(offset, offset + page_size - 1)
+        .execute()
+    )
+    items = result.data or []
+    total = int(result.count or 0)
+    total_pages = max(1, (total + page_size - 1) // page_size)
+    return {
+        "items": items,
+        "page": page,
+        "page_size": page_size,
+        "total": total,
+        "total_pages": total_pages,
+    }
+
+
+@router.post("/{item_id}/sell", status_code=201)
+def sell_product(item_id: str, payload: SellProductPayload, _user=Depends(get_current_user)):
+    sb = get_supabase()
+    quantity = _as_float(payload.quantity)
+    if quantity <= 0:
+        raise HTTPException(422, "Quantity must be greater than zero")
+
+    client_name = str(payload.client_name or "").strip()
+    if not client_name:
+        raise HTTPException(422, "Client name is required")
+
+    status = _normalize_payment_status(payload.payment_status)
+    paid_amount = max(_as_float(payload.paid_amount), 0)
+    selling_price = _as_float(payload.selling_price)
+    if payload.selling_price is not None and selling_price <= 0:
+        raise HTTPException(422, "Selling price must be greater than zero")
+
+    client_id = _upsert_client(sb, client_name, payload.client_phone)
+
+    try:
+        rpc = (
+            sb.rpc(
+                "sell_inventory_product",
+                {
+                    "p_inventory_item_id": item_id,
+                    "p_quantity": quantity,
+                    "p_unit_price": selling_price,
+                    "p_client_id": client_id,
+                    "p_client_name": client_name,
+                    "p_client_phone": payload.client_phone,
+                    "p_paid_amount": paid_amount,
+                    "p_payment_status": status,
+                    "p_notes": payload.notes,
+                    "p_sold_by": str(_user.id),
+                },
+            )
+            .execute()
+            .data
+            or []
+        )
+    except Exception as exc:
+        message = str(exc)
+        if "Insufficient stock" in message:
+            raise HTTPException(409, message)
+        raise HTTPException(500, f"Failed to sell product: {message}")
+
+    if not rpc:
+        raise HTTPException(500, "Sell operation failed")
+
+    sold = rpc[0]
+    recompute_and_persist_metrics(sb, source="supabase_after_inventory_sell")
+    return {
+        "sale_id": sold.get("sale_id"),
+        "sale_item_id": sold.get("sale_item_id"),
+        "service_job_id": sold.get("service_job_id"),
+        "remaining_quantity": _as_float(sold.get("remaining_quantity")),
+        "amount_charged": _as_float(sold.get("amount_charged")),
+        "balance": _as_float(sold.get("balance")),
+        "profit": _as_float(sold.get("profit")),
+        "payment_status": status,
+    }
+
+
+@router.post("/sales/reverse")
+def reverse_sold_product(payload: ReverseSalePayload, _user=Depends(get_current_user)):
+    sb = get_supabase()
+    sale_item_id = str(payload.sale_item_id or "").strip()
+    if not sale_item_id:
+        raise HTTPException(422, "sale_item_id is required")
+
+    try:
+        rpc = (
+            sb.rpc(
+                "reverse_inventory_sale",
+                {
+                    "p_sale_item_id": sale_item_id,
+                    "p_reversed_by": str(_user.id),
+                    "p_reason": payload.reason,
+                },
+            )
+            .execute()
+            .data
+            or []
+        )
+    except Exception as exc:
+        message = str(exc)
+        if "already reversed" in message:
+            raise HTTPException(409, message)
+        raise HTTPException(500, f"Failed to reverse sale: {message}")
+
+    if not rpc:
+        raise HTTPException(500, "Reverse operation failed")
+
+    restored = rpc[0]
+    recompute_and_persist_metrics(sb, source="supabase_after_inventory_sale_reversal")
+    return {
+        "sale_item_id": restored.get("sale_item_id"),
+        "inventory_item_id": restored.get("inventory_item_id"),
+        "restored_quantity": _as_float(restored.get("restored_quantity")),
+        "new_inventory_quantity": _as_float(restored.get("new_inventory_quantity")),
+        "service_job_id": restored.get("service_job_id"),
+    }
+
+
 @router.put("/{item_id}")
 def update_item(item_id: str, payload: StockUpdate, _user=Depends(get_current_user)):
     sb = get_supabase()
+    existing = sb.table("inventory_items").select("*").eq("id", item_id).single().execute().data
+    if not existing:
+        raise HTTPException(404, "Item not found")
+
     data = payload.model_dump(exclude_none=True)
     if not data:
         raise HTTPException(400, "No fields to update")
@@ -383,8 +609,44 @@ def update_item(item_id: str, payload: StockUpdate, _user=Depends(get_current_us
     if "category" in data:
         data["category"] = _normalize_group_name(data.get("category"))
     result = sb.table("inventory_items").update(data).eq("id", item_id).execute()
+    updated = result.data[0]
+
+    before_qty = _as_float(existing.get("quantity"))
+    after_qty = _as_float(updated.get("quantity"))
+    if before_qty != after_qty:
+        sb.table("inventory_transactions").insert(
+            {
+                "inventory_item_id": item_id,
+                "action": "MANUAL_ADJUSTMENT",
+                "quantity_change": after_qty - before_qty,
+                "quantity_before": before_qty,
+                "quantity_after": after_qty,
+                "performed_by": str(_user.id),
+                "note": "Manual inventory update",
+            }
+        ).execute()
+
+    _log_inventory_audit(
+        sb,
+        action="inventory_item_updated",
+        entity_type="inventory_item",
+        entity_id=item_id,
+        performed_by=str(_user.id),
+        before_value={
+            "quantity": before_qty,
+            "selling_price": _as_float(existing.get("selling_price")),
+            "cost_price": _as_float(existing.get("cost_price")),
+        },
+        after_value={
+            "quantity": after_qty,
+            "selling_price": _as_float(updated.get("selling_price")),
+            "cost_price": _as_float(updated.get("cost_price")),
+        },
+        detail={"fields_updated": sorted(list(data.keys()))},
+    )
+
     recompute_and_persist_metrics(sb, source="supabase_after_inventory_update")
-    return result.data[0]
+    return updated
 
 
 @router.delete("/{item_id}", status_code=204)

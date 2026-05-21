@@ -7,11 +7,13 @@ interface Props {
   onClose: () => void
   children: ReactNode
   size?: 'sm' | 'md' | 'lg'
+  footer?: ReactNode
+  bodyClassName?: string
 }
 
 const sizeClass = { sm: 'max-w-md', md: 'max-w-xl', lg: 'max-w-3xl' }
 
-export default function Modal({ title, open, onClose, children, size = 'md' }: Props) {
+export default function Modal({ title, open, onClose, children, size = 'md', footer, bodyClassName }: Props) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
     document.addEventListener('keydown', onKey)
@@ -23,7 +25,7 @@ export default function Modal({ title, open, onClose, children, size = 'md' }: P
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40" onClick={onClose}>
       <div
-        className={`w-full ${sizeClass[size]} bg-white rounded-2xl shadow-xl border`}
+        className={`w-full ${sizeClass[size]} bg-white rounded-2xl shadow-xl border max-h-[90vh] flex flex-col`}
         style={{ borderColor: '#d4af37' }}
         onClick={(e) => e.stopPropagation()}
       >
@@ -33,7 +35,12 @@ export default function Modal({ title, open, onClose, children, size = 'md' }: P
             <X size={20} />
           </button>
         </div>
-        <div className="px-6 py-4">{children}</div>
+        <div className={`px-6 py-4 overflow-y-auto min-h-0 ${bodyClassName ?? ''}`.trim()}>{children}</div>
+        {footer && (
+          <div className="px-6 py-3 border-t sticky bottom-0 bg-white" style={{ borderColor: '#e7d89f' }}>
+            {footer}
+          </div>
+        )}
       </div>
     </div>
   )

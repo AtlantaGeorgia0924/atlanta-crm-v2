@@ -6,7 +6,7 @@ import Table from '@/components/Table'
 import Modal from '@/components/Modal'
 import LoadingSpinner from '@/components/LoadingSpinner'
 import { formatCurrency } from '@/lib/utils'
-import { Plus, Pencil, Trash2 } from 'lucide-react'
+import { Plus, Pencil, Trash2, ShoppingCart, History, RotateCcw } from 'lucide-react'
 import toast from 'react-hot-toast'
 
 interface StockItem {
@@ -45,6 +45,28 @@ interface GroupRow {
   product_count: number
 }
 
+interface SellFormValues {
+  quantity: number
+  selling_price?: number
+  client_name: string
+  client_phone?: string
+  payment_status: 'PAID' | 'PART PAYMENT' | 'UNPAID'
+  paid_amount: number
+  notes?: string
+}
+
+interface InventoryTransaction {
+  id: string
+  action: string
+  quantity_change: number
+  quantity_before: number
+  quantity_after: number
+  related_sale_item_id?: string
+  created_at: string
+  performed_by?: string
+  note?: string
+}
+
 type InventoryView = 'products' | 'pending_deals' | 'groups' | 'out_of_stock'
 type CreateMode = 'single' | 'multiple'
 
@@ -62,6 +84,9 @@ export default function Inventory() {
   const [newGroupName, setNewGroupName] = useState('')
   const [editingGroup, setEditingGroup] = useState<GroupRow | null>(null)
   const [groupRenameValue, setGroupRenameValue] = useState('')
+  const [sellItem, setSellItem] = useState<StockItem | null>(null)
+  const [historyItem, setHistoryItem] = useState<StockItem | null>(null)
+  const [historyPage, setHistoryPage] = useState(1)
 
   const { data, isLoading } = useQuery({
     queryKey: ['inventory', view, search, lowStock, category, page],
@@ -82,8 +107,35 @@ export default function Inventory() {
   const currency = status?.currency ?? localStorage.getItem('currency') ?? 'NGN'
 
   const { register, handleSubmit, reset } = useForm<FormValues>()
+  const {
+    register: registerSell,
+    handleSubmit: handleSubmitSell,
+    reset: resetSell,
+    watch: watchSell,
+    setValue: setSellValue,
+  } = useForm<SellFormValues>({
+    defaultValues: {
+      quantity: 1,
+      selling_price: 0,
+      payment_status: 'UNPAID',
+      paid_amount: 0,
+    },
+  })
 
   const groups: GroupRow[] = groupsData?.groups ?? []
+
+  const selectedSellQty = Number(watchSell('quantity') || 0)
+  const selectedSellPrice = Number(watchSell('selling_price') || 0)
+  const estimatedSaleTotal = selectedSellQty > 0 ? selectedSellQty * selectedSellPrice : 0
+
+  const { data: txData, isLoading: txLoading } = useQuery({
+    queryKey: ['inventory-transactions', historyItem?.id, historyPage],
+    queryFn: () =>
+      api
+        .get(`/inventory/${historyItem!.id}/transactions`, { params: { page: historyPage, page_size: 30 } })
+        .then((r) => r.data),
+    enabled: !!historyItem,
+  })
 
   const saveMutation = useMutation({
     mutationFn: (values: FormValues) => {
@@ -169,11 +221,60 @@ export default function Inventory() {
     onError: (e: any) => toast.error(e?.response?.data?.detail ?? 'Assign group failed'),
   })
 
+  const sellMutation = useMutation({
+    mutationFn: (values: SellFormValues) => {
+      if (!sellItem) throw new Error('No inventory item selected')
+      return api.post(`/inventory/${sellItem.id}/sell`, values)
+    },
+    onSuccess: (res) => {
+      toast.success(`Sold successfully. Remaining quantity: ${res?.data?.remaining_quantity ?? '-'}`)
+      qc.invalidateQueries({ queryKey: ['inventory'] })
+      qc.invalidateQueries({ queryKey: ['billing'] })
+      qc.invalidateQueries({ queryKey: ['billing-grouped'] })
+      qc.invalidateQueries({ queryKey: ['debtors'] })
+      qc.invalidateQueries({ queryKey: ['dashboard'] })
+      setSellItem(null)
+      resetSell()
+    },
+    onError: (e: any) => toast.error(e?.response?.data?.detail ?? 'Sell failed'),
+  })
+
+  const reverseSaleMutation = useMutation({
+    mutationFn: (saleItemId: string) => api.post('/inventory/sales/reverse', { sale_item_id: saleItemId }),
+    onSuccess: () => {
+      toast.success('Sale reversed and stock restored')
+      qc.invalidateQueries({ queryKey: ['inventory'] })
+      qc.invalidateQueries({ queryKey: ['inventory-transactions'] })
+      qc.invalidateQueries({ queryKey: ['billing-grouped'] })
+      qc.invalidateQueries({ queryKey: ['debtors'] })
+      qc.invalidateQueries({ queryKey: ['dashboard'] })
+    },
+    onError: (e: any) => toast.error(e?.response?.data?.detail ?? 'Reversal failed'),
+  })
+
   const openEdit = (row: StockItem) => {
     setEditRow(row)
     setCreateMode('single')
     reset({ ...row, product_status: row.product_status || row.payment_status || 'AVAILABLE' })
     setShowForm(true)
+  }
+
+  const openSell = (row: StockItem) => {
+    setSellItem(row)
+    resetSell({
+      quantity: 1,
+      selling_price: Number(row.unit_price || 0),
+      client_name: '',
+      client_phone: '',
+      payment_status: 'UNPAID',
+      paid_amount: 0,
+      notes: '',
+    })
+  }
+
+  const openHistory = (row: StockItem) => {
+    setHistoryItem(row)
+    setHistoryPage(1)
   }
 
   const handleBulkSubmit = () => {
@@ -255,6 +356,15 @@ export default function Inventory() {
       key: 'actions', header: '',
       render: (r: StockItem) => (
         <div className="flex gap-2">
+          <button
+            onClick={() => openSell(r)}
+            disabled={Number(r.quantity) <= 0}
+            className="text-gray-400 hover:text-emerald-600 disabled:opacity-40"
+            title="Sell Product"
+          >
+            <ShoppingCart size={14} />
+          </button>
+          <button onClick={() => openHistory(r)} className="text-gray-400 hover:text-blue-600" title="Transaction History"><History size={14} /></button>
           <button onClick={() => openEdit(r)} className="text-gray-400 hover:text-primary-600"><Pencil size={14} /></button>
           <button onClick={() => { if (confirm('Remove item?')) deleteMutation.mutate(r.id) }} className="text-gray-400 hover:text-red-600"><Trash2 size={14} /></button>
         </div>
@@ -464,6 +574,181 @@ export default function Inventory() {
             </button>
           </div>
         </div>
+      </Modal>
+
+      <Modal
+        title={sellItem ? `Sell Product - ${sellItem.item_name}` : 'Sell Product'}
+        open={!!sellItem}
+        onClose={() => setSellItem(null)}
+        size="md"
+        footer={(
+          <div className="flex justify-end gap-2">
+            <button type="button" className="btn-secondary" onClick={() => setSellItem(null)}>Cancel</button>
+            <button
+              type="submit"
+              form="sell-product-form"
+              className="btn-primary"
+              disabled={sellMutation.isPending}
+            >
+              {sellMutation.isPending ? 'Processing...' : 'Confirm Sale'}
+            </button>
+          </div>
+        )}
+      >
+        {sellItem && (
+          <form
+            id="sell-product-form"
+            className="space-y-3"
+            onSubmit={handleSubmitSell((values) => {
+              if (Number(values.quantity || 0) > Number(sellItem.quantity || 0)) {
+                toast.error(`Cannot oversell. Remaining quantity is ${sellItem.quantity}`)
+                return
+              }
+              sellMutation.mutate(values)
+            })}
+          >
+            <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+              Remaining quantity: <strong>{sellItem.quantity} {sellItem.unit || 'pcs'}</strong>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="form-label">Quantity</label>
+                <input
+                  type="number"
+                  min="0.01"
+                  step="0.01"
+                  className="form-input"
+                  {...registerSell('quantity', { valueAsNumber: true, min: 0.01 })}
+                />
+              </div>
+              <div>
+                <label className="form-label">Selling Price</label>
+                <input
+                  type="number"
+                  min="0.01"
+                  step="0.01"
+                  className="form-input"
+                  {...registerSell('selling_price', { valueAsNumber: true, min: 0.01 })}
+                />
+              </div>
+              <div>
+                <label className="form-label">Client Name</label>
+                <input className="form-input" {...registerSell('client_name', { required: true })} />
+              </div>
+              <div>
+                <label className="form-label">Client Phone</label>
+                <input className="form-input" {...registerSell('client_phone')} />
+              </div>
+              <div>
+                <label className="form-label">Payment Status</label>
+                <select
+                  className="form-input"
+                  {...registerSell('payment_status')}
+                  onChange={(e) => {
+                    const nextStatus = e.target.value as 'PAID' | 'PART PAYMENT' | 'UNPAID'
+                    setSellValue('payment_status', nextStatus)
+                    if (nextStatus === 'PAID') {
+                      setSellValue('paid_amount', estimatedSaleTotal)
+                    }
+                    if (nextStatus === 'UNPAID') {
+                      setSellValue('paid_amount', 0)
+                    }
+                  }}
+                >
+                  <option value="PAID">PAID</option>
+                  <option value="PART PAYMENT">PART PAYMENT</option>
+                  <option value="UNPAID">UNPAID</option>
+                </select>
+              </div>
+              <div>
+                <label className="form-label">Paid Amount</label>
+                <input
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  className="form-input"
+                  {...registerSell('paid_amount', { valueAsNumber: true, min: 0 })}
+                />
+              </div>
+            </div>
+
+            <div>
+              <label className="form-label">Notes (optional)</label>
+              <textarea className="form-input" rows={2} {...registerSell('notes')} />
+            </div>
+
+            <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-700">
+              <div>Amount charged: {formatCurrency(estimatedSaleTotal, currency)}</div>
+              <div>Expected balance: {formatCurrency(Math.max(estimatedSaleTotal - Number(watchSell('paid_amount') || 0), 0), currency)}</div>
+            </div>
+          </form>
+        )}
+      </Modal>
+
+      <Modal
+        title={historyItem ? `Transaction History - ${historyItem.item_name}` : 'Transaction History'}
+        open={!!historyItem}
+        onClose={() => setHistoryItem(null)}
+        size="lg"
+      >
+        {txLoading ? <LoadingSpinner /> : (
+          <div className="space-y-3">
+            <div className="overflow-x-auto rounded-xl border" style={{ borderColor: '#d4af37' }}>
+              <table className="min-w-full text-sm">
+                <thead style={{ background: '#000000' }}>
+                  <tr>
+                    <th className="px-4 py-3 text-left font-semibold text-white">Action</th>
+                    <th className="px-4 py-3 text-left font-semibold text-white">Change</th>
+                    <th className="px-4 py-3 text-left font-semibold text-white">Before</th>
+                    <th className="px-4 py-3 text-left font-semibold text-white">After</th>
+                    <th className="px-4 py-3 text-left font-semibold text-white">Time</th>
+                    <th className="px-4 py-3 text-left font-semibold text-white">Operation</th>
+                  </tr>
+                </thead>
+                <tbody className="bg-white">
+                  {((txData?.items ?? []) as InventoryTransaction[]).map((tx) => (
+                    <tr key={tx.id} className="border-t" style={{ borderColor: '#f1e7bf' }}>
+                      <td className="px-4 py-3">{tx.action}</td>
+                      <td className="px-4 py-3">{tx.quantity_change}</td>
+                      <td className="px-4 py-3">{tx.quantity_before}</td>
+                      <td className="px-4 py-3">{tx.quantity_after}</td>
+                      <td className="px-4 py-3">{new Date(tx.created_at).toLocaleString()}</td>
+                      <td className="px-4 py-3">
+                        {tx.action === 'SALE' && tx.related_sale_item_id && (
+                          <button
+                            className="btn-secondary py-1 px-2 text-xs"
+                            onClick={() => {
+                              if (confirm('Reverse this sale and restore stock?')) {
+                                const saleItemId = tx.related_sale_item_id
+                                if (saleItemId) reverseSaleMutation.mutate(saleItemId)
+                              }
+                            }}
+                            disabled={reverseSaleMutation.isPending}
+                          >
+                            <RotateCcw size={12} className="inline mr-1" />
+                            Reverse
+                          </button>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                  {(txData?.items ?? []).length === 0 && (
+                    <tr>
+                      <td colSpan={6} className="px-4 py-6 text-center text-gray-500">No transactions yet</td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+
+            <div className="flex gap-2 justify-end">
+              <button disabled={historyPage === 1} onClick={() => setHistoryPage((p) => p - 1)} className="btn-secondary">Prev</button>
+              <span className="text-sm text-gray-500 self-center">Page {historyPage} of {txData?.total_pages ?? 1}</span>
+              <button disabled={historyPage >= (txData?.total_pages ?? 1)} onClick={() => setHistoryPage((p) => p + 1)} className="btn-secondary">Next</button>
+            </div>
+          </div>
+        )}
       </Modal>
     </div>
   )
