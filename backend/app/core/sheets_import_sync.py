@@ -216,6 +216,20 @@ def _find_existing_client_by_name(existing_clients: List[dict], name: Optional[s
     return None
 
 
+def _extract_missing_column_name(error_text: str, table_name: str) -> Optional[str]:
+    text = str(error_text or "")
+    patterns = [
+        rf"column\s+{re.escape(table_name)}\.(\w+)\s+does not exist",
+        r"column\s+[\"']?(\w+)[\"']?\s+does not exist",
+        r"Could not find the\s+[\"'](\w+)[\"']\s+column",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            return match.group(1)
+    return None
+
+
 def _incremental_sync_table(
     sb,
     table_name: str,
@@ -232,59 +246,91 @@ def _incremental_sync_table(
             "skipped_app_newer": 0,
         }
 
-    existing_rows = _fetch_all_rows(
-        sb,
-        table_name,
-        f"{key_field},{','.join(compare_fields)},updated_at,last_synced_at,sync_dirty,sync_source,id,legacy_source_id",
+    working_rows = [dict(row) for row in payload_rows]
+    working_compare_fields = list(compare_fields)
+    working_meta_fields = ["updated_at", "last_synced_at", "sync_dirty", "sync_source", "id", "legacy_source_id"]
+    tracking_fields = ["last_synced_at", "sync_dirty", "sync_source", "source_updated_at"]
+
+    for _ in range(12):
+        try:
+            select_fields: List[str] = []
+            for field in [key_field, *working_compare_fields, *working_meta_fields]:
+                if field and field not in select_fields:
+                    select_fields.append(field)
+
+            existing_rows = _fetch_all_rows(sb, table_name, ",".join(select_fields))
+            existing_by_key = {str(r.get(key_field) or ""): r for r in existing_rows}
+
+            inserted = 0
+            updated = 0
+            unchanged = 0
+            skipped_app_newer = 0
+
+            for row in working_rows:
+                key_value = str(row.get(key_field) or "")
+                if not key_value:
+                    continue
+
+                existing = existing_by_key.get(key_value)
+
+                payload_base = {
+                    field: row.get(field)
+                    for field in [key_field, *working_compare_fields]
+                    if field in row
+                }
+                payload_with_tracking = dict(payload_base)
+                if "last_synced_at" in tracking_fields:
+                    payload_with_tracking["last_synced_at"] = now_iso
+                if "sync_dirty" in tracking_fields:
+                    payload_with_tracking["sync_dirty"] = False
+                if "sync_source" in tracking_fields:
+                    payload_with_tracking["sync_source"] = "sheet"
+                if "source_updated_at" in tracking_fields:
+                    payload_with_tracking["source_updated_at"] = now_iso
+
+                if not existing:
+                    sb.table(table_name).insert(payload_with_tracking).execute()
+                    inserted += 1
+                    continue
+
+                if _has_unsynced_app_change(existing):
+                    skipped_app_newer += 1
+                    continue
+
+                row_changed = any(
+                    not _same_value(existing.get(field), row.get(field))
+                    for field in working_compare_fields
+                )
+
+                if not row_changed:
+                    unchanged += 1
+                    continue
+
+                sb.table(table_name).update(payload_with_tracking).eq(key_field, key_value).execute()
+                updated += 1
+
+            return {
+                "inserted": inserted,
+                "updated": updated,
+                "unchanged": unchanged,
+                "skipped_app_newer": skipped_app_newer,
+            }
+        except Exception as e:
+            missing_column = _extract_missing_column_name(str(e), table_name)
+            if not missing_column or missing_column == key_field:
+                raise
+
+            # Drop missing optional columns and retry, so imports still work on
+            # older schemas where sync-tracking columns haven't been added yet.
+            working_compare_fields = [f for f in working_compare_fields if f != missing_column]
+            working_meta_fields = [f for f in working_meta_fields if f != missing_column]
+            tracking_fields = [f for f in tracking_fields if f != missing_column]
+            for row in working_rows:
+                row.pop(missing_column, None)
+
+    raise RuntimeError(
+        f"Incremental sync for {table_name} failed after removing unsupported columns"
     )
-    existing_by_key = {str(r.get(key_field) or ""): r for r in existing_rows}
-
-    inserted = 0
-    updated = 0
-    unchanged = 0
-    skipped_app_newer = 0
-
-    for row in payload_rows:
-        key_value = str(row.get(key_field) or "")
-        if not key_value:
-            continue
-
-        existing = existing_by_key.get(key_value)
-        payload_with_tracking = {
-            **row,
-            "last_synced_at": now_iso,
-            "sync_dirty": False,
-            "sync_source": "sheet",
-            "source_updated_at": now_iso,
-        }
-
-        if not existing:
-            sb.table(table_name).insert(payload_with_tracking).execute()
-            inserted += 1
-            continue
-
-        if _has_unsynced_app_change(existing):
-            skipped_app_newer += 1
-            continue
-
-        row_changed = any(
-            not _same_value(existing.get(field), row.get(field))
-            for field in compare_fields
-        )
-
-        if not row_changed:
-            unchanged += 1
-            continue
-
-        sb.table(table_name).update(payload_with_tracking).eq(key_field, key_value).execute()
-        updated += 1
-
-    return {
-        "inserted": inserted,
-        "updated": updated,
-        "unchanged": unchanged,
-        "skipped_app_newer": skipped_app_newer,
-    }
 
 
 def import_google_sheets_to_supabase(sb) -> dict:
