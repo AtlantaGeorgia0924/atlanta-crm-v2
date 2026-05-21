@@ -71,13 +71,19 @@ def _serialize_item(row: dict) -> dict:
     return {
         **row,
         "unit_cost": row.get("cost_price", 0),
-        "unit_price": row.get("selling_price", 0),
+        "unit_price": row.get("selling_price"),
         "reorder_level": row.get("reorder_level", 0),
         "supplier": row.get("supplier") or _extract_supplier(row.get("description")),
+        "supplier_phone": row.get("supplier_phone"),
         "location": row.get("location"),
         "product_status": product_status,
         "is_active": True,
         "sold_out": _is_sold_out({**row, "product_status": product_status}),
+        # Device fields
+        "condition": row.get("condition"),
+        "lock_status": row.get("lock_status"),
+        "previously_locked": row.get("previously_locked", False),
+        "unlock_method": row.get("unlock_method"),
     }
 
 
@@ -109,6 +115,32 @@ def _save_groups(sb, groups: list[str]) -> list[str]:
     return clean_groups
 
 
+CONDITION_OPTIONS = [
+    "Brand New",
+    "Open Box",
+    "Used - Clean",
+    "Used - Average",
+    "Used - Faulty",
+    "For Parts",
+]
+
+LOCK_STATUS_OPTIONS = [
+    "Factory Unlocked",
+    "Carrier Locked",
+    "iCloud Locked",
+    "MDM Locked",
+    "Unknown",
+]
+
+UNLOCK_METHOD_OPTIONS = [
+    "RSIM",
+    "Official Unlock",
+    "Bypass",
+    "MDM Removal",
+    "Other",
+]
+
+
 class StockCreate(BaseModel):
     item_name: str
     sku: Optional[str] = None
@@ -117,15 +149,21 @@ class StockCreate(BaseModel):
     quantity: float = 0
     unit: Optional[str] = "pcs"
     unit_cost: float = 0
-    unit_price: float = 0
+    unit_price: Optional[float] = None  # Optional – set at sale time
     reorder_level: float = 0
     supplier: Optional[str] = None
+    supplier_phone: Optional[str] = None
     location: Optional[str] = None
     source: Optional[str] = "manual"
     payment_status: Optional[str] = None
     item_expense_amount: Optional[float] = 0
     item_expense_description: Optional[str] = None
     item_expense_date: Optional[str] = None
+    # Device fields
+    condition: Optional[str] = None
+    lock_status: Optional[str] = None
+    previously_locked: Optional[bool] = False
+    unlock_method: Optional[str] = None
 
 
 class StockUpdate(BaseModel):
@@ -139,12 +177,18 @@ class StockUpdate(BaseModel):
     unit_price: Optional[float] = None
     reorder_level: Optional[float] = None
     supplier: Optional[str] = None
+    supplier_phone: Optional[str] = None
     location: Optional[str] = None
     is_active: Optional[bool] = None
     payment_status: Optional[str] = None
     item_expense_amount: Optional[float] = None
     item_expense_description: Optional[str] = None
     item_expense_date: Optional[str] = None
+    # Device fields
+    condition: Optional[str] = None
+    lock_status: Optional[str] = None
+    previously_locked: Optional[bool] = None
+    unlock_method: Optional[str] = None
 
 
 class StockBulkCreate(BaseModel):
@@ -304,6 +348,11 @@ def list_inventory(
 def create_item(payload: StockCreate, _user=Depends(get_current_user)):
     sb = get_supabase()
     data = payload.model_dump(exclude_none=True)
+    # Upsert supplier as a client if phone supplied
+    raw_supplier_phone = data.get("supplier_phone")
+    supplier_name = str(data.get("supplier") or "").strip()
+    if supplier_name or raw_supplier_phone:
+        _upsert_client(sb, supplier_name, raw_supplier_phone)
     mapped = {
         "item_name": data.get("item_name"),
         "sku": data.get("sku"),
@@ -312,13 +361,22 @@ def create_item(payload: StockCreate, _user=Depends(get_current_user)):
         "quantity": data.get("quantity", 0),
         "unit": data.get("unit", "pcs"),
         "cost_price": data.get("unit_cost", 0),
-        "selling_price": data.get("unit_price", 0),
+        "selling_price": data.get("unit_price"),
+        "reorder_level": data.get("reorder_level", 0),
+        "supplier": supplier_name or None,
+        "supplier_phone": _normalize_phone(raw_supplier_phone) or None,
+        "location": data.get("location"),
         "payment_status": (data.get("payment_status") or "").upper() or None,
         "item_expense_amount": data.get("item_expense_amount", 0),
         "item_expense_description": data.get("item_expense_description"),
         "item_expense_date": data.get("item_expense_date"),
+        "condition": data.get("condition"),
+        "lock_status": data.get("lock_status"),
+        "previously_locked": data.get("previously_locked", False),
+        "unlock_method": data.get("unlock_method"),
     }
-    if mapped["payment_status"] == "PAID":
+    mapped = {k: v for k, v in mapped.items() if v is not None or k in ("previously_locked",)}
+    if mapped.get("payment_status") == "PAID":
         mapped["paid_at"] = datetime.utcnow().isoformat()
     result = sb.table("inventory_items").insert(mapped).execute()
     recompute_and_persist_metrics(sb, source="supabase_after_inventory_create")
@@ -598,10 +656,21 @@ def update_item(item_id: str, payload: StockUpdate, _user=Depends(get_current_us
         data["cost_price"] = data.pop("unit_cost")
     if "unit_price" in data:
         data["selling_price"] = data.pop("unit_price")
-    data.pop("reorder_level", None)
-    data.pop("supplier", None)
-    data.pop("location", None)
-    data.pop("is_active", None)
+    # Allowed passthrough fields (now including new device fields + supplier)
+    ALLOWED_DIRECT = {"reorder_level", "supplier", "location", "is_active",
+                      "condition", "lock_status", "previously_locked", "unlock_method"}
+    # supplier_phone needs phone normalization
+    if "supplier_phone" in data:
+        normalized_phone = _normalize_phone(data.pop("supplier_phone"))
+        data["supplier_phone"] = normalized_phone or None
+        if data["supplier_phone"] is None:
+            data.pop("supplier_phone")
+    # Upsert supplier as client when contact info changes
+    new_supplier = data.get("supplier") or existing.get("supplier")
+    new_phone = data.get("supplier_phone") or existing.get("supplier_phone")
+    if (data.get("supplier") or data.get("supplier_phone")) and new_supplier:
+        _upsert_client(sb, str(new_supplier), new_phone)
+    data.pop("is_active", None)  # do not pass is_active as-is; handle separately if needed
     if "payment_status" in data and data.get("payment_status") is not None:
         data["payment_status"] = str(data["payment_status"]).upper()
         if data["payment_status"] == "PAID":

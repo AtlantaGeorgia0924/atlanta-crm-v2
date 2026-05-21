@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useForm } from 'react-hook-form'
 import api from '@/lib/api'
@@ -9,6 +9,17 @@ import { formatCurrency } from '@/lib/utils'
 import { Plus, Pencil, Trash2, ShoppingCart, History, RotateCcw } from 'lucide-react'
 import toast from 'react-hot-toast'
 
+const CONDITION_OPTIONS = ['Brand New', 'Open Box', 'Used - Clean', 'Used - Average', 'Used - Faulty', 'For Parts']
+const LOCK_STATUS_OPTIONS = ['Factory Unlocked', 'Carrier Locked', 'iCloud Locked', 'MDM Locked', 'Unknown']
+const UNLOCK_METHOD_OPTIONS = ['RSIM', 'Official Unlock', 'Bypass', 'MDM Removal', 'Other']
+
+function normalizeNigeriaPhone(raw: string): string {
+  const digits = raw.replace(/\D/g, '')
+  if (digits.startsWith('234') && digits.length >= 13) return digits
+  if (digits.startsWith('0') && digits.length === 11) return '234' + digits.slice(1)
+  return digits
+}
+
 interface StockItem {
   id: string
   item_name: string
@@ -17,12 +28,17 @@ interface StockItem {
   quantity: number
   unit: string
   unit_cost: number
-  unit_price: number
+  unit_price?: number
   reorder_level: number
   supplier: string
+  supplier_phone?: string
   payment_status?: string
   product_status?: string
   sold_out?: boolean
+  condition?: string
+  lock_status?: string
+  previously_locked?: boolean
+  unlock_method?: string
 }
 
 interface FormValues {
@@ -33,11 +49,21 @@ interface FormValues {
   quantity: number
   unit?: string
   unit_cost: number
-  unit_price: number
   reorder_level: number
   supplier?: string
+  supplier_phone?: string
   location?: string
   product_status?: string
+  condition?: string
+  lock_status?: string
+  previously_locked?: boolean
+  unlock_method?: string
+}
+
+interface ClientSuggestion {
+  id: string
+  name: string
+  phone?: string
 }
 
 interface GroupRow {
@@ -87,6 +113,9 @@ export default function Inventory() {
   const [sellItem, setSellItem] = useState<StockItem | null>(null)
   const [historyItem, setHistoryItem] = useState<StockItem | null>(null)
   const [historyPage, setHistoryPage] = useState(1)
+  const [supplierQuery, setSupplierQuery] = useState('')
+  const [showSupplierDropdown, setShowSupplierDropdown] = useState(false)
+  const supplierRef = useRef<HTMLDivElement>(null)
 
   const { data, isLoading } = useQuery({
     queryKey: ['inventory', view, search, lowStock, category, page],
@@ -106,7 +135,7 @@ export default function Inventory() {
   })
   const currency = status?.currency ?? localStorage.getItem('currency') ?? 'NGN'
 
-  const { register, handleSubmit, reset } = useForm<FormValues>()
+  const { register, handleSubmit, reset, setValue: setFormValue, watch: watchForm } = useForm<FormValues>()
   const {
     register: registerSell,
     handleSubmit: handleSubmitSell,
@@ -128,6 +157,26 @@ export default function Inventory() {
   const selectedSellPrice = Number(watchSell('selling_price') || 0)
   const estimatedSaleTotal = selectedSellQty > 0 ? selectedSellQty * selectedSellPrice : 0
 
+  const previouslyLocked = watchForm('previously_locked')
+
+  // Close supplier dropdown on outside click
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (supplierRef.current && !supplierRef.current.contains(e.target as Node)) {
+        setShowSupplierDropdown(false)
+      }
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [])
+
+  const { data: clientSuggestions } = useQuery<{ items: ClientSuggestion[] }>({
+    queryKey: ['clients-search', supplierQuery],
+    queryFn: () => api.get('/clients', { params: { search: supplierQuery, page_size: 8 } }).then((r) => r.data),
+    enabled: supplierQuery.trim().length >= 2,
+    staleTime: 10_000,
+  })
+
   const { data: txData, isLoading: txLoading } = useQuery({
     queryKey: ['inventory-transactions', historyItem?.id, historyPage],
     queryFn: () =>
@@ -147,11 +196,15 @@ export default function Inventory() {
         quantity: Number(values.quantity ?? 0),
         unit: values.unit?.trim() || 'pcs',
         unit_cost: Number(values.unit_cost ?? 0),
-        unit_price: Number(values.unit_price ?? 0),
         reorder_level: Number(values.reorder_level ?? 0),
         supplier: values.supplier?.trim() || undefined,
+        supplier_phone: values.supplier_phone?.trim() ? normalizeNigeriaPhone(values.supplier_phone.trim()) : undefined,
         location: values.location?.trim() || undefined,
         payment_status: values.product_status?.trim() || undefined,
+        condition: values.condition || undefined,
+        lock_status: values.lock_status || undefined,
+        previously_locked: values.previously_locked ?? false,
+        unlock_method: values.previously_locked ? (values.unlock_method?.trim() || undefined) : undefined,
       }
       return editRow ? api.put(`/inventory/${editRow.id}`, payload) : api.post('/inventory', payload)
     },
@@ -161,6 +214,7 @@ export default function Inventory() {
       qc.invalidateQueries({ queryKey: ['inventory-groups'] })
       qc.invalidateQueries({ queryKey: ['dashboard'] })
       setShowForm(false); setEditRow(null); reset()
+      setSupplierQuery('')
     },
     onError: (e: any) => toast.error(e?.response?.data?.detail ?? 'Save failed'),
   })
@@ -255,7 +309,15 @@ export default function Inventory() {
   const openEdit = (row: StockItem) => {
     setEditRow(row)
     setCreateMode('single')
-    reset({ ...row, product_status: row.product_status || row.payment_status || 'AVAILABLE' })
+    reset({
+      ...row,
+      product_status: row.product_status || row.payment_status || 'AVAILABLE',
+      condition: row.condition || '',
+      lock_status: row.lock_status || '',
+      previously_locked: row.previously_locked ?? false,
+      unlock_method: row.unlock_method || '',
+    })
+    setSupplierQuery(row.supplier || '')
     setShowForm(true)
   }
 
@@ -324,7 +386,7 @@ export default function Inventory() {
         </span>
       )
     },
-    { key: 'unit_price',   header: 'Price',  render: (r: StockItem) => formatCurrency(r.unit_price, currency) },
+    { key: 'unit_price',   header: 'Price',  render: (r: StockItem) => formatCurrency(r.unit_price ?? 0, currency) },
     { key: 'reorder_level', header: 'Reorder' },
     { key: 'supplier',     header: 'Supplier' },
     {
@@ -380,7 +442,8 @@ export default function Inventory() {
           onClick={() => {
             setEditRow(null)
             setCreateMode('single')
-            reset({ quantity: 1, unit: 'pcs', unit_cost: 0, unit_price: 0, reorder_level: 0, product_status: 'AVAILABLE' })
+            reset({ quantity: 1, unit: 'pcs', unit_cost: 0, reorder_level: 0, product_status: 'AVAILABLE', previously_locked: false })
+            setSupplierQuery('')
             setShowForm(true)
           }}
           className="btn-primary"
@@ -482,7 +545,30 @@ export default function Inventory() {
         </div>
       )}
 
-      <Modal title={editRow ? 'Edit Product' : 'Add Product'} open={showForm} onClose={() => { setShowForm(false); reset() }} size="lg">
+      <Modal
+        title={editRow ? 'Edit Product' : 'Add Product'}
+        open={showForm}
+        onClose={() => { setShowForm(false); reset(); setSupplierQuery('') }}
+        size="lg"
+        bodyClassName="overflow-y-auto max-h-[70vh]"
+        footer={
+          (editRow || createMode === 'single') ? (
+            <div className="flex justify-end gap-2 pt-3 border-t">
+              <button type="button" className="btn-secondary" onClick={() => { setShowForm(false); reset(); setSupplierQuery('') }}>Cancel</button>
+              <button type="submit" form="product-form" className="btn-primary" disabled={saveMutation.isPending}>
+                {saveMutation.isPending ? 'Saving…' : 'Save'}
+              </button>
+            </div>
+          ) : (
+            <div className="flex justify-end gap-2 pt-3 border-t">
+              <button type="button" className="btn-secondary" onClick={() => setShowForm(false)}>Cancel</button>
+              <button type="button" className="btn-primary" onClick={handleBulkSubmit} disabled={bulkMutation.isPending}>
+                {bulkMutation.isPending ? 'Saving…' : 'Save Multiple'}
+              </button>
+            </div>
+          )
+        }
+      >
         {!editRow && (
           <div className="flex gap-2 mb-4">
             <button className={createMode === 'single' ? 'btn-primary' : 'btn-secondary'} onClick={() => setCreateMode('single')} type="button">Single Product</button>
@@ -491,42 +577,145 @@ export default function Inventory() {
         )}
 
         {(editRow || createMode === 'single') && (
-          <form onSubmit={handleSubmit((v) => saveMutation.mutate(v))} className="grid grid-cols-2 gap-4">
-            {[
-              { name: 'item_name', label: 'Item Name', required: true, colSpan: 2 },
-              { name: 'sku', label: 'SKU' },
-              { name: 'category', label: 'Group / Category' },
-              { name: 'quantity', label: 'Quantity', type: 'number' },
-              { name: 'unit', label: 'Unit' },
-              { name: 'unit_cost', label: 'Unit Cost', type: 'number' },
-              { name: 'unit_price', label: 'Unit Price', type: 'number' },
-              { name: 'reorder_level', label: 'Reorder Level', type: 'number' },
-              { name: 'supplier', label: 'Supplier' },
-              { name: 'location', label: 'Location' },
-            ].map(({ name, label, required, colSpan, type }) => (
-              <div key={name} className={colSpan === 2 ? 'col-span-2' : ''}>
-                <label className="form-label">{label}</label>
-                <input
-                  type={type ?? 'text'}
-                  step={type === 'number' ? '0.01' : undefined}
-                  className="form-input"
-                  {...register(name as any, { ...(required ? { required: 'Required' } : {}), ...(type === 'number' ? { valueAsNumber: true } : {}) })}
-                />
+          <form id="product-form" onSubmit={handleSubmit((v) => saveMutation.mutate(v))} className="space-y-4">
+            {/* Basic Info */}
+            <div className="grid grid-cols-2 gap-4">
+              <div className="col-span-2">
+                <label className="form-label">Item Name <span className="text-red-500">*</span></label>
+                <input type="text" className="form-input" {...register('item_name', { required: 'Required' })} />
               </div>
-            ))}
-            <div className="col-span-2">
-              <label className="form-label">Product Status</label>
-              <select className="form-input" {...register('product_status')}>
-                <option value="AVAILABLE">AVAILABLE</option>
-                <option value="PENDING DEAL">PENDING DEAL</option>
-                <option value="SOLD">SOLD</option>
-              </select>
+              <div>
+                <label className="form-label">SKU</label>
+                <input type="text" className="form-input" {...register('sku')} />
+              </div>
+              <div>
+                <label className="form-label">Group / Category</label>
+                <input type="text" className="form-input" {...register('category')} />
+              </div>
+              <div>
+                <label className="form-label">Quantity</label>
+                <input type="number" step="0.01" className="form-input" {...register('quantity', { valueAsNumber: true })} />
+              </div>
+              <div>
+                <label className="form-label">Unit</label>
+                <input type="text" className="form-input" placeholder="pcs" {...register('unit')} />
+              </div>
+              <div>
+                <label className="form-label">Unit Cost</label>
+                <input type="number" step="0.01" className="form-input" {...register('unit_cost', { valueAsNumber: true })} />
+              </div>
+              <div>
+                <label className="form-label">Reorder Level</label>
+                <input type="number" step="0.01" className="form-input" {...register('reorder_level', { valueAsNumber: true })} />
+              </div>
             </div>
-            <div className="col-span-2 flex justify-end gap-2">
-              <button type="button" className="btn-secondary" onClick={() => setShowForm(false)}>Cancel</button>
-              <button type="submit" className="btn-primary" disabled={saveMutation.isPending}>
-                {saveMutation.isPending ? 'Saving…' : 'Save'}
-              </button>
+
+            {/* Supplier / Contact */}
+            <div className="space-y-2">
+              <p className="text-xs font-semibold uppercase tracking-wide text-gray-500 mt-2">Supplier / Contact</p>
+              <div className="grid grid-cols-2 gap-4">
+                <div ref={supplierRef} className="relative">
+                  <label className="form-label">Supplier / Contact</label>
+                  <input
+                    type="text"
+                    className="form-input"
+                    placeholder="Name or phone…"
+                    value={supplierQuery}
+                    onFocus={() => setShowSupplierDropdown(true)}
+                    onChange={(e) => {
+                      setSupplierQuery(e.target.value)
+                      setFormValue('supplier', e.target.value)
+                      setShowSupplierDropdown(true)
+                    }}
+                  />
+                  {showSupplierDropdown && (clientSuggestions?.items ?? []).length > 0 && (
+                    <ul className="absolute z-50 left-0 right-0 bg-white border border-gray-200 rounded-lg shadow-lg mt-1 max-h-48 overflow-y-auto text-sm">
+                      {(clientSuggestions!.items as ClientSuggestion[]).map((c) => (
+                        <li
+                          key={c.id}
+                          className="px-3 py-2 hover:bg-gray-50 cursor-pointer"
+                          onMouseDown={() => {
+                            setFormValue('supplier', c.name)
+                            setFormValue('supplier_phone', c.phone ?? '')
+                            setSupplierQuery(c.name)
+                            setShowSupplierDropdown(false)
+                          }}
+                        >
+                          <span className="font-medium">{c.name}</span>
+                          {c.phone && <span className="ml-2 text-gray-400">{c.phone}</span>}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+                <div>
+                  <label className="form-label">Supplier Phone</label>
+                  <input
+                    type="tel"
+                    className="form-input"
+                    placeholder="080…  or  2348…"
+                    {...register('supplier_phone')}
+                  />
+                </div>
+              </div>
+            </div>
+
+            {/* Device Details */}
+            <div className="space-y-2">
+              <p className="text-xs font-semibold uppercase tracking-wide text-gray-500 mt-2">Device Details</p>
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="form-label">Condition</label>
+                  <select className="form-input" {...register('condition')}>
+                    <option value="">— Select —</option>
+                    {CONDITION_OPTIONS.map((o) => <option key={o} value={o}>{o}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label className="form-label">Lock Status</label>
+                  <select className="form-input" {...register('lock_status')}>
+                    <option value="">— Select —</option>
+                    {LOCK_STATUS_OPTIONS.map((o) => <option key={o} value={o}>{o}</option>)}
+                  </select>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-3 mt-1">
+                <label className="flex items-center gap-2 cursor-pointer select-none text-sm text-gray-700">
+                  <input type="checkbox" className="rounded" {...register('previously_locked')} />
+                  Previously Locked
+                </label>
+              </div>
+
+              {previouslyLocked && (
+                <div>
+                  <label className="form-label">Unlock Method</label>
+                  <select className="form-input" {...register('unlock_method')}>
+                    <option value="">— Select —</option>
+                    {UNLOCK_METHOD_OPTIONS.map((o) => <option key={o} value={o}>{o}</option>)}
+                  </select>
+                </div>
+              )}
+            </div>
+
+            {/* Other */}
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="form-label">Location</label>
+                <input type="text" className="form-input" {...register('location')} />
+              </div>
+              <div>
+                <label className="form-label">Product Status</label>
+                <select className="form-input" {...register('product_status')}>
+                  <option value="AVAILABLE">AVAILABLE</option>
+                  <option value="PENDING DEAL">PENDING DEAL</option>
+                  <option value="SOLD">SOLD</option>
+                </select>
+              </div>
+              <div className="col-span-2">
+                <label className="form-label">Description</label>
+                <textarea className="form-input" rows={2} {...register('description')} />
+              </div>
             </div>
           </form>
         )}
@@ -534,21 +723,15 @@ export default function Inventory() {
         {!editRow && createMode === 'multiple' && (
           <div className="space-y-3">
             <p className="text-sm text-gray-600">
-              Paste a JSON array for bulk add. Example: [{'{"item_name":"IPHONE 14","category":"IPHONE","quantity":1,"unit_cost":500,"unit_price":650}'}]
+              Paste a JSON array for bulk add. Example: [{'{"item_name":"IPHONE 14","category":"IPHONE","quantity":1,"unit_cost":500}'}]
             </p>
             <textarea
               className="form-input font-mono text-xs"
               rows={12}
               value={bulkInput}
               onChange={(e) => setBulkInput(e.target.value)}
-              placeholder='[{"item_name":"IPHONE 14","category":"IPHONE","quantity":1,"unit_cost":500,"unit_price":650}]'
+              placeholder='[{"item_name":"IPHONE 14","category":"IPHONE","quantity":1,"unit_cost":500}]'
             />
-            <div className="flex justify-end gap-2">
-              <button type="button" className="btn-secondary" onClick={() => setShowForm(false)}>Cancel</button>
-              <button type="button" className="btn-primary" onClick={handleBulkSubmit} disabled={bulkMutation.isPending}>
-                {bulkMutation.isPending ? 'Saving…' : 'Save Multiple'}
-              </button>
-            </div>
           </div>
         )}
       </Modal>
