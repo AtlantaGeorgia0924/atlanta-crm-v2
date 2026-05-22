@@ -1,4 +1,4 @@
-import { useMemo, useState, useDeferredValue } from 'react'
+import { useMemo, useState, useDeferredValue, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useForm } from 'react-hook-form'
 import { useNavigate } from 'react-router-dom'
@@ -36,12 +36,18 @@ interface LedgerItem {
 
 interface LedgerPayment {
   id: string
-  billing_row_id: string
-  amount: number
+  service_job_id?: string
+  billing_row_id?: string
+  payment_amount?: number
+  amount?: number
   payment_method?: string
   reference_no?: string
   payment_date?: string
+  payment_note?: string
   notes?: string
+  applied_by_name?: string
+  new_status?: string
+  is_reversed?: boolean
   created_at?: string
 }
 
@@ -107,11 +113,19 @@ export default function Debtors() {
   })
   const currency = status?.currency ?? localStorage.getItem('currency') ?? 'NGN'
 
+  const { data: paymentReferencePreview } = useQuery<{ reference_no: string }>({
+    queryKey: ['debtor-payment-reference-preview', selectedRow?.client_name],
+    queryFn: () => api.get('/payments/reference').then((r) => r.data),
+    enabled: !!selectedRow,
+  })
+
   const {
     register,
     handleSubmit,
     reset,
     watch,
+    setValue,
+    getValues,
     formState: { errors },
   } = useForm<PaymentForm>()
   const paymentAmount = Number(watch('amount') || 0)
@@ -164,6 +178,13 @@ export default function Debtors() {
     },
     onError: (e: any) => toast.error(e?.response?.data?.detail ?? 'Payment failed'),
   })
+
+  useEffect(() => {
+    if (!selectedRow) return
+    if (!paymentReferencePreview?.reference_no) return
+    if (getValues('reference_no')) return
+    setValue('reference_no', paymentReferencePreview.reference_no)
+  }, [paymentReferencePreview, selectedRow, setValue, getValues])
 
   const whatsappMutation = useMutation({
     mutationFn: (phoneNumber: string) =>
@@ -307,7 +328,11 @@ export default function Debtors() {
               setSelectedRow(r)
               setAllocationMode('auto')
               setManualAllocations({})
-              reset({ payment_date: new Date().toISOString().slice(0, 10), amount: Number(r.total_outstanding ?? r.balance ?? 0) })
+              reset({
+                payment_date: new Date().toISOString().slice(0, 10),
+                amount: Number(r.total_outstanding ?? r.balance ?? 0),
+                reference_no: paymentReferencePreview?.reference_no || '',
+              })
             }}
             className="btn-primary py-1 px-2 text-xs"
           >
@@ -510,11 +535,17 @@ export default function Debtors() {
             {!!ledger?.payment_history?.length && (
               <div className="rounded-lg border border-gray-200 p-3 text-sm max-h-44 overflow-y-auto">
                 <p className="font-medium mb-2">Recent Payment History</p>
-                <div className="space-y-1">
+                <div className="space-y-2">
                   {ledger.payment_history.slice(0, 20).map((p) => (
-                    <div key={p.id} className="flex justify-between gap-3 text-xs">
-                      <span>{String(p.payment_date || p.created_at || '').slice(0, 10)} • {p.payment_method || 'payment'}</span>
-                      <span className="font-medium">{formatCurrency(Number(p.amount || 0), currency)}</span>
+                    <div key={p.id} className="flex justify-between gap-3 text-xs border-b border-gray-100 pb-1.5 last:border-b-0">
+                      <div>
+                        <p className="font-medium text-gray-700">{p.reference_no || p.id.slice(0, 8)}</p>
+                        <p className="text-gray-500">{String(p.payment_date || p.created_at || '').slice(0, 19).replace('T', ' ')} • {p.payment_method || 'payment'}{p.applied_by_name ? ` • ${p.applied_by_name}` : ''}</p>
+                        {(p.payment_note || p.notes) && <p className="text-gray-500">{p.payment_note || p.notes}</p>}
+                      </div>
+                      <span className={`font-medium ${Number(p.payment_amount ?? p.amount ?? 0) < 0 ? 'text-amber-700' : 'text-emerald-700'}`}>
+                        {formatCurrency(Number(p.payment_amount ?? p.amount ?? 0), currency)}
+                      </span>
                     </div>
                   ))}
                 </div>

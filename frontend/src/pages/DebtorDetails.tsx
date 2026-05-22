@@ -25,6 +25,20 @@ interface DebtorDetails {
   items: DebtorItem[]
   item_count: number
   total_outstanding: number
+  payment_history?: Array<{
+    id: string
+    reference_no?: string
+    service_job_id?: string
+    payment_amount?: number
+    amount?: number
+    payment_method?: string
+    payment_note?: string
+    notes?: string
+    applied_by_name?: string
+    payment_date?: string
+    created_at?: string
+    is_reversed?: boolean
+  }>
 }
 
 interface WhatsAppContact {
@@ -239,6 +253,40 @@ export default function DebtorDetails() {
             </tbody>
           </table>
         </div>
+      </div>
+
+      {/* Payment Timeline */}
+      <div className="card p-4">
+        <h2 className="text-lg font-semibold mb-3">Payment Timeline</h2>
+        {!debtor.payment_history?.length ? (
+          <p className="text-sm text-gray-500">No payment transactions recorded yet.</p>
+        ) : (
+          <div className="space-y-2 max-h-80 overflow-y-auto">
+            {debtor.payment_history.map((payment) => {
+              const amount = Number(payment.payment_amount ?? payment.amount ?? 0)
+              const note = payment.payment_note || payment.notes
+              return (
+                <div key={payment.id} className="rounded-lg border border-gray-200 px-3 py-2 text-sm flex items-start justify-between gap-4">
+                  <div className="space-y-0.5">
+                    <p className="font-medium text-gray-800">{payment.reference_no || payment.id.slice(0, 8)}</p>
+                    <p className="text-xs text-gray-500">
+                      {String(payment.payment_date || payment.created_at || '').slice(0, 19).replace('T', ' ')}
+                      {payment.applied_by_name ? ` • ${payment.applied_by_name}` : ''}
+                    </p>
+                    <p className="text-xs text-gray-500">
+                      {payment.payment_method || 'payment'}
+                      {payment.is_reversed ? ' • reversed' : ''}
+                    </p>
+                    {note && <p className="text-xs text-gray-600">{note}</p>}
+                  </div>
+                  <span className={`font-semibold ${amount < 0 ? 'text-amber-700' : 'text-emerald-700'}`}>
+                    {formatCurrency(amount, currency)}
+                  </span>
+                </div>
+              )
+            })}
+          </div>
+        )}
       </div>
 
       {/* Bill Preview Modal */}

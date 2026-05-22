@@ -95,6 +95,21 @@ interface ClientSuggestion {
   notes?: string
 }
 
+interface PaymentHistoryRow {
+  id: string
+  service_job_id?: string
+  payment_amount?: number
+  amount?: number
+  payment_method?: string
+  reference_no?: string
+  payment_note?: string
+  notes?: string
+  applied_by_name?: string
+  payment_date?: string
+  created_at?: string
+  is_reversed?: boolean
+}
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function getDefaultMonth(): string {
@@ -420,7 +435,7 @@ export default function Billing() {
   const applyPaymentMutation = useMutation({
     mutationFn: ({ id, amount }: { id: string; amount: number }) =>
       api.post('/payments', {
-        billing_row_id: id,
+        service_job_id: id,
         amount,
         payment_method: applyPayMethod,
         reference_no: applyPayReference.trim() || undefined,
@@ -456,7 +471,7 @@ export default function Billing() {
 
   const reversePaymentMutation = useMutation({
     mutationFn: ({ id, amount, reason }: { id: string; amount: number; reason?: string }) =>
-      api.post('/payments/reverse', { billing_row_id: id, amount, reason: reason || undefined }),
+      api.post('/payments/reverse', { service_job_id: id, amount, reason: reason || undefined }),
     retry: 1,
     onSuccess: () => {
       toast.success('Payment reversed')
@@ -527,6 +542,19 @@ export default function Billing() {
   }
 
   const grouped: BillingGroup[] = useMemo(() => groupedData?.groups ?? [], [groupedData])
+
+  const { data: paymentReferencePreview } = useQuery<{ reference_no: string }>({
+    queryKey: ['payment-reference-preview', applyPayRow?.id],
+    queryFn: () => api.get('/payments/reference').then((r) => r.data),
+    enabled: !!applyPayRow && isAdmin,
+  })
+
+  useEffect(() => {
+    if (!applyPayRow) return
+    if (applyPayReference.trim()) return
+    const generated = paymentReferencePreview?.reference_no
+    if (generated) setApplyPayReference(generated)
+  }, [applyPayRow, applyPayReference, paymentReferencePreview])
 
   const flatRows: FlatBillingEntry[] = useMemo(() => {
     const entries: FlatBillingEntry[] = []
@@ -1098,6 +1126,7 @@ export default function Billing() {
                             <span>ID: <span className="font-mono text-gray-400">{row.id.slice(0, 8)}…</span></span>
                           </div>
                           {row.notes && <p className="italic text-gray-400">📝 {row.notes}</p>}
+                          {isAdmin && <InvoicePaymentHistory invoiceId={row.id} currency={currency} />}
                           <div className="flex flex-wrap gap-2 pt-1">
                             <InlineBtn icon={<Pencil size={11} />} label="Edit" onClick={() => { void openEdit(row) }} />
                             {isAdmin && <InlineBtn icon={<CreditCard size={11} />} label="Apply Payment" onClick={() => openApplyPayment(row)} />}
@@ -1330,6 +1359,13 @@ export default function Billing() {
               />
               <p className="text-xs text-gray-400 mt-1">Enter incremental amount to add to this invoice.</p>
             </div>
+            <div className="rounded-md border border-gray-200 bg-white px-3 py-2 text-xs space-y-1">
+              <p className="font-medium text-gray-700">Allocation Preview</p>
+              <p className="text-gray-500">{applyPayRow.service_name}</p>
+              <p className="text-gray-700">
+                Applying: <strong>{formatCurrency(Math.max(0, Math.min(Number(parseFloat(applyPayAmount || '0') || 0), Number(applyPayRow.balance || 0))), currency)}</strong>
+              </p>
+            </div>
             <div>
               <label className="form-label">Payment Method</label>
               <select className="form-input" value={applyPayMethod} onChange={(e) => setApplyPayMethod(e.target.value)}>
@@ -1342,13 +1378,14 @@ export default function Billing() {
             <div>
               <label className="form-label">Reference No</label>
               <input className="form-input" value={applyPayReference} onChange={(e) => setApplyPayReference(e.target.value)} />
+              <p className="text-xs text-gray-400 mt-1">Auto-generated but editable for operator overrides.</p>
             </div>
             <div>
               <label className="form-label">Payment Date</label>
               <input type="date" className="form-input" value={applyPayDate} onChange={(e) => setApplyPayDate(e.target.value)} />
             </div>
             <div>
-              <label className="form-label">Notes</label>
+              <label className="form-label">Payment Note</label>
               <textarea rows={2} className="form-input" value={applyPayNotes} onChange={(e) => setApplyPayNotes(e.target.value)} />
             </div>
           </div>
@@ -1425,6 +1462,52 @@ export default function Billing() {
 }
 
 // ─── Sub-components ──────────────────────────────────────────────────────────
+
+function InvoicePaymentHistory({ invoiceId, currency }: { invoiceId: string; currency: string }) {
+  const { data, isLoading } = useQuery<PaymentHistoryRow[]>({
+    queryKey: ['invoice-payments', invoiceId],
+    queryFn: () => api.get('/payments', { params: { service_job_id: invoiceId } }).then((r) => r.data),
+    enabled: !!invoiceId,
+  })
+
+  const rows = data ?? []
+  return (
+    <div className="rounded-md border border-amber-100 bg-white px-3 py-2">
+      <p className="text-[11px] font-semibold text-gray-700 mb-1">Payment History</p>
+      {isLoading ? (
+        <p className="text-[11px] text-gray-400">Loading payment history...</p>
+      ) : rows.length === 0 ? (
+        <p className="text-[11px] text-gray-400">No payment transactions yet.</p>
+      ) : (
+        <div className="space-y-1.5">
+          {rows.slice(0, 10).map((payment) => {
+            const amount = Number(payment.payment_amount ?? payment.amount ?? 0)
+            const note = payment.payment_note || payment.notes || ''
+            return (
+              <div key={payment.id} className="flex items-start justify-between gap-4 text-[11px]">
+                <div className="space-y-0.5">
+                  <p className="font-medium text-gray-700">{payment.reference_no || payment.id.slice(0, 8)}</p>
+                  <p className="text-gray-500">
+                    {String(payment.payment_date || payment.created_at || '').slice(0, 19).replace('T', ' ')}
+                    {payment.applied_by_name ? ` • ${payment.applied_by_name}` : ''}
+                  </p>
+                  <p className="text-gray-500">
+                    {payment.payment_method || 'payment'}
+                    {note ? ` • ${note}` : ''}
+                    {payment.is_reversed ? ' • reversed' : ''}
+                  </p>
+                </div>
+                <span className={`font-semibold ${amount < 0 ? 'text-amber-700' : 'text-emerald-700'}`}>
+                  {formatCurrency(amount, currency)}
+                </span>
+              </div>
+            )
+          })}
+        </div>
+      )}
+    </div>
+  )
+}
 
 function FilterBadge({ label, onRemove }: { label: string; onRemove: () => void }) {
   return (

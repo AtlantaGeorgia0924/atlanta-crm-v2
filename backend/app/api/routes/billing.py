@@ -16,6 +16,7 @@ from app.core.debtors import compute_debtors_from_supabase
 from app.core.metrics_refresh import recompute_and_persist_metrics
 from app.core.rbac import user_is_admin
 from app.core.financial_events import emit_financial_event
+from app.core.payments_engine import apply_invoice_payment
 
 router = APIRouter()
 
@@ -759,17 +760,41 @@ def debtor_ledger(client_name: str, _user=Depends(get_current_user)):
 
     payment_history = []
     if invoice_ids:
-        history_rows = (
-            sb.table("payments")
-            .select("id,billing_row_id,amount,payment_method,reference_no,payment_date,notes,created_at")
-            .in_("billing_row_id", invoice_ids)
-            .order("created_at", desc=True)
-            .limit(500)
-            .execute()
-            .data
-            or []
-        )
-        payment_history = history_rows
+        try:
+            history_rows = (
+                sb.table("payments")
+                .select(
+                    "id,service_job_id,billing_row_id,payment_amount,amount,payment_method,reference_no,"
+                    "payment_date,payment_note,notes,created_at,applied_by_name,new_balance,new_status,"
+                    "is_reversed,reversal_reason"
+                )
+                .in_("service_job_id", invoice_ids)
+                .order("created_at", desc=True)
+                .limit(500)
+                .execute()
+                .data
+                or []
+            )
+        except Exception:
+            history_rows = (
+                sb.table("payments")
+                .select("id,billing_row_id,amount,payment_method,reference_no,payment_date,notes,created_at")
+                .in_("billing_row_id", invoice_ids)
+                .order("created_at", desc=True)
+                .limit(500)
+                .execute()
+                .data
+                or []
+            )
+        payment_history = [
+            {
+                **row,
+                "service_job_id": row.get("service_job_id") or row.get("billing_row_id"),
+                "payment_amount": to_number(row.get("payment_amount") or row.get("amount")),
+                "payment_note": row.get("payment_note") or row.get("notes"),
+            }
+            for row in history_rows
+        ]
 
     total_outstanding = sum(to_number(i.get("balance")) for i in invoices)
     unpaid_jobs = len(invoices)
@@ -859,58 +884,37 @@ def apply_debtor_payment(client_name: str, payload: DebtorPaymentApplyPayload, _
     applied_total = 0.0
     unapplied = total_payment
     allocation_results = []
+    multiple_allocations = len(allocations) > 1
+    base_reference = str(payload.reference_no or "").strip() or None
 
-    for alloc in allocations:
+    for idx, alloc in enumerate(allocations, start=1):
         billing_row_id = str(alloc["billing_row_id"])
         applied_amount = to_number(alloc["amount"])
         before = open_map[billing_row_id]
 
-        prev_paid = to_number(before.get("paid_amount"))
-        total = to_number(before.get("amount_charged"))
-        prev_balance = to_number(before.get("balance"))
-        new_paid = prev_paid + applied_amount
-        total, new_paid, new_status = _compute_financial_state(total, new_paid)
-        new_balance = compute_outstanding(total, new_paid)
+        invoice_reference = None
+        if base_reference and not multiple_allocations:
+            invoice_reference = base_reference
+        elif base_reference and multiple_allocations:
+            invoice_reference = f"{base_reference}-{idx:02d}"
 
-        sb.table("service_jobs").update(
-            {
-                "paid_amount": new_paid,
-                "payment_status": new_status,
-                "paid_date": payment_date if new_status == "PAID" else None,
-                "paid_at": datetime.utcnow().isoformat() if new_status == "PAID" else None,
-            }
-        ).eq("id", billing_row_id).execute()
+        payment_result = apply_invoice_payment(
+            sb,
+            service_job_id=billing_row_id,
+            payment_amount=applied_amount,
+            payment_method=payload.payment_method,
+            payment_note=payload.notes,
+            reference_no=invoice_reference,
+            payment_date=payment_date,
+            applied_by=str(_user.id),
+            applied_by_name=_user.full_name or _user.email,
+        )
 
-        try:
-            sb.table("payments").insert(
-                {
-                    "billing_row_id": billing_row_id,
-                    "client_id": None,
-                    "amount": applied_amount,
-                    "payment_method": payload.payment_method,
-                    "reference_no": payload.reference_no,
-                    "payment_date": payment_date,
-                    "notes": payload.notes,
-                    "previous_balance": prev_balance,
-                    "new_balance": new_balance,
-                    "performed_by": str(_user.id),
-                }
-            ).execute()
-        except Exception:
-            try:
-                sb.table("payments").insert(
-                    {
-                        "billing_row_id": billing_row_id,
-                        "client_id": None,
-                        "amount": applied_amount,
-                        "payment_method": payload.payment_method,
-                        "reference_no": payload.reference_no,
-                        "payment_date": payment_date,
-                        "notes": payload.notes,
-                    }
-                ).execute()
-            except Exception:
-                pass
+        prev_paid = payment_result["previous_paid_amount"]
+        prev_balance = payment_result["previous_balance"]
+        new_paid = payment_result["new_paid_amount"]
+        new_balance = payment_result["new_balance"]
+        new_status = payment_result["new_status"]
 
         _log_billing_audit(
             sb,
@@ -925,6 +929,8 @@ def apply_debtor_payment(client_name: str, payload: DebtorPaymentApplyPayload, _
                 "previous_balance": prev_balance,
                 "new_balance": new_balance,
                 "payment_method": payload.payment_method,
+                "payment_reference": payment_result["payment"].get("reference_no"),
+                "payment_note": payload.notes,
                 "mode": mode,
             },
         )
@@ -937,6 +943,7 @@ def apply_debtor_payment(client_name: str, payload: DebtorPaymentApplyPayload, _
                 "new_balance": new_balance,
                 "applied_amount": applied_amount,
                 "new_status": new_status,
+                "reference_no": payment_result["payment"].get("reference_no"),
             }
         )
         applied_total += applied_amount
@@ -952,7 +959,8 @@ def apply_debtor_payment(client_name: str, payload: DebtorPaymentApplyPayload, _
             "mode": mode,
             "allocations": allocation_results,
             "payment_method": payload.payment_method,
-            "reference_no": payload.reference_no,
+            "reference_no": base_reference,
+            "payment_note": payload.notes,
         },
     )
     recompute_and_persist_metrics(sb, source="supabase_after_debtor_payment")
@@ -1212,12 +1220,52 @@ def get_debtor_items(client_name: str, _user=Depends(get_current_user)):
     sb = get_supabase()
     client_items = _open_client_invoices(sb, client_name)
     total_outstanding = sum(to_number(item.get("balance")) for item in client_items)
+    invoice_ids = [str(i.get("id")) for i in client_items if i.get("id")]
+
+    payment_history = []
+    if invoice_ids:
+        try:
+            history_rows = (
+                sb.table("payments")
+                .select(
+                    "id,service_job_id,billing_row_id,payment_amount,amount,payment_method,reference_no,"
+                    "payment_date,payment_note,notes,created_at,applied_by_name,new_balance,new_status,"
+                    "is_reversed,reversal_reason"
+                )
+                .in_("service_job_id", invoice_ids)
+                .order("created_at", desc=True)
+                .limit(1000)
+                .execute()
+                .data
+                or []
+            )
+        except Exception:
+            history_rows = (
+                sb.table("payments")
+                .select("id,billing_row_id,amount,payment_method,reference_no,payment_date,notes,created_at")
+                .in_("billing_row_id", invoice_ids)
+                .order("created_at", desc=True)
+                .limit(1000)
+                .execute()
+                .data
+                or []
+            )
+        payment_history = [
+            {
+                **row,
+                "service_job_id": row.get("service_job_id") or row.get("billing_row_id"),
+                "payment_amount": to_number(row.get("payment_amount") or row.get("amount")),
+                "payment_note": row.get("payment_note") or row.get("notes"),
+            }
+            for row in history_rows
+        ]
 
     return {
         "client_name": client_name,
         "items": client_items,
         "item_count": len(client_items),
         "total_outstanding": total_outstanding,
+        "payment_history": payment_history,
     }
 
 
