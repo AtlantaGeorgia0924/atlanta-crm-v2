@@ -1,27 +1,11 @@
 import axios from 'axios'
 import { useAuthStore } from '@/store/authStore'
 
-const envBaseUrl = String(import.meta.env.VITE_API_URL ?? '').trim()
-const isBrowser = typeof window !== 'undefined'
-const isLocalFrontend = isBrowser && /^(localhost|127\.0\.0\.1)$/i.test(window.location.hostname)
-
-function resolveApiBaseUrl(): string {
-  if (!envBaseUrl) return '/api'
-
-  const normalized = envBaseUrl.replace(/\/+$/, '')
-  const pointsToLocalApi = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(normalized)
-  const mixedContentRisk = isBrowser && window.location.protocol === 'https:' && /^http:\/\//i.test(normalized)
-
-  // Never use local or insecure HTTP API from a deployed HTTPS frontend.
-  if (isBrowser && !isLocalFrontend && (pointsToLocalApi || mixedContentRisk)) {
-    return '/api'
-  }
-
-  return normalized
-}
-
+// In development Vite proxies /api → localhost:8000 (vite.config.ts).
+// In production Vercel proxies /api → https://crm-api.onrender.com (vercel.json).
+// Always use /api so the correct proxy handles routing in every environment.
 const api = axios.create({
-  baseURL: resolveApiBaseUrl(),
+  baseURL: '/api',
 })
 
 api.interceptors.request.use((config) => {
