@@ -92,12 +92,31 @@ BEGIN
 END $$;
 
 -- Debtor payment allocation metadata (backward compatible with legacy inserts).
-ALTER TABLE payments ADD COLUMN IF NOT EXISTS previous_balance NUMERIC(12,2);
-ALTER TABLE payments ADD COLUMN IF NOT EXISTS new_balance NUMERIC(12,2);
-ALTER TABLE payments ADD COLUMN IF NOT EXISTS performed_by TEXT;
+DO $$
+BEGIN
+	IF to_regclass('public.payments') IS NOT NULL THEN
+		EXECUTE 'ALTER TABLE payments ADD COLUMN IF NOT EXISTS previous_balance NUMERIC(12,2)';
+		EXECUTE 'ALTER TABLE payments ADD COLUMN IF NOT EXISTS new_balance NUMERIC(12,2)';
+		EXECUTE 'ALTER TABLE payments ADD COLUMN IF NOT EXISTS performed_by TEXT';
 
-CREATE INDEX IF NOT EXISTS idx_payments_billing_row_created
-ON payments (billing_row_id, created_at DESC);
+		IF EXISTS (
+			SELECT 1 FROM information_schema.columns
+			WHERE table_schema = 'public' AND table_name = 'payments' AND column_name = 'billing_row_id'
+		) AND EXISTS (
+			SELECT 1 FROM information_schema.columns
+			WHERE table_schema = 'public' AND table_name = 'payments' AND column_name = 'created_at'
+		) THEN
+			EXECUTE 'CREATE INDEX IF NOT EXISTS idx_payments_billing_row_created ON payments (billing_row_id, created_at DESC)';
+		END IF;
 
-CREATE INDEX IF NOT EXISTS idx_payments_performed_by_created
-ON payments (performed_by, created_at DESC);
+		IF EXISTS (
+			SELECT 1 FROM information_schema.columns
+			WHERE table_schema = 'public' AND table_name = 'payments' AND column_name = 'performed_by'
+		) AND EXISTS (
+			SELECT 1 FROM information_schema.columns
+			WHERE table_schema = 'public' AND table_name = 'payments' AND column_name = 'created_at'
+		) THEN
+			EXECUTE 'CREATE INDEX IF NOT EXISTS idx_payments_performed_by_created ON payments (performed_by, created_at DESC)';
+		END IF;
+	END IF;
+END $$;
