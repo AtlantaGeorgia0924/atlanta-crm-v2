@@ -15,8 +15,11 @@ from app.core.financials import (
 from app.core.debtors import compute_debtors_from_supabase
 from app.core.metrics_refresh import recompute_and_persist_metrics
 from app.core.rbac import user_is_admin
+from app.core.financial_events import emit_financial_event
 
 router = APIRouter()
+
+_SERVICE_JOB_COLUMNS_CACHE: set[str] | None = None
 
 
 def _iso_date_or_none(value: Optional[str]) -> Optional[str]:
@@ -24,6 +27,110 @@ def _iso_date_or_none(value: Optional[str]) -> Optional[str]:
     if not text:
         return None
     return text[:10]
+
+
+def _normalize_search_term(value: Optional[str]) -> str:
+    text = str(value or "").strip().lower()
+    if not text:
+        return ""
+    return re.sub(r"\s+", " ", text)
+
+
+def _service_job_columns(sb) -> set[str]:
+    global _SERVICE_JOB_COLUMNS_CACHE
+    if _SERVICE_JOB_COLUMNS_CACHE is not None:
+        return _SERVICE_JOB_COLUMNS_CACHE
+    rows = (
+        sb.table("information_schema.columns")
+        .select("column_name")
+        .eq("table_schema", "public")
+        .eq("table_name", "service_jobs")
+        .execute()
+        .data
+        or []
+    )
+    _SERVICE_JOB_COLUMNS_CACHE = {str(r.get("column_name")) for r in rows if r.get("column_name")}
+    return _SERVICE_JOB_COLUMNS_CACHE
+
+
+def _inventory_search_service_ids(sb, term: str) -> list[str]:
+    if not term:
+        return []
+    wildcard = "%" + "%".join(term.split()) + "%"
+
+    # Search inventory item metadata first, then map matching items to related service rows.
+    inventory_matches = (
+        sb.table("inventory_items")
+        .select("id")
+        .or_(
+            f"item_name.ilike.{wildcard},"
+            f"imei.ilike.{wildcard},"
+            f"sku.ilike.{wildcard},"
+            f"supplier.ilike.{wildcard},"
+            f"unlock_method.ilike.{wildcard}"
+        )
+        .limit(500)
+        .execute()
+        .data
+        or []
+    )
+    inventory_ids = [str(r.get("id")) for r in inventory_matches if r.get("id")]
+    if not inventory_ids:
+        return []
+
+    links = (
+        sb.table("inventory_sale_items")
+        .select("service_job_id")
+        .in_("source_inventory_item_id", inventory_ids)
+        .limit(1000)
+        .execute()
+        .data
+        or []
+    )
+    result = []
+    for row in links:
+        service_job_id = row.get("service_job_id")
+        if service_job_id:
+            result.append(str(service_job_id))
+    return list(dict.fromkeys(result))
+
+
+def _apply_service_search_filters(sb, query, raw_search: Optional[str]):
+    term = _normalize_search_term(raw_search)
+    if not term:
+        return query, False
+
+    wildcard = "%" + "%".join(term.split()) + "%"
+    columns = _service_job_columns(sb)
+
+    search_fields = [
+        "client_name",
+        "phone_number",
+        "service_name",
+        "description",
+        "notes",
+        "legacy_source_id",
+        "imei",
+        "serial_number",
+        "device_model",
+        "supplier",
+        "unlock_method",
+    ]
+    clauses = [f"{field}.ilike.{wildcard}" for field in search_fields if field in columns]
+
+    try:
+        uuid.UUID(term)
+        clauses.append(f"id.eq.{term}")
+    except Exception:
+        pass
+
+    related_ids = _inventory_search_service_ids(sb, term)
+    if related_ids:
+        clauses.append(f"id.in.({','.join(related_ids)})")
+
+    if clauses:
+        query = query.or_(",".join(clauses))
+    return query, True
 
 
 def _log_billing_audit(
@@ -345,11 +452,14 @@ def list_billing(
             query = query.eq("payment_status", normalized)
     if client_id:
         query = query.eq("client_id", client_id)
+    query, has_search = _apply_service_search_filters(sb, query, search)
+
+    # Search defaults to global (all dates). Date filters remain optional refinements.
     effective_from = from_date or date_from
     effective_to = to_date or date_to
-    if effective_from:
+    if (effective_from and (not has_search or from_date or date_from)):
         query = query.gte("service_date", _iso_date_or_none(effective_from))
-    if effective_to:
+    if (effective_to and (not has_search or to_date or date_to)):
         query = query.lte("service_date", _iso_date_or_none(effective_to))
     if min_amount is not None:
         query = query.gte("amount_charged", min_amount)
@@ -365,24 +475,6 @@ def list_billing(
             query = query.eq("payment_status", "PAID")
         elif normalized_paid in {"unpaid", "not_paid"}:
             query = query.neq("payment_status", "PAID")
-
-    if search:
-        term = search.strip()
-        if term:
-            try:
-                uuid.UUID(term)
-                query = query.eq("id", term)
-            except Exception:
-                pass
-            # Cross-column search for scalability (client, phone, service, notes, id)
-            query = query.or_(
-                f"client_name.ilike.%{term}%,"
-                f"phone_number.ilike.%{term}%,"
-                f"service_name.ilike.%{term}%,"
-                f"description.ilike.%{term}%,"
-                f"notes.ilike.%{term}%,"
-                f"legacy_source_id.ilike.%{term}%"
-            )
 
     result = query.execute()
     rows = []
@@ -460,11 +552,13 @@ def list_billing_grouped(
             query = query.eq("payment_status", normalized)
     if client_id:
         query = query.eq("client_id", client_id)
+    query, has_search = _apply_service_search_filters(sb, query, search)
+
     effective_from = from_date or date_from
     effective_to = to_date or date_to
-    if effective_from:
+    if (effective_from and (not has_search or from_date or date_from)):
         query = query.gte("service_date", _iso_date_or_none(effective_from))
-    if effective_to:
+    if (effective_to and (not has_search or to_date or date_to)):
         query = query.lte("service_date", _iso_date_or_none(effective_to))
     if min_amount is not None:
         query = query.gte("amount_charged", min_amount)
@@ -479,23 +573,6 @@ def list_billing_grouped(
             query = query.eq("payment_status", "PAID")
         elif normalized_paid in {"unpaid", "not_paid"}:
             query = query.neq("payment_status", "PAID")
-    if search:
-        term = search.strip()
-        if term:
-            try:
-                uuid.UUID(term)
-                query = query.eq("id", term)
-            except Exception:
-                pass
-            query = query.or_(
-                f"client_name.ilike.%{term}%,"
-                f"phone_number.ilike.%{term}%,"
-                f"service_name.ilike.%{term}%,"
-                f"description.ilike.%{term}%,"
-                f"notes.ilike.%{term}%,"
-                f"legacy_source_id.ilike.%{term}%"
-            )
-
     result = query.execute()
     rows = result.data or []
 
@@ -553,17 +630,304 @@ def list_debtors(search: Optional[str] = Query(None), _user=Depends(get_current_
     grouped_rows = debtors["grouped_clients"]
     for row in grouped_rows:
         row["service_name"] = row.get("service_name") or "Outstanding invoices"
-    
-    # Filter by search term if provided
+
     if search:
-        search_lower = search.lower().strip()
-        grouped_rows = [
-            row for row in grouped_rows
-            if search_lower in (row.get("client_name") or "").lower()
-            or search_lower in (row.get("service_name") or "").lower()
-        ]
-    
+        term = _normalize_search_term(search)
+        tokens = term.split()
+
+        def matches(row: dict) -> bool:
+            haystack = " ".join(
+                [
+                    str(row.get("client_name") or ""),
+                    str(row.get("phone_number") or ""),
+                    str(row.get("service_name") or ""),
+                    str(row.get("last_activity") or ""),
+                ]
+            ).lower()
+            normalized_haystack = re.sub(r"\s+", " ", haystack)
+            return all(token in normalized_haystack for token in tokens)
+
+        grouped_rows = [row for row in grouped_rows if matches(row)]
+
     return grouped_rows
+
+
+def _normalize_client_key(value: str) -> str:
+    return str(value or "").strip().upper()
+
+
+def _open_client_invoices(sb, client_name: str) -> list[dict]:
+    target = _normalize_client_key(client_name)
+    try:
+        rows = (
+            sb.table("service_jobs")
+            .select("id,client_name,service_name,description,service_date,due_date,amount_charged,paid_amount,payment_status,is_return,notes,phone_number,created_at")
+            .in_("payment_status", ["UNPAID", "PART PAYMENT", "PARTIAL"])
+            .eq("is_return", False)
+            .order("service_date")
+            .order("created_at")
+            .limit(1000)
+            .execute()
+            .data
+            or []
+        )
+    except Exception:
+        rows = (
+            sb.table("service_jobs")
+            .select("id,client_name,service_name,description,service_date,due_date,amount_charged,paid_amount,payment_status,is_return,notes,created_at")
+            .in_("payment_status", ["UNPAID", "PART PAYMENT", "PARTIAL"])
+            .eq("is_return", False)
+            .order("service_date")
+            .order("created_at")
+            .limit(1000)
+            .execute()
+            .data
+            or []
+        )
+
+    result: list[dict] = []
+    for row in rows:
+        if _normalize_client_key(row.get("client_name") or "") != target:
+            continue
+        total = to_number(row.get("amount_charged"))
+        paid = to_number(row.get("paid_amount"))
+        balance = compute_outstanding(total, paid)
+        if balance <= 0:
+            continue
+        result.append(
+            {
+                "id": row.get("id"),
+                "service_name": _best_service_name(row),
+                "service_date": row.get("service_date"),
+                "due_date": row.get("due_date"),
+                "amount_charged": total,
+                "paid_amount": paid,
+                "balance": balance,
+                "outstanding": balance,
+                "payment_status": compute_payment_status(total, paid),
+                "notes": row.get("notes"),
+                "phone_number": row.get("phone_number"),
+            }
+        )
+    return result
+
+
+@router.get("/debtors/{client_name}/ledger")
+def debtor_ledger(client_name: str, _user=Depends(get_current_user)):
+    if not user_is_admin(_user):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    sb = get_supabase()
+    invoices = _open_client_invoices(sb, client_name)
+    invoice_ids = [str(i.get("id")) for i in invoices if i.get("id")]
+
+    payment_history = []
+    if invoice_ids:
+        history_rows = (
+            sb.table("payments")
+            .select("id,billing_row_id,amount,payment_method,reference_no,payment_date,notes,created_at")
+            .in_("billing_row_id", invoice_ids)
+            .order("created_at", desc=True)
+            .limit(500)
+            .execute()
+            .data
+            or []
+        )
+        payment_history = history_rows
+
+    total_outstanding = sum(to_number(i.get("balance")) for i in invoices)
+    unpaid_jobs = len(invoices)
+
+    return {
+        "client_name": client_name,
+        "items": invoices,
+        "item_count": unpaid_jobs,
+        "total_outstanding": total_outstanding,
+        "payment_history": payment_history,
+    }
+
+
+class DebtorPaymentAllocation(BaseModel):
+    billing_row_id: str
+    amount: float
+
+
+class DebtorPaymentApplyPayload(BaseModel):
+    amount: float
+    payment_method: Optional[str] = "cash"
+    reference_no: Optional[str] = None
+    payment_date: Optional[str] = None
+    notes: Optional[str] = None
+    mode: Optional[str] = "auto"  # auto | manual
+    allocations: Optional[list[DebtorPaymentAllocation]] = None
+
+
+@router.post("/debtors/{client_name}/apply-payment")
+def apply_debtor_payment(client_name: str, payload: DebtorPaymentApplyPayload, _user=Depends(get_current_user)):
+    if not user_is_admin(_user):
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    sb = get_supabase()
+    total_payment = to_number(payload.amount)
+    if total_payment <= 0:
+        raise HTTPException(status_code=422, detail="Payment amount must be greater than zero")
+
+    open_rows = _open_client_invoices(sb, client_name)
+    if not open_rows:
+        raise HTTPException(status_code=400, detail="No unpaid invoices found for this debtor")
+
+    open_map = {str(r.get("id")): r for r in open_rows if r.get("id")}
+    allocations: list[dict] = []
+
+    mode = str(payload.mode or "auto").strip().lower()
+    if mode not in {"auto", "manual"}:
+        raise HTTPException(status_code=422, detail="mode must be auto or manual")
+
+    if mode == "manual":
+        provided = payload.allocations or []
+        if not provided:
+            raise HTTPException(status_code=422, detail="Manual allocation requires allocations")
+
+        manual_total = 0.0
+        for item in provided:
+            row_id = str(item.billing_row_id)
+            if row_id not in open_map:
+                raise HTTPException(status_code=400, detail=f"Invoice {row_id} is not eligible for payment")
+            amt = to_number(item.amount)
+            if amt <= 0:
+                raise HTTPException(status_code=400, detail="Allocation amounts must be greater than zero")
+            if amt > to_number(open_map[row_id].get("balance")):
+                raise HTTPException(status_code=400, detail=f"Allocation exceeds balance for invoice {row_id}")
+            manual_total += amt
+            allocations.append({"billing_row_id": row_id, "amount": amt})
+
+        if manual_total - total_payment > 1e-6:
+            raise HTTPException(status_code=400, detail="Total allocated exceeds payment amount")
+    else:
+        remaining = total_payment
+        for row in open_rows:
+            if remaining <= 0:
+                break
+            row_id = str(row.get("id"))
+            balance = to_number(row.get("balance"))
+            applied = min(balance, remaining)
+            if applied <= 0:
+                continue
+            allocations.append({"billing_row_id": row_id, "amount": applied})
+            remaining -= applied
+
+    if not allocations:
+        raise HTTPException(status_code=400, detail="No allocatable invoice found for payment")
+
+    payment_date = payload.payment_date or datetime.utcnow().date().isoformat()
+    applied_total = 0.0
+    unapplied = total_payment
+    allocation_results = []
+
+    for alloc in allocations:
+        billing_row_id = str(alloc["billing_row_id"])
+        applied_amount = to_number(alloc["amount"])
+        before = open_map[billing_row_id]
+
+        prev_paid = to_number(before.get("paid_amount"))
+        total = to_number(before.get("amount_charged"))
+        prev_balance = to_number(before.get("balance"))
+        new_paid = prev_paid + applied_amount
+        new_balance = max(total - new_paid, 0.0)
+        new_status = compute_payment_status(total, new_paid)
+
+        sb.table("service_jobs").update(
+            {
+                "paid_amount": new_paid,
+                "payment_status": new_status,
+                "paid_date": payment_date if new_status == "PAID" else None,
+                "paid_at": datetime.utcnow().isoformat() if new_status == "PAID" else None,
+            }
+        ).eq("id", billing_row_id).execute()
+
+        try:
+            sb.table("payments").insert(
+                {
+                    "billing_row_id": billing_row_id,
+                    "client_id": None,
+                    "amount": applied_amount,
+                    "payment_method": payload.payment_method,
+                    "reference_no": payload.reference_no,
+                    "payment_date": payment_date,
+                    "notes": payload.notes,
+                    "previous_balance": prev_balance,
+                    "new_balance": new_balance,
+                    "performed_by": str(_user.id),
+                }
+            ).execute()
+        except Exception:
+            try:
+                sb.table("payments").insert(
+                    {
+                        "billing_row_id": billing_row_id,
+                        "client_id": None,
+                        "amount": applied_amount,
+                        "payment_method": payload.payment_method,
+                        "reference_no": payload.reference_no,
+                        "payment_date": payment_date,
+                        "notes": payload.notes,
+                    }
+                ).execute()
+            except Exception:
+                pass
+
+        _log_billing_audit(
+            sb,
+            action="payment_updated",
+            entity_id=billing_row_id,
+            performed_by=str(_user.id),
+            before_value={"paid_amount": prev_paid, "payment_status": before.get("payment_status")},
+            after_value={"paid_amount": new_paid, "payment_status": new_status},
+            detail={
+                "client_name": client_name,
+                "allocated_amount": applied_amount,
+                "previous_balance": prev_balance,
+                "new_balance": new_balance,
+                "payment_method": payload.payment_method,
+                "mode": mode,
+            },
+        )
+
+        allocation_results.append(
+            {
+                "billing_row_id": billing_row_id,
+                "service_name": before.get("service_name"),
+                "previous_balance": prev_balance,
+                "new_balance": new_balance,
+                "applied_amount": applied_amount,
+                "new_status": new_status,
+            }
+        )
+        applied_total += applied_amount
+        unapplied -= applied_amount
+
+    emit_financial_event(
+        sb,
+        "debtor_payment_applied",
+        performed_by=str(_user.id),
+        amount=applied_total,
+        detail={
+            "client_name": client_name,
+            "mode": mode,
+            "allocations": allocation_results,
+            "payment_method": payload.payment_method,
+            "reference_no": payload.reference_no,
+        },
+    )
+    recompute_and_persist_metrics(sb, source="supabase_after_debtor_payment")
+
+    return {
+        "message": "Payment applied",
+        "client_name": client_name,
+        "mode": mode,
+        "applied_total": applied_total,
+        "unapplied_amount": max(unapplied, 0.0),
+        "allocations": allocation_results,
+    }
 
 
 @router.get("/{billing_id}")
@@ -741,30 +1105,9 @@ def get_debtor_items(client_name: str, _user=Depends(get_current_user)):
     if not user_is_admin(_user):
         raise HTTPException(status_code=403, detail="Forbidden")
     sb = get_supabase()
-    debtors = compute_debtors_from_supabase(sb)
-    included_rows = debtors["included_rows"]
-    
-    # Filter rows for this client and format them
-    client_items = [
-        {
-            "id": row.get("id"),
-            "service_name": row.get("service_name"),
-            "service_date": row.get("service_date"),
-            "amount_charged": row.get("amount_charged"),
-            "paid_amount": row.get("paid_amount"),
-            "outstanding": row.get("outstanding"),
-            "payment_status": row.get("payment_status"),
-            "description": row.get("service_name") or "Service",
-        }
-        for row in included_rows
-        if row.get("client_name").strip().upper() == client_name.strip().upper()
-    ]
-    
-    # Sort by service_date descending
-    client_items.sort(key=lambda x: str(x.get("service_date") or ""), reverse=True)
-    
-    total_outstanding = sum(item.get("outstanding", 0) for item in client_items)
-    
+    client_items = _open_client_invoices(sb, client_name)
+    total_outstanding = sum(to_number(item.get("balance")) for item in client_items)
+
     return {
         "client_name": client_name,
         "items": client_items,

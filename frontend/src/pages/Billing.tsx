@@ -218,7 +218,7 @@ export default function Billing() {
     setSearchParams(next, { replace: true })
   }
 
-  const { data: groupedData, isLoading } = useQuery<GroupedResponse>({
+  const { data: groupedData, isLoading, isFetching } = useQuery<GroupedResponse>({
     queryKey: ['billing-grouped', Object.fromEntries(searchParams.entries())],
     queryFn: () =>
       api.get('/billing/grouped', {
@@ -633,6 +633,26 @@ export default function Billing() {
   }
 
   const hasActiveFilters = !!(search || dateFrom || dateTo || statusFilter || paidState || minAmount || maxAmount || returned)
+  const normalizedSearch = search.trim()
+
+  const highlightMatch = (text?: string) => {
+    const value = String(text || '')
+    if (!normalizedSearch) return value || '—'
+    const escaped = normalizedSearch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    if (!escaped) return value || '—'
+    const regex = new RegExp(`(${escaped})`, 'ig')
+    const parts = value.split(regex)
+    if (parts.length <= 1) return value || '—'
+    return (
+      <>
+        {parts.map((part, idx) => (
+          part.toLowerCase() === normalizedSearch.toLowerCase()
+            ? <mark key={`${part}-${idx}`} className="bg-amber-100 text-amber-900 px-0.5 rounded">{part}</mark>
+            : <span key={`${part}-${idx}`}>{part}</span>
+        ))}
+      </>
+    )
+  }
 
   // ─── Render ─────────────────────────────────────────────────────────────────
 
@@ -736,7 +756,18 @@ export default function Billing() {
               value={searchInput}
               onChange={(e) => setSearchInput(e.target.value)}
             />
+            {!!searchInput && (
+              <button
+                type="button"
+                title="Clear search"
+                className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-700"
+                onClick={() => setSearchInput('')}
+              >
+                <X size={14} />
+              </button>
+            )}
           </div>
+          {isFetching && <span className="text-xs text-amber-700">Searching...</span>}
           <select className="form-input py-2 text-sm" style={{ minWidth: '9rem' }} value={statusFilter} onChange={(e) => setParam('payment_status', e.target.value)}>
             <option value="">All statuses</option>
             <option value="PAID">Paid</option>
@@ -901,8 +932,8 @@ export default function Billing() {
                         style={{ gridTemplateColumns: '1.8fr 1.8fr 1fr 1fr 1fr 1fr 6rem' }}
                         onClick={() => toggleRow(row.id)}
                       >
-                        <span className="truncate font-medium text-gray-900" title={row.client_name}>{row.client_name}</span>
-                        <span className="truncate text-gray-600" title={row.service_name}>{row.service_name}</span>
+                        <span className="truncate font-medium text-gray-900" title={row.client_name}>{highlightMatch(row.client_name)}</span>
+                        <span className="truncate text-gray-600" title={row.service_name}>{highlightMatch(row.service_name)}</span>
                         <span className="text-gray-800 tabular-nums">{isAdmin ? formatCurrency(row.total_amount, currency) : 'Hidden'}</span>
                         <span className="text-emerald-700 tabular-nums">{isAdmin ? formatCurrency(row.amount_paid, currency) : 'Hidden'}</span>
                         <span className={`tabular-nums font-medium ${balancePositive ? 'text-amber-700' : 'text-gray-300'}`}>
@@ -931,7 +962,8 @@ export default function Billing() {
                           onClick={(e) => e.stopPropagation()}
                         >
                           <div className="flex flex-wrap gap-x-6 gap-y-1 text-gray-500">
-                            {row.phone_number && <span>📱 <strong className="text-gray-700">{row.phone_number}</strong></span>}
+                            {row.phone_number && <span>📱 <strong className="text-gray-700">{highlightMatch(row.phone_number)}</strong></span>}
+                            {(row as any).imei && <span>IMEI: <strong className="text-gray-700">{highlightMatch((row as any).imei)}</strong></span>}
                             {(row.invoice_date || row.service_date) && <span>📅 {(row.invoice_date || row.service_date)!.slice(0, 10)}</span>}
                             <span>Qty: <strong className="text-gray-700">{row.quantity}</strong></span>
                             <span>Unit price: <strong className="text-gray-700">{formatCurrency(Number(row.total_amount) / (Number(row.quantity) || 1), currency)}</strong></span>

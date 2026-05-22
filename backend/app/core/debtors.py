@@ -45,11 +45,18 @@ def compute_debtors_from_supabase(sb) -> dict:
     - excluded_rows: list of rows that didn't meet criteria
     - grouped_clients: clients grouped by name with aggregated amounts
     """
-    rows = _fetch_all_rows(
-        sb,
-        "service_jobs",
-        "id,client_name,payment_status,amount_charged,paid_amount,is_return,due_date,service_date,created_at,legacy_source_id,service_name,description",
-    )
+    try:
+        rows = _fetch_all_rows(
+            sb,
+            "service_jobs",
+            "id,client_name,phone_number,payment_status,amount_charged,paid_amount,paid_date,is_return,due_date,service_date,created_at,legacy_source_id,service_name,description",
+        )
+    except Exception:
+        rows = _fetch_all_rows(
+            sb,
+            "service_jobs",
+            "id,client_name,payment_status,amount_charged,paid_amount,paid_date,is_return,due_date,service_date,created_at,legacy_source_id,service_name,description",
+        )
 
     included_rows: list[dict] = []
     excluded_rows: list[dict] = []
@@ -116,6 +123,9 @@ def compute_debtors_from_supabase(sb) -> dict:
                 "row_type": "client",
                 "row_count": 0,
                 "source_row_ids": [],
+                "phone_number": row.get("phone_number") or "",
+                "last_activity": row.get("service_date") or row.get("created_at"),
+                "last_payment_date": row.get("paid_date"),
             }
 
         group = grouped[client_key]
@@ -125,6 +135,16 @@ def compute_debtors_from_supabase(sb) -> dict:
         group["balance"] += outstanding
         group["row_count"] += 1
         group["source_row_ids"].append(row.get("id"))
+        if not group.get("phone_number") and row.get("phone_number"):
+            group["phone_number"] = row.get("phone_number")
+
+        candidate_activity = row.get("service_date") or row.get("created_at")
+        if str(candidate_activity or "") > str(group.get("last_activity") or ""):
+            group["last_activity"] = candidate_activity
+
+        candidate_payment = row.get("paid_date")
+        if str(candidate_payment or "") > str(group.get("last_payment_date") or ""):
+            group["last_payment_date"] = candidate_payment
         if not group.get("billing_row_id"):
             group["billing_row_id"] = row.get("id")
             group["id"] = row.get("id")
