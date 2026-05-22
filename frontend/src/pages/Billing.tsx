@@ -1061,10 +1061,10 @@ export default function Billing() {
                       >
                         <span className="truncate font-medium text-gray-900" title={row.client_name}>{highlightMatch(row.client_name)}</span>
                         <span className="truncate text-gray-600" title={row.service_name}>{highlightMatch(row.service_name)}</span>
-                        <span className="text-gray-800 tabular-nums">{isAdmin ? formatCurrency(row.total_amount, currency) : 'Hidden'}</span>
-                        <span className="text-emerald-700 tabular-nums">{isAdmin ? formatCurrency(row.amount_paid, currency) : 'Hidden'}</span>
+                        <span className="text-gray-800 tabular-nums">{formatCurrency(row.total_amount, currency)}</span>
+                        <span className="text-emerald-700 tabular-nums">{formatCurrency(row.amount_paid, currency)}</span>
                         <span className={`tabular-nums font-medium ${balancePositive ? 'text-amber-700' : 'text-gray-300'}`}>
-                          {isAdmin ? (balancePositive ? formatCurrency(row.balance, currency) : '—') : 'Hidden'}
+                          {balancePositive ? formatCurrency(row.balance, currency) : '—'}
                         </span>
                         <span>
                           <span className={statusBadgeClass(row.status)}>{statusLabel(row.status)}</span>
