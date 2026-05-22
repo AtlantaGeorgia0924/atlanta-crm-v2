@@ -17,6 +17,7 @@ class Settings(BaseSettings):
 
     # App
     ALLOWED_ORIGINS: str = "http://localhost:5173,https://your-vercel-app.vercel.app"
+    ALLOWED_ORIGIN_REGEX: str = r"https?://(localhost|127\.0\.0\.1)(:\\d+)?|https://([a-zA-Z0-9-]+\.)*vercel\.app"
     ENV: str = "development"
     REDIS_URL: str = ""
 

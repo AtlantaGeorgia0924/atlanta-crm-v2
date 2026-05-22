@@ -185,6 +185,10 @@ export default function Billing() {
   const [expandedRows, setExpandedRows] = useState<Set<string>>(new Set())
   const [applyPayRow, setApplyPayRow] = useState<BillingRow | null>(null)
   const [applyPayAmount, setApplyPayAmount] = useState('')
+  const [applyPayMethod, setApplyPayMethod] = useState('cash')
+  const [applyPayReference, setApplyPayReference] = useState('')
+  const [applyPayDate, setApplyPayDate] = useState('')
+  const [applyPayNotes, setApplyPayNotes] = useState('')
   const [reversePayRow, setReversePayRow] = useState<BillingRow | null>(null)
   const [reversePayAmount, setReversePayAmount] = useState('')
   const [reversePayReason, setReversePayReason] = useState('')
@@ -414,8 +418,15 @@ export default function Billing() {
   })
 
   const applyPaymentMutation = useMutation({
-    mutationFn: ({ id, amount_paid }: { id: string; amount_paid: number }) =>
-      api.put(`/billing/${id}`, { amount_paid }),
+    mutationFn: ({ id, amount }: { id: string; amount: number }) =>
+      api.post('/payments', {
+        billing_row_id: id,
+        amount,
+        payment_method: applyPayMethod,
+        reference_no: applyPayReference.trim() || undefined,
+        payment_date: applyPayDate || undefined,
+        notes: applyPayNotes.trim() || undefined,
+      }),
     retry: 1,
     onSuccess: () => {
       toast.success('Payment applied')
@@ -426,9 +437,22 @@ export default function Billing() {
       qc.invalidateQueries({ queryKey: ['system-status'] })
       setApplyPayRow(null)
       setApplyPayAmount('')
+      setApplyPayMethod('cash')
+      setApplyPayReference('')
+      setApplyPayDate('')
+      setApplyPayNotes('')
     },
-    onError: (e: any) => toast.error(parseApiError(e, 'Payment update failed')),
+    onError: (e: any) => toast.error(parseApiError(e, 'Payment apply failed')),
   })
+
+  const openApplyPayment = (row: BillingRow) => {
+    setApplyPayRow(row)
+    setApplyPayAmount('')
+    setApplyPayMethod('cash')
+    setApplyPayReference('')
+    setApplyPayDate(new Date().toISOString().slice(0, 10))
+    setApplyPayNotes('')
+  }
 
   const reversePaymentMutation = useMutation({
     mutationFn: ({ id, amount, reason }: { id: string; amount: number; reason?: string }) =>
@@ -1050,7 +1074,7 @@ export default function Billing() {
                           onClick={(e) => e.stopPropagation()}
                         >
                           <ActionBtn title="Edit" icon={<Pencil size={13} />} onClick={() => { void openEdit(row) }} />
-                          {isAdmin && <ActionBtn title="Apply Payment" icon={<CreditCard size={13} />} onClick={() => { setApplyPayRow(row); setApplyPayAmount(String(row.amount_paid)) }} />}
+                          {isAdmin && <ActionBtn title="Apply Payment" icon={<CreditCard size={13} />} onClick={() => openApplyPayment(row)} />}
                           {isAdmin && Number(row.amount_paid || 0) > 0 && <ActionBtn title="Reverse Payment" icon={<Undo2 size={13} />} onClick={() => { setReversePayRow(row); setReversePayAmount(''); setReversePayReason('') }} colorClass="hover:text-amber-700" />}
                           <ActionBtn title="WhatsApp Bill" icon={<MessageCircle size={13} />} onClick={() => openWhatsApp(row)} colorClass="hover:text-green-600" />
                           <ActionBtn title="Copy Bill" icon={<Copy size={13} />} onClick={() => copyBill(row)} />
@@ -1076,7 +1100,7 @@ export default function Billing() {
                           {row.notes && <p className="italic text-gray-400">📝 {row.notes}</p>}
                           <div className="flex flex-wrap gap-2 pt-1">
                             <InlineBtn icon={<Pencil size={11} />} label="Edit" onClick={() => { void openEdit(row) }} />
-                            {isAdmin && <InlineBtn icon={<CreditCard size={11} />} label="Apply Payment" onClick={() => { setApplyPayRow(row); setApplyPayAmount(String(row.amount_paid)) }} />}
+                            {isAdmin && <InlineBtn icon={<CreditCard size={11} />} label="Apply Payment" onClick={() => openApplyPayment(row)} />}
                             {isAdmin && Number(row.amount_paid || 0) > 0 && <InlineBtn icon={<Undo2 size={11} />} label="Reverse Payment" onClick={() => { setReversePayRow(row); setReversePayAmount(''); setReversePayReason('') }} extraClass="text-amber-700 hover:bg-amber-50" />}
                             <InlineBtn icon={<MessageCircle size={11} />} label="WhatsApp" onClick={() => openWhatsApp(row)} extraClass="text-green-700 hover:bg-green-50" />
                             <InlineBtn icon={<Copy size={11} />} label="Copy Bill" onClick={() => copyBill(row)} />
@@ -1243,11 +1267,31 @@ export default function Billing() {
       <Modal
         title="Apply Payment"
         open={!!applyPayRow}
-        onClose={() => { setApplyPayRow(null); setApplyPayAmount('') }}
+        onClose={() => {
+          setApplyPayRow(null)
+          setApplyPayAmount('')
+          setApplyPayMethod('cash')
+          setApplyPayReference('')
+          setApplyPayDate('')
+          setApplyPayNotes('')
+        }}
         size="sm"
         footer={(
           <div className="flex justify-end gap-2">
-            <button type="button" className="btn-secondary" onClick={() => { setApplyPayRow(null); setApplyPayAmount('') }}>Cancel</button>
+            <button
+              type="button"
+              className="btn-secondary"
+              onClick={() => {
+                setApplyPayRow(null)
+                setApplyPayAmount('')
+                setApplyPayMethod('cash')
+                setApplyPayReference('')
+                setApplyPayDate('')
+                setApplyPayNotes('')
+              }}
+            >
+              Cancel
+            </button>
             <button
               type="button"
               className="btn-primary"
@@ -1255,8 +1299,8 @@ export default function Billing() {
               onClick={() => {
                 if (!applyPayRow) return
                 const val = parseFloat(applyPayAmount)
-                if (!Number.isFinite(val) || val < 0) { toast.error('Enter a valid amount'); return }
-                applyPaymentMutation.mutate({ id: applyPayRow.id, amount_paid: val })
+                if (!Number.isFinite(val) || val <= 0) { toast.error('Enter a valid payment amount'); return }
+                applyPaymentMutation.mutate({ id: applyPayRow.id, amount: val })
               }}
             >
               {applyPaymentMutation.isPending ? 'Saving...' : 'Apply'}
@@ -1274,17 +1318,38 @@ export default function Billing() {
               <p><span className="text-gray-500">Balance:</span> <span className="text-amber-700 font-semibold">{formatCurrency(applyPayRow.balance, currency)}</span></p>
             </div>
             <div>
-              <label className="form-label">New Total Amount Paid</label>
+              <label className="form-label">Payment Amount</label>
               <input
                 type="number"
-                min="0"
+                min="0.01"
                 step="0.01"
                 className="form-input"
                 value={applyPayAmount}
                 onChange={(e) => setApplyPayAmount(e.target.value)}
                 autoFocus
               />
-              <p className="text-xs text-gray-400 mt-1">Set the total paid so far (not just the new payment).</p>
+              <p className="text-xs text-gray-400 mt-1">Enter incremental amount to add to this invoice.</p>
+            </div>
+            <div>
+              <label className="form-label">Payment Method</label>
+              <select className="form-input" value={applyPayMethod} onChange={(e) => setApplyPayMethod(e.target.value)}>
+                <option value="cash">Cash</option>
+                <option value="bank">Bank Transfer</option>
+                <option value="mobile_money">Mobile Money</option>
+                <option value="other">Other</option>
+              </select>
+            </div>
+            <div>
+              <label className="form-label">Reference No</label>
+              <input className="form-input" value={applyPayReference} onChange={(e) => setApplyPayReference(e.target.value)} />
+            </div>
+            <div>
+              <label className="form-label">Payment Date</label>
+              <input type="date" className="form-input" value={applyPayDate} onChange={(e) => setApplyPayDate(e.target.value)} />
+            </div>
+            <div>
+              <label className="form-label">Notes</label>
+              <textarea rows={2} className="form-input" value={applyPayNotes} onChange={(e) => setApplyPayNotes(e.target.value)} />
             </div>
           </div>
         )}

@@ -1,8 +1,27 @@
 import axios from 'axios'
 import { useAuthStore } from '@/store/authStore'
 
+const envBaseUrl = String(import.meta.env.VITE_API_URL ?? '').trim()
+const isBrowser = typeof window !== 'undefined'
+const isLocalFrontend = isBrowser && /^(localhost|127\.0\.0\.1)$/i.test(window.location.hostname)
+
+function resolveApiBaseUrl(): string {
+  if (!envBaseUrl) return '/api'
+
+  const normalized = envBaseUrl.replace(/\/+$/, '')
+  const pointsToLocalApi = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(normalized)
+  const mixedContentRisk = isBrowser && window.location.protocol === 'https:' && /^http:\/\//i.test(normalized)
+
+  // Never use local or insecure HTTP API from a deployed HTTPS frontend.
+  if (isBrowser && !isLocalFrontend && (pointsToLocalApi || mixedContentRisk)) {
+    return '/api'
+  }
+
+  return normalized
+}
+
 const api = axios.create({
-  baseURL: import.meta.env.VITE_API_URL ?? '/api',
+  baseURL: resolveApiBaseUrl(),
 })
 
 api.interceptors.request.use((config) => {
