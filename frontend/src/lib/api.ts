@@ -2,10 +2,10 @@ import axios from 'axios'
 import { useAuthStore } from '@/store/authStore'
 
 // In development Vite proxies /api → localhost:8000 (vite.config.ts).
-// In production Vercel proxies /api → https://crm-api.onrender.com (vercel.json).
-// Always use /api so the correct proxy handles routing in every environment.
+// In production, prefer VITE_API_URL when set, otherwise fall back to /api rewrite.
+const envApiUrl = String(import.meta.env.VITE_API_URL || '').trim().replace(/\/$/, '')
 const api = axios.create({
-  baseURL: '/api',
+  baseURL: envApiUrl || '/api',
 })
 
 api.interceptors.request.use((config) => {
