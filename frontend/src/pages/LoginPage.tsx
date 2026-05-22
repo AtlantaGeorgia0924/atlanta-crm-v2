@@ -10,6 +10,18 @@ interface FormValues {
   password: string
 }
 
+function parseLoginError(error: any): string {
+  const detail = error?.response?.data?.detail
+  if (typeof detail === 'string' && detail.trim()) return detail
+  if (detail?.message) return String(detail.message)
+  if (detail?.code && detail?.message) return `${detail.code}: ${detail.message}`
+  if (Array.isArray(detail) && detail.length > 0) {
+    const first = detail[0]
+    return String(first?.msg || first?.message || 'Unable to login')
+  }
+  return 'Unable to login'
+}
+
 export default function LoginPage() {
   const { register, handleSubmit, formState: { errors } } = useForm<FormValues>()
   const [loading, setLoading] = useState(false)
@@ -24,7 +36,7 @@ export default function LoginPage() {
       setAuth(res.data.access_token, res.data.user, res.data.refresh_token)
       navigate('/dashboard')
     } catch (e: any) {
-      toast.error(e?.response?.data?.detail ?? 'Invalid email or password')
+      toast.error(parseLoginError(e))
     } finally {
       setLoading(false)
     }

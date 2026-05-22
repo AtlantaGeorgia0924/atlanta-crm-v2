@@ -8,6 +8,8 @@ from app.db.supabase_client import get_supabase
 
 bearer = HTTPBearer()
 
+_DISABLED_ACCOUNT_STATUSES = {"INACTIVE", "SUSPENDED", "DELETED"}
+
 
 @dataclass
 class AuthContext:
@@ -15,6 +17,7 @@ class AuthContext:
     email: str
     role: str
     is_active: bool
+    account_status: str = "ACTIVE"
     full_name: str | None = None
 
 
@@ -56,6 +59,7 @@ def _get_or_create_profile(sb, user_id: str, email: str) -> dict:
         "full_name": fallback_name,
         "role": role,
         "is_active": True,
+        "account_status": "ACTIVE",
         "created_at": datetime.utcnow().isoformat(),
         "updated_at": datetime.utcnow().isoformat(),
     }
@@ -81,8 +85,12 @@ def get_current_user(
         email = str(auth_user.email or "")
         profile = _get_or_create_profile(sb, user_id=user_id, email=email)
 
-        if not bool(profile.get("is_active", True)):
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
+        account_status = str(profile.get("account_status") or "ACTIVE").upper()
+        if account_status in _DISABLED_ACCOUNT_STATUSES or not bool(profile.get("is_active", True)):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Account is {account_status.lower()}"
+            )
 
         ip = request.client.host if request and request.client else None
         try:
@@ -100,6 +108,7 @@ def get_current_user(
             email=email,
             role=str(profile.get("role") or "staff").lower(),
             is_active=bool(profile.get("is_active", True)),
+            account_status=account_status,
             full_name=profile.get("full_name"),
         )
     except HTTPException:
