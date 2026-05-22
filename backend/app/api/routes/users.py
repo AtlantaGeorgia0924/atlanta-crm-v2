@@ -174,6 +174,25 @@ def _find_user(sb, user_id: str) -> dict:
     return user
 
 
+def _find_auth_user_by_email(sb, email: str):
+    normalized_email = str(email or "").lower().strip()
+    if not normalized_email:
+        return None
+    try:
+        page = 1
+        while True:
+            users = sb.auth.admin.list_users(page=page, per_page=1000) or []
+            for user in users:
+                if str(getattr(user, "email", "") or "").lower().strip() == normalized_email:
+                    return user
+            if len(users) < 1000:
+                break
+            page += 1
+    except Exception:
+        return None
+    return None
+
+
 class UserCreatePayload(BaseModel):
     full_name: str
     email: EmailStr
@@ -292,9 +311,25 @@ def create_user(payload: UserCreatePayload, _user=Depends(get_current_user)):
             }
         )
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"Supabase Auth create failed: {exc}")
+        existing_auth = _find_auth_user_by_email(sb, email)
+        if not existing_auth:
+            raise HTTPException(status_code=400, detail=f"Supabase Auth create failed: {exc}")
+        try:
+            sb.auth.admin.update_user_by_id(
+                str(existing_auth.id),
+                {
+                    "password": final_password,
+                    "email_confirm": True,
+                    "user_metadata": {"full_name": payload.full_name, "role": role},
+                },
+            )
+        except Exception:
+            pass
+        created_auth = existing_auth
 
     auth_user_id = str(getattr(created_auth.user, "id", "") or "")
+    if not auth_user_id:
+        auth_user_id = str(getattr(created_auth, "id", "") or "")
     if not auth_user_id:
         raise HTTPException(status_code=500, detail="Auth identity creation failed")
 

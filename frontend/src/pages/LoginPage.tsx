@@ -13,8 +13,8 @@ interface FormValues {
 function parseLoginError(error: any): string {
   const detail = error?.response?.data?.detail
   if (typeof detail === 'string' && detail.trim()) return detail
-  if (detail?.message) return String(detail.message)
   if (detail?.code && detail?.message) return `${detail.code}: ${detail.message}`
+  if (detail?.message) return String(detail.message)
   if (Array.isArray(detail) && detail.length > 0) {
     const first = detail[0]
     return String(first?.msg || first?.message || 'Unable to login')
