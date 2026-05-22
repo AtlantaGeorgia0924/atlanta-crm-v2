@@ -5,7 +5,7 @@ import { useSearchParams } from 'react-router-dom'
 import {
   Calendar, ChevronLeft, ChevronRight,
   Copy, CreditCard, MessageCircle, Pencil, Plus,
-  RotateCcw, Search, Trash2, X,
+  RotateCcw, Search, Trash2, Undo2, X,
 } from 'lucide-react'
 import toast from 'react-hot-toast'
 
@@ -185,6 +185,9 @@ export default function Billing() {
   const [expandedRows, setExpandedRows] = useState<Set<string>>(new Set())
   const [applyPayRow, setApplyPayRow] = useState<BillingRow | null>(null)
   const [applyPayAmount, setApplyPayAmount] = useState('')
+  const [reversePayRow, setReversePayRow] = useState<BillingRow | null>(null)
+  const [reversePayAmount, setReversePayAmount] = useState('')
+  const [reversePayReason, setReversePayReason] = useState('')
   const [loadingEdit, setLoadingEdit] = useState(false)
   const [visibleCount, setVisibleCount] = useState(140)
   const [revealStartIndex, setRevealStartIndex] = useState<number | null>(null)
@@ -425,6 +428,24 @@ export default function Billing() {
       setApplyPayAmount('')
     },
     onError: (e: any) => toast.error(parseApiError(e, 'Payment update failed')),
+  })
+
+  const reversePaymentMutation = useMutation({
+    mutationFn: ({ id, amount, reason }: { id: string; amount: number; reason?: string }) =>
+      api.post('/payments/reverse', { billing_row_id: id, amount, reason: reason || undefined }),
+    retry: 1,
+    onSuccess: () => {
+      toast.success('Payment reversed')
+      qc.invalidateQueries({ queryKey: ['billing-grouped'] })
+      qc.invalidateQueries({ queryKey: ['debtors'] })
+      qc.invalidateQueries({ queryKey: ['dashboard'] })
+      qc.invalidateQueries({ queryKey: ['cashflow-page-data'] })
+      qc.invalidateQueries({ queryKey: ['system-status'] })
+      setReversePayRow(null)
+      setReversePayAmount('')
+      setReversePayReason('')
+    },
+    onError: (e: any) => toast.error(parseApiError(e, 'Payment reversal failed')),
   })
 
   const markReturnedMutation = useMutation({
@@ -1030,6 +1051,7 @@ export default function Billing() {
                         >
                           <ActionBtn title="Edit" icon={<Pencil size={13} />} onClick={() => { void openEdit(row) }} />
                           {isAdmin && <ActionBtn title="Apply Payment" icon={<CreditCard size={13} />} onClick={() => { setApplyPayRow(row); setApplyPayAmount(String(row.amount_paid)) }} />}
+                          {isAdmin && Number(row.amount_paid || 0) > 0 && <ActionBtn title="Reverse Payment" icon={<Undo2 size={13} />} onClick={() => { setReversePayRow(row); setReversePayAmount(''); setReversePayReason('') }} colorClass="hover:text-amber-700" />}
                           <ActionBtn title="WhatsApp Bill" icon={<MessageCircle size={13} />} onClick={() => openWhatsApp(row)} colorClass="hover:text-green-600" />
                           <ActionBtn title="Copy Bill" icon={<Copy size={13} />} onClick={() => copyBill(row)} />
                           <ActionBtn title="Mark Returned" icon={<RotateCcw size={13} />} onClick={() => { if (confirm('Mark as returned?')) markReturnedMutation.mutate(row.id) }} />
@@ -1055,6 +1077,7 @@ export default function Billing() {
                           <div className="flex flex-wrap gap-2 pt-1">
                             <InlineBtn icon={<Pencil size={11} />} label="Edit" onClick={() => { void openEdit(row) }} />
                             {isAdmin && <InlineBtn icon={<CreditCard size={11} />} label="Apply Payment" onClick={() => { setApplyPayRow(row); setApplyPayAmount(String(row.amount_paid)) }} />}
+                            {isAdmin && Number(row.amount_paid || 0) > 0 && <InlineBtn icon={<Undo2 size={11} />} label="Reverse Payment" onClick={() => { setReversePayRow(row); setReversePayAmount(''); setReversePayReason('') }} extraClass="text-amber-700 hover:bg-amber-50" />}
                             <InlineBtn icon={<MessageCircle size={11} />} label="WhatsApp" onClick={() => openWhatsApp(row)} extraClass="text-green-700 hover:bg-green-50" />
                             <InlineBtn icon={<Copy size={11} />} label="Copy Bill" onClick={() => copyBill(row)} />
                             {row.status !== 'RETURNED' && (
@@ -1262,6 +1285,72 @@ export default function Billing() {
                 autoFocus
               />
               <p className="text-xs text-gray-400 mt-1">Set the total paid so far (not just the new payment).</p>
+            </div>
+          </div>
+        )}
+      </Modal>
+
+      {/* ── Reverse Payment Modal ── */}
+      <Modal
+        title="Reverse Payment"
+        open={!!reversePayRow}
+        onClose={() => { setReversePayRow(null); setReversePayAmount(''); setReversePayReason('') }}
+        size="sm"
+        footer={(
+          <div className="flex justify-end gap-2">
+            <button type="button" className="btn-secondary" onClick={() => { setReversePayRow(null); setReversePayAmount(''); setReversePayReason('') }}>Cancel</button>
+            <button
+              type="button"
+              className="btn-primary"
+              disabled={reversePaymentMutation.isPending}
+              onClick={() => {
+                if (!reversePayRow) return
+                const val = parseFloat(reversePayAmount)
+                const currentPaid = Number(reversePayRow.amount_paid || 0)
+                if (!Number.isFinite(val) || val <= 0) {
+                  toast.error('Enter a valid reversal amount')
+                  return
+                }
+                if (val > currentPaid) {
+                  toast.error('Reversal amount cannot exceed currently paid amount')
+                  return
+                }
+                reversePaymentMutation.mutate({ id: reversePayRow.id, amount: val, reason: reversePayReason.trim() || undefined })
+              }}
+            >
+              {reversePaymentMutation.isPending ? 'Saving...' : 'Reverse'}
+            </button>
+          </div>
+        )}
+      >
+        {reversePayRow && (
+          <div className="space-y-4">
+            <div className="rounded-lg border bg-gray-50 px-4 py-3 text-sm space-y-1" style={{ borderColor: '#e7d89f' }}>
+              <p><span className="text-gray-500">Client:</span> <strong>{reversePayRow.client_name}</strong></p>
+              <p><span className="text-gray-500">Service:</span> {reversePayRow.service_name}</p>
+              <p><span className="text-gray-500">Currently paid:</span> <span className="text-emerald-700 font-semibold">{formatCurrency(Number(reversePayRow.amount_paid || 0), currency)}</span></p>
+            </div>
+            <div>
+              <label className="form-label">Reversal Amount</label>
+              <input
+                type="number"
+                min="0"
+                step="0.01"
+                className="form-input"
+                value={reversePayAmount}
+                onChange={(e) => setReversePayAmount(e.target.value)}
+                autoFocus
+              />
+            </div>
+            <div>
+              <label className="form-label">Reason (optional)</label>
+              <textarea
+                rows={2}
+                className="form-input"
+                value={reversePayReason}
+                onChange={(e) => setReversePayReason(e.target.value)}
+                placeholder="Reason for reversal"
+              />
             </div>
           </div>
         )}

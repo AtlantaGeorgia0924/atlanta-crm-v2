@@ -26,6 +26,13 @@ class PaymentCreate(BaseModel):
     notes: Optional[str] = None
 
 
+class PaymentReverse(BaseModel):
+    billing_row_id: str
+    amount: float
+    reversal_date: Optional[str] = None
+    reason: Optional[str] = None
+
+
 @router.get("")
 def list_payments(
     billing_row_id: Optional[str] = None,
@@ -125,5 +132,93 @@ def apply_payment(payload: PaymentCreate, _user=Depends(get_current_user)):
         },
     )
     recompute_and_persist_metrics(sb, source="supabase_after_payment")
+
+    return update_res.data[0]
+
+
+@router.post("/reverse", status_code=201)
+def reverse_payment(payload: PaymentReverse, _user=Depends(get_current_user)):
+    """
+    Reverse an applied payment amount for a billing row.
+    This never allows paid_amount to become negative.
+    """
+    sb = get_supabase()
+
+    row_res = (
+        sb.table("service_jobs")
+        .select("id, amount_charged, paid_amount, client_id")
+        .eq("id", payload.billing_row_id)
+        .single()
+        .execute()
+    )
+    if not row_res.data:
+        raise HTTPException(404, "Billing row not found")
+
+    row = row_res.data
+    total = max(0.0, to_number(row.get("amount_charged")))
+    current_paid = max(0.0, to_number(row.get("paid_amount")))
+    reversal_amount = to_number(payload.amount)
+    if reversal_amount <= 0:
+        raise HTTPException(422, "Reversal amount must be greater than zero")
+    if reversal_amount > current_paid:
+        raise HTTPException(400, f"Reversal exceeds paid amount ({current_paid:.2f})")
+
+    new_paid = max(0.0, current_paid - reversal_amount)
+    outstanding = compute_outstanding(total, new_paid)
+    if new_paid <= 0:
+        new_status = "UNPAID"
+    elif new_paid < total:
+        new_status = "PART PAYMENT"
+    else:
+        new_status = "PAID"
+
+    reversal_date = payload.reversal_date or str(date.today())
+
+    update_res = (
+        sb.table("service_jobs")
+        .update(
+            {
+                "paid_amount": new_paid,
+                "payment_status": new_status,
+                "paid_date": reversal_date if new_status == "PAID" else None,
+                "paid_at": datetime.utcnow().isoformat() if new_status == "PAID" else None,
+            }
+        )
+        .eq("id", payload.billing_row_id)
+        .execute()
+    )
+
+    # Persist reversal ledger line as negative amount when compatible.
+    reversal_notes = (payload.reason or "").strip()
+    try:
+        sb.table("payments").insert(
+            {
+                "billing_row_id": payload.billing_row_id,
+                "client_id": row.get("client_id"),
+                "amount": -reversal_amount,
+                "payment_method": "reversal",
+                "reference_no": None,
+                "payment_date": reversal_date,
+                "notes": reversal_notes or "Payment reversal",
+            }
+        ).execute()
+    except Exception:
+        pass
+
+    emit_financial_event(
+        sb,
+        "payment_reversed",
+        performed_by=str(_user.id),
+        record_id=str(payload.billing_row_id),
+        amount=reversal_amount,
+        detail={
+            "previous_paid_amount": current_paid,
+            "new_paid_amount": new_paid,
+            "payment_status": new_status,
+            "outstanding": outstanding,
+            "reason": reversal_notes,
+        },
+    )
+    recompute_and_persist_metrics(sb, source="supabase_after_payment_reversal")
 
     return update_res.data[0]
