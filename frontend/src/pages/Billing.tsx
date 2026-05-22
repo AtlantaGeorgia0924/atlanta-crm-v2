@@ -167,7 +167,9 @@ export default function Billing() {
   const [applyPayRow, setApplyPayRow] = useState<BillingRow | null>(null)
   const [applyPayAmount, setApplyPayAmount] = useState('')
   const [visibleCount, setVisibleCount] = useState(140)
+  const [tableMotion, setTableMotion] = useState<'left' | 'right' | 'fade' | ''>('')
   const loadMoreRef = useRef<HTMLDivElement | null>(null)
+  const motionTimerRef = useRef<number | null>(null)
 
   const page = Number(searchParams.get('page') || '1')
   const statusFilter = searchParams.get('payment_status') || ''
@@ -414,6 +416,22 @@ export default function Billing() {
     return () => observer.disconnect()
   }, [visibleCount, flatRows.length])
 
+  useEffect(() => {
+    return () => {
+      if (motionTimerRef.current) {
+        window.clearTimeout(motionTimerRef.current)
+      }
+    }
+  }, [])
+
+  const triggerTableMotion = (direction: 'left' | 'right' | 'fade') => {
+    setTableMotion(direction)
+    if (motionTimerRef.current) {
+      window.clearTimeout(motionTimerRef.current)
+    }
+    motionTimerRef.current = window.setTimeout(() => setTableMotion(''), 260)
+  }
+
   const totalSummary = useMemo(() => {
     let totalAmount = 0, totalPaid = 0, totalOutstanding = 0, jobs = 0
     for (const g of grouped) {
@@ -438,6 +456,7 @@ export default function Billing() {
   }, [dateFrom, dateTo])
 
   const shiftMonth = (delta: number) => {
+    triggerTableMotion(delta > 0 ? 'left' : 'right')
     const [y, m] = month.split('-').map(Number)
     const d = new Date(y, m - 1 + delta, 1)
     const nextMonth = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
@@ -451,6 +470,7 @@ export default function Billing() {
   }
 
   const shiftDay = (delta: number) => {
+    triggerTableMotion(delta > 0 ? 'left' : 'right')
     const base = dateFrom || new Date().toISOString().slice(0, 10)
     const d = new Date(`${base}T00:00:00`)
     d.setDate(d.getDate() + delta)
@@ -464,6 +484,7 @@ export default function Billing() {
 
   const applySingleDay = (day: string) => {
     if (!day) return
+    triggerTableMotion('fade')
     const next = new URLSearchParams(searchParams)
     next.set('from_date', day)
     next.set('to_date', day)
@@ -472,6 +493,7 @@ export default function Billing() {
   }
 
   const applyQuickRange = (type: 'today' | 'week' | 'month') => {
+    triggerTableMotion('fade')
     const now = new Date()
     let from = ''
     const to = now.toISOString().slice(0, 10)
@@ -614,6 +636,7 @@ export default function Billing() {
             onClick={() => {
               const val = prompt('Go to month (YYYY-MM):', month)
               if (!val) return
+              triggerTableMotion('fade')
               const bounds = monthBounds(val)
               const next = new URLSearchParams(searchParams)
               next.set('month', val)
@@ -753,7 +776,18 @@ export default function Billing() {
           )}
 
           {flatRows.length > 0 && (
-            <section className="rounded-xl border bg-white" style={{ borderColor: '#e7d89f' }}>
+            <section
+              className={`rounded-xl border bg-white ${
+                tableMotion === 'left'
+                  ? 'billing-table-enter-left'
+                  : tableMotion === 'right'
+                    ? 'billing-table-enter-right'
+                    : tableMotion === 'fade'
+                      ? 'billing-table-enter-fade'
+                      : ''
+              }`}
+              style={{ borderColor: '#e7d89f' }}
+            >
               <div className="max-h-[68vh] overflow-y-auto">
                 <div
                   className="sticky top-0 z-30 grid items-center gap-2 px-4 py-2 text-xs font-medium text-gray-400 uppercase tracking-wide border-b bg-white"

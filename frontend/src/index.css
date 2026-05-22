@@ -82,4 +82,49 @@
     color: #991b1b;
     border: 1px solid #fca5a5;
   }
+
+  .billing-table-enter-left {
+    animation: billingTableEnterLeft 220ms ease-out;
+  }
+
+  .billing-table-enter-right {
+    animation: billingTableEnterRight 220ms ease-out;
+  }
+
+  .billing-table-enter-fade {
+    animation: billingTableEnterFade 220ms ease-out;
+  }
+}
+
+@keyframes billingTableEnterLeft {
+  0% {
+    opacity: 0.75;
+    transform: translateX(10px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes billingTableEnterRight {
+  0% {
+    opacity: 0.75;
+    transform: translateX(-10px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes billingTableEnterFade {
+  0% {
+    opacity: 0.72;
+    transform: scale(0.996);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
 }
