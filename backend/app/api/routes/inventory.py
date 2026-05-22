@@ -588,6 +588,36 @@ def sell_product(item_id: str, payload: SellProductPayload, _user=Depends(get_cu
         raise HTTPException(500, "Sell operation failed")
 
     sold = rpc[0]
+    service_job_id = str(sold.get("service_job_id") or "").strip()
+    if service_job_id:
+        actor_role = str(getattr(_user, "role", "staff") or "staff").strip().lower()
+        actor_label = "Admin" if actor_role == "admin" else "Staff"
+        actor_name = (str(getattr(_user, "full_name", "") or "").strip() or str(getattr(_user, "email", "") or "").strip())
+        display_name = f"{actor_name} ({actor_label})" if actor_name else actor_label
+        columns = (
+            sb.table("information_schema.columns")
+            .select("column_name")
+            .eq("table_schema", "public")
+            .eq("table_name", "service_jobs")
+            .execute()
+            .data
+            or []
+        )
+        column_names = {str(c.get("column_name")) for c in columns if c.get("column_name")}
+        ownership_payload = {
+            "created_by": str(_user.id),
+            "created_by_name": display_name,
+            "created_by_role": actor_role,
+            "last_edited_by": str(_user.id),
+            "last_edited_by_name": display_name,
+            "last_edited_at": datetime.utcnow().isoformat(),
+            "assigned_staff_id": str(_user.id),
+            "assigned_staff_name": display_name,
+        }
+        ownership_payload = {k: v for k, v in ownership_payload.items() if k in column_names}
+        if ownership_payload:
+            sb.table("service_jobs").update(ownership_payload).eq("id", service_job_id).execute()
+
     recompute_and_persist_metrics(sb, source="supabase_after_inventory_sell")
     return {
         "sale_id": sold.get("sale_id"),

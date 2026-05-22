@@ -16,6 +16,21 @@ from app.core.payments_engine import (
 router = APIRouter(dependencies=[Depends(require_admin)])
 
 
+def _log_payment_audit(sb, *, action: str, service_job_id: str, performed_by: str, detail: dict | None = None) -> None:
+    try:
+        sb.table("crm_audit_log").insert(
+            {
+                "action": action,
+                "entity_type": "payment",
+                "entity_id": service_job_id,
+                "performed_by": performed_by,
+                "detail": detail,
+            }
+        ).execute()
+    except Exception:
+        pass
+
+
 class PaymentCreate(BaseModel):
     billing_row_id: Optional[str] = None
     service_job_id: Optional[str] = None
@@ -102,6 +117,19 @@ def apply_payment(payload: PaymentCreate, _user=Depends(get_current_user)):
             "new_balance": engine_result["new_balance"],
         },
     )
+    _log_payment_audit(
+        sb,
+        action="payment_applied",
+        service_job_id=resolved_service_job_id,
+        performed_by=str(_user.id),
+        detail={
+            "reference_no": engine_result["payment"].get("reference_no"),
+            "amount": engine_result["applied_amount"],
+            "payment_method": payload.payment_method,
+            "payment_note": payload.notes,
+            "applied_by_name": _user.full_name or _user.email,
+        },
+    )
     recompute_and_persist_metrics(sb, source="supabase_after_payment")
 
     return {
@@ -140,6 +168,18 @@ def reverse_payment(payload: PaymentReverse, _user=Depends(get_current_user)):
             "outstanding": engine_result["new_balance"],
             "reason": reversal_notes,
             "reference_no": engine_result["payment"].get("reference_no"),
+        },
+    )
+    _log_payment_audit(
+        sb,
+        action="payment_reversed",
+        service_job_id=resolved_service_job_id,
+        performed_by=str(_user.id),
+        detail={
+            "reference_no": engine_result["payment"].get("reference_no"),
+            "amount": engine_result["reversal_amount"],
+            "reason": reversal_notes,
+            "applied_by_name": _user.full_name or _user.email,
         },
     )
     recompute_and_persist_metrics(sb, source="supabase_after_payment_reversal")

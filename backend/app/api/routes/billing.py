@@ -21,6 +21,7 @@ from app.core.payments_engine import apply_invoice_payment
 router = APIRouter()
 
 _SERVICE_JOB_COLUMNS_CACHE: set[str] | None = None
+_STAFF_VIEW_OWN_FLAG_KEY = "staff_can_only_view_own_services"
 
 
 def _iso_date_or_none(value: Optional[str]) -> Optional[str]:
@@ -52,6 +53,30 @@ def _service_job_columns(sb) -> set[str]:
     )
     _SERVICE_JOB_COLUMNS_CACHE = {str(r.get("column_name")) for r in rows if r.get("column_name")}
     return _SERVICE_JOB_COLUMNS_CACHE
+
+
+def _staff_scope_enabled(sb) -> bool:
+    """Future permission flag scaffold: staff_can_only_view_own_services."""
+    rows = (
+        sb.table("app_settings")
+        .select("value")
+        .eq("key", _STAFF_VIEW_OWN_FLAG_KEY)
+        .limit(1)
+        .execute()
+        .data
+        or []
+    )
+    if not rows:
+        return False
+    value = str(rows[0].get("value") or "").strip().lower()
+    return value in {"1", "true", "yes", "on"}
+
+
+def _actor_display_name(user) -> str:
+    role = str(getattr(user, "role", "staff") or "staff").strip().lower()
+    label = "Admin" if role == "admin" else "Staff"
+    name = str(getattr(user, "full_name", "") or "").strip() or str(getattr(user, "email", "") or "").strip()
+    return f"{name} ({label})" if name else label
 
 
 def _inventory_search_service_ids(sb, term: str) -> list[str]:
@@ -205,6 +230,20 @@ def _serialize_billing_row(row: dict, *, is_admin: bool = True) -> dict:
     serialized["service_name"] = _best_service_name(row)
     serialized["description"] = row.get("description") or row.get("service_name")
     serialized["quantity"] = to_number(row.get("quantity")) or 1
+    serialized["created_by"] = row.get("created_by")
+    serialized["created_by_name"] = row.get("created_by_name")
+    serialized["created_by_role"] = row.get("created_by_role")
+    serialized["last_edited_by"] = row.get("last_edited_by")
+    serialized["last_edited_by_name"] = row.get("last_edited_by_name")
+    serialized["last_edited_at"] = row.get("last_edited_at")
+    serialized["returned_by"] = row.get("returned_by")
+    serialized["returned_by_name"] = row.get("returned_by_name")
+    serialized["returned_at"] = row.get("returned_at")
+    serialized["last_payment_by"] = row.get("last_payment_by")
+    serialized["last_payment_by_name"] = row.get("last_payment_by_name")
+    serialized["last_payment_at"] = row.get("last_payment_at")
+    serialized["assigned_staff_id"] = row.get("assigned_staff_id")
+    serialized["assigned_staff_name"] = row.get("assigned_staff_name")
     return serialized if is_admin else _mask_financial_fields_for_staff(serialized)
 
 
@@ -494,6 +533,9 @@ def list_billing(
     returned: Optional[bool] = Query(None),
     is_return: Optional[bool] = Query(None),
     paid_state: Optional[str] = Query(None),
+    created_by: Optional[str] = Query(None),
+    edited_by: Optional[str] = Query(None),
+    assigned_staff: Optional[str] = Query(None),
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
     _user=Depends(get_current_user),
@@ -516,6 +558,16 @@ def list_billing(
             query = query.eq("payment_status", normalized)
     if client_id:
         query = query.eq("client_id", client_id)
+    if created_by:
+        query = query.eq("created_by", created_by)
+    if edited_by:
+        query = query.eq("last_edited_by", edited_by)
+    if assigned_staff:
+        query = query.eq("assigned_staff_id", assigned_staff)
+
+    if not is_admin and _staff_scope_enabled(sb):
+        query = query.eq("created_by", str(_user.id))
+
     query, has_search = _apply_service_search_filters(sb, query, search)
 
     # Search defaults to global (all dates). Date filters remain optional refinements.
@@ -570,6 +622,9 @@ def list_billing_grouped(
     returned: Optional[bool] = Query(None),
     is_return: Optional[bool] = Query(None),
     paid_state: Optional[str] = Query(None),
+    created_by: Optional[str] = Query(None),
+    edited_by: Optional[str] = Query(None),
+    assigned_staff: Optional[str] = Query(None),
     page: int = Query(1, ge=1),
     page_size: int = Query(200, ge=1, le=500),
     _user=Depends(get_current_user),
@@ -594,6 +649,16 @@ def list_billing_grouped(
             query = query.eq("payment_status", normalized)
     if client_id:
         query = query.eq("client_id", client_id)
+    if created_by:
+        query = query.eq("created_by", created_by)
+    if edited_by:
+        query = query.eq("last_edited_by", edited_by)
+    if assigned_staff:
+        query = query.eq("assigned_staff_id", assigned_staff)
+
+    if not is_admin and _staff_scope_enabled(sb):
+        query = query.eq("created_by", str(_user.id))
+
     query, has_search = _apply_service_search_filters(sb, query, search)
 
     effective_from = from_date or date_from
@@ -984,6 +1049,30 @@ def get_billing(billing_id: str, _user=Depends(get_current_user)):
     return _serialize_billing_row(result.data, is_admin=user_is_admin(_user))
 
 
+@router.get("/{billing_id}/activity")
+def get_billing_activity(
+    billing_id: str,
+    limit: int = Query(100, ge=1, le=500),
+    _user=Depends(get_current_user),
+):
+    sb = get_supabase()
+    exists = sb.table("service_jobs").select("id").eq("id", billing_id).limit(1).execute().data or []
+    if not exists:
+        raise HTTPException(404, "Billing row not found")
+
+    rows = (
+        sb.table("crm_audit_log")
+        .select("id,action,entity_type,entity_id,performed_by,before_value,after_value,detail,created_at")
+        .eq("entity_id", billing_id)
+        .order("created_at", desc=True)
+        .limit(limit)
+        .execute()
+        .data
+        or []
+    )
+    return {"items": rows, "count": len(rows)}
+
+
 @router.post("", status_code=201)
 def create_billing(payload: BillingCreate, _user=Depends(get_current_user)):
     sb = get_supabase()
@@ -997,6 +1086,9 @@ def create_billing(payload: BillingCreate, _user=Depends(get_current_user)):
     total, amount_paid, payment_status = _compute_financial_state(total, amount_paid)
 
     service_columns = _service_job_columns(sb)
+    actor_role = str(getattr(_user, "role", "staff") or "staff").strip().lower()
+    actor_name = _actor_display_name(_user)
+    now_iso = datetime.utcnow().isoformat()
 
     mapped = {
         "client_id": data.get("client_id"),
@@ -1021,6 +1113,14 @@ def create_billing(payload: BillingCreate, _user=Depends(get_current_user)):
         "condition": data.get("condition"),
         "lock_status": data.get("lock_status"),
         "unlock_method": data.get("unlock_method"),
+        "created_by": str(_user.id),
+        "created_by_name": actor_name,
+        "created_by_role": actor_role,
+        "last_edited_by": str(_user.id),
+        "last_edited_by_name": actor_name,
+        "last_edited_at": now_iso,
+        "assigned_staff_id": str(_user.id),
+        "assigned_staff_name": actor_name,
     }
     mapped = {k: v for k, v in mapped.items() if k in service_columns and v is not None}
     result = sb.table("service_jobs").insert(mapped).execute()
@@ -1039,6 +1139,7 @@ def create_billing(payload: BillingCreate, _user=Depends(get_current_user)):
         detail={
             "client_name": created.get("client_name"),
             "service_name": created.get("service_name"),
+            "created_by_name": actor_name,
         },
     )
     emit_financial_event(
@@ -1092,6 +1193,8 @@ def update_billing(billing_id: str, payload: BillingUpdate, _user=Depends(get_cu
     existing_amount = to_number(existing_before.get("amount_charged"))
     existing_paid = to_number(existing_before.get("paid_amount"))
     existing_qty = to_number(existing_before.get("quantity") or 1) or 1
+    actor_name = _actor_display_name(_user)
+    now_iso = datetime.utcnow().isoformat()
 
     if "unit_price" in data or "quantity" in data:
         qty = to_number(data.get("quantity", existing_qty)) or 1
@@ -1111,6 +1214,9 @@ def update_billing(billing_id: str, payload: BillingUpdate, _user=Depends(get_cu
         data["payment_status"] = "RETURNED"
         data["paid_date"] = None
         data["paid_at"] = None
+        data["returned_by"] = str(_user.id)
+        data["returned_by_name"] = actor_name
+        data["returned_at"] = now_iso
     else:
         total_input = data.get("amount_charged", existing_amount)
         paid_input = data.get("paid_amount", existing_paid)
@@ -1126,6 +1232,10 @@ def update_billing(billing_id: str, payload: BillingUpdate, _user=Depends(get_cu
         else:
             data["paid_date"] = None
             data["paid_at"] = None
+
+    data["last_edited_by"] = str(_user.id)
+    data["last_edited_by_name"] = actor_name
+    data["last_edited_at"] = now_iso
 
     service_columns = _service_job_columns(sb)
     data = {k: v for k, v in data.items() if k in service_columns}
@@ -1153,6 +1263,7 @@ def update_billing(billing_id: str, payload: BillingUpdate, _user=Depends(get_cu
         detail={
             "fields_updated": sorted(list(data.keys())),
             "edited_by": str(_user.id),
+            "edited_by_name": actor_name,
             "previous_amount": to_number(existing_before.get("amount_charged")),
             "new_amount": to_number(updated.get("amount_charged")),
             "previous_paid_amount": to_number(existing_before.get("paid_amount")),
@@ -1200,12 +1311,23 @@ def update_billing(billing_id: str, payload: BillingUpdate, _user=Depends(get_cu
 @router.delete("/{billing_id}", status_code=204)
 def delete_billing(billing_id: str, _user=Depends(get_current_user)):
     sb = get_supabase()
+    existing = sb.table("service_jobs").select("*").eq("id", billing_id).limit(1).execute().data or []
+    before_value = existing[0] if existing else None
     emit_financial_event(
         sb,
         "invoice_deleted",
         performed_by=str(_user.id),
         record_id=billing_id,
         amount=0.0,
+        detail={"reason": "billing_delete"},
+    )
+    _log_billing_audit(
+        sb,
+        action="invoice_deleted",
+        entity_id=billing_id,
+        performed_by=str(_user.id),
+        before_value=before_value,
+        after_value={"deleted": True},
         detail={"reason": "billing_delete"},
     )
     sb.table("service_jobs").delete().eq("id", billing_id).execute()

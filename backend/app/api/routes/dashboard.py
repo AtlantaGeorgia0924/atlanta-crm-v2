@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 
 from app.core.auth import get_current_user
 from app.core.dashboard_metrics import app_settings_payload, compute_metrics_from_supabase
@@ -119,3 +119,62 @@ def dashboard_validation(_user=Depends(get_current_user)):
             "skipped_missing_cost_price": int(to_number(settings_map.get("finance_skipped_missing_cost_price"))),
         },
     }
+
+
+@router.get("/staff-metrics")
+def staff_metrics(_user=Depends(get_current_user)):
+    if not user_is_admin(_user):
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    sb = get_supabase()
+
+    users = (
+        sb.table("users")
+        .select("id,full_name,email,role")
+        .in_("role", ["admin", "staff"])
+        .neq("account_status", "DELETED")
+        .execute()
+        .data
+        or []
+    )
+
+    rows_by_user = {}
+    for user in users:
+        user_id = str(user.get("id") or "").strip()
+        if not user_id:
+            continue
+        rows_by_user[user_id] = {
+            "user_id": user_id,
+            "full_name": user.get("full_name") or user.get("email") or "Unknown",
+            "email": user.get("email"),
+            "role": user.get("role"),
+            "services_created": 0,
+            "payments_processed": 0,
+            "inventory_sales": 0,
+            "returns_handled": 0,
+        }
+
+    def _inc(table: str, column: str, key: str, extra_filter=None):
+        for user_id in rows_by_user.keys():
+            q = sb.table(table).select("id", count="exact").eq(column, user_id)
+            if extra_filter is not None:
+                q = extra_filter(q)
+            result = q.limit(1).execute()
+            rows_by_user[user_id][key] = int(result.count or 0)
+
+    _inc("service_jobs", "created_by", "services_created")
+    _inc("payments", "applied_by", "payments_processed")
+    _inc("inventory_sales", "sold_by", "inventory_sales")
+    _inc("service_jobs", "returned_by", "returns_handled", lambda q: q.eq("is_return", True))
+
+    items = sorted(
+        rows_by_user.values(),
+        key=lambda r: (
+            int(r.get("services_created") or 0)
+            + int(r.get("payments_processed") or 0)
+            + int(r.get("inventory_sales") or 0)
+            + int(r.get("returns_handled") or 0)
+        ),
+        reverse=True,
+    )
+    return {"items": items, "total": len(items)}

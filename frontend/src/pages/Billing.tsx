@@ -37,6 +37,20 @@ interface BillingRow {
   invoice_date?: string
   service_date?: string
   notes?: string
+  created_by?: string
+  created_by_name?: string
+  created_by_role?: string
+  last_edited_by?: string
+  last_edited_by_name?: string
+  last_edited_at?: string
+  returned_by?: string
+  returned_by_name?: string
+  returned_at?: string
+  last_payment_by?: string
+  last_payment_by_name?: string
+  last_payment_at?: string
+  assigned_staff_id?: string
+  assigned_staff_name?: string
 }
 
 interface BillingGroup {
@@ -108,6 +122,16 @@ interface PaymentHistoryRow {
   payment_date?: string
   created_at?: string
   is_reversed?: boolean
+}
+
+interface BillingActivityRow {
+  id: string
+  action?: string
+  entity_type?: string
+  entity_id?: string
+  performed_by?: string
+  detail?: Record<string, any>
+  created_at?: string
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -225,6 +249,9 @@ export default function Billing() {
   const maxAmount = searchParams.get('max_amount') || ''
   const returned = searchParams.get('is_return') || ''
   const paidState = searchParams.get('paid_state') || ''
+  const createdBy = searchParams.get('created_by') || ''
+  const editedBy = searchParams.get('edited_by') || ''
+  const assignedStaff = searchParams.get('assigned_staff') || ''
 
   const [searchInput, setSearchInput] = useState(search)
 
@@ -274,6 +301,9 @@ export default function Billing() {
           max_amount: maxAmount || undefined,
           is_return: returned === '' ? undefined : returned === 'true',
           paid_state: paidState || undefined,
+          created_by: createdBy || undefined,
+          edited_by: editedBy || undefined,
+          assigned_staff: assignedStaff || undefined,
         },
       }).then((r) => r.data),
     placeholderData: (prev) => prev,
@@ -285,6 +315,16 @@ export default function Billing() {
     enabled: isAdmin,
   })
   const currency = status?.currency ?? localStorage.getItem('currency') ?? 'NGN'
+
+  const { data: usersData } = useQuery<{ items: Array<{ id: string; full_name?: string; email?: string; role?: string }> }>({
+    queryKey: ['billing-users-filter-list'],
+    queryFn: () => api.get('/users', { params: { page: 1, page_size: 200, include_deleted: false } }).then((r) => r.data),
+    enabled: isAdmin,
+  })
+  const userOptions = useMemo(
+    () => (usersData?.items ?? []).map((u) => ({ id: String(u.id), label: u.full_name || u.email || String(u.id) })),
+    [usersData]
+  )
 
   const { data: clientSearchResults } = useQuery({
     queryKey: ['billing-client-suggestions', clientSearch],
@@ -712,7 +752,7 @@ export default function Billing() {
 
   const clearFilters = () => {
     const next = new URLSearchParams(searchParams)
-    ;['search', 'from_date', 'to_date', 'payment_status', 'paid_state', 'min_amount', 'max_amount', 'is_return', 'month'].forEach((k) => next.delete(k))
+    ;['search', 'from_date', 'to_date', 'payment_status', 'paid_state', 'min_amount', 'max_amount', 'is_return', 'month', 'created_by', 'edited_by', 'assigned_staff'].forEach((k) => next.delete(k))
     next.set('page', '1')
     setSearchInput('')
     setSearchParams(next, { replace: true })
@@ -778,7 +818,7 @@ export default function Billing() {
     }
   }
 
-  const hasActiveFilters = !!(search || dateFrom || dateTo || statusFilter || paidState || minAmount || maxAmount || returned)
+  const hasActiveFilters = !!(search || dateFrom || dateTo || statusFilter || paidState || minAmount || maxAmount || returned || createdBy || editedBy || assignedStaff)
   const normalizedSearch = search.trim()
 
   const highlightMatch = (text?: string) => {
@@ -942,6 +982,24 @@ export default function Billing() {
             <option value="false">Not returned</option>
             <option value="true">Returned</option>
           </select>
+          {isAdmin && (
+            <select className="form-input py-2 text-sm" style={{ minWidth: '11rem' }} value={createdBy} onChange={(e) => setParam('created_by', e.target.value)}>
+              <option value="">Created by (all)</option>
+              {userOptions.map((u) => <option key={u.id} value={u.id}>{u.label}</option>)}
+            </select>
+          )}
+          {isAdmin && (
+            <select className="form-input py-2 text-sm" style={{ minWidth: '11rem' }} value={editedBy} onChange={(e) => setParam('edited_by', e.target.value)}>
+              <option value="">Edited by (all)</option>
+              {userOptions.map((u) => <option key={u.id} value={u.id}>{u.label}</option>)}
+            </select>
+          )}
+          {isAdmin && (
+            <select className="form-input py-2 text-sm" style={{ minWidth: '11rem' }} value={assignedStaff} onChange={(e) => setParam('assigned_staff', e.target.value)}>
+              <option value="">Assigned staff (all)</option>
+              {userOptions.map((u) => <option key={u.id} value={u.id}>{u.label}</option>)}
+            </select>
+          )}
         </div>
 
         {/* Row 2: Date + amount range */}
@@ -977,6 +1035,9 @@ export default function Billing() {
             {isAdmin && minAmount && <FilterBadge label={`Min ${minAmount}`} onRemove={() => setParam('min_amount')} />}
             {isAdmin && maxAmount && <FilterBadge label={`Max ${maxAmount}`} onRemove={() => setParam('max_amount')} />}
             {returned && <FilterBadge label={returned === 'true' ? 'Returned' : 'Not returned'} onRemove={() => setParam('is_return')} />}
+            {isAdmin && createdBy && <FilterBadge label={`Created by: ${(userOptions.find((u) => u.id === createdBy)?.label || createdBy)}`} onRemove={() => setParam('created_by')} />}
+            {isAdmin && editedBy && <FilterBadge label={`Edited by: ${(userOptions.find((u) => u.id === editedBy)?.label || editedBy)}`} onRemove={() => setParam('edited_by')} />}
+            {isAdmin && assignedStaff && <FilterBadge label={`Assigned: ${(userOptions.find((u) => u.id === assignedStaff)?.label || assignedStaff)}`} onRemove={() => setParam('assigned_staff')} />}
           </div>
         )}
       </div>
@@ -1023,10 +1084,11 @@ export default function Billing() {
               <div className="max-h-[68vh] overflow-y-auto">
                 <div
                   className="sticky top-0 z-30 grid items-center gap-2 px-4 py-2 text-xs font-medium text-gray-400 uppercase tracking-wide border-b bg-white"
-                  style={{ gridTemplateColumns: '1.8fr 1.8fr 1fr 1fr 1fr 1fr 6rem', borderColor: '#f7f1d8' }}
+                  style={{ gridTemplateColumns: '1.5fr 1.7fr 1.2fr 1fr 1fr 1fr 1fr 6rem', borderColor: '#f7f1d8' }}
                 >
                   <span>Client</span>
                   <span>Service</span>
+                  <span>Created By</span>
                   <span>Total</span>
                   <span>Paid</span>
                   <span>Balance</span>
@@ -1084,11 +1146,14 @@ export default function Billing() {
                     >
                       <div
                         className="group grid items-center gap-2 px-4 py-3 text-sm hover:bg-[#fffdf5] cursor-pointer transition-colors"
-                        style={{ gridTemplateColumns: '1.8fr 1.8fr 1fr 1fr 1fr 1fr 6rem' }}
+                        style={{ gridTemplateColumns: '1.5fr 1.7fr 1.2fr 1fr 1fr 1fr 1fr 6rem' }}
                         onClick={() => toggleRow(row.id)}
                       >
                         <span className="truncate font-medium text-gray-900" title={row.client_name}>{highlightMatch(row.client_name)}</span>
                         <span className="truncate text-gray-600" title={row.service_name}>{highlightMatch(row.service_name)}</span>
+                        <span className="truncate text-gray-500" title={row.created_by_name || row.assigned_staff_name || 'Unattributed'}>
+                          {row.created_by_name || row.assigned_staff_name || 'Unattributed'}
+                        </span>
                         <span className="text-gray-800 tabular-nums">{formatCurrency(row.total_amount, currency)}</span>
                         <span className="text-emerald-700 tabular-nums">{formatCurrency(row.amount_paid, currency)}</span>
                         <span className={`tabular-nums font-medium ${balancePositive ? 'text-amber-700' : 'text-gray-300'}`}>
@@ -1125,8 +1190,30 @@ export default function Billing() {
                             <span>Unit price: <strong className="text-gray-700">{formatCurrency(Number(row.total_amount) / (Number(row.quantity) || 1), currency)}</strong></span>
                             <span>ID: <span className="font-mono text-gray-400">{row.id.slice(0, 8)}…</span></span>
                           </div>
+                          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2 text-[11px]">
+                            <div className="rounded border border-amber-100 bg-white px-2 py-1">
+                              <p className="text-gray-400">Created by</p>
+                              <p className="font-medium text-gray-700">{row.created_by_name || 'Unknown'}</p>
+                            </div>
+                            <div className="rounded border border-amber-100 bg-white px-2 py-1">
+                              <p className="text-gray-400">Last edited</p>
+                              <p className="font-medium text-gray-700">{row.last_edited_by_name || '—'}</p>
+                              {row.last_edited_at && <p className="text-gray-400">{String(row.last_edited_at).slice(0, 19).replace('T', ' ')}</p>}
+                            </div>
+                            <div className="rounded border border-amber-100 bg-white px-2 py-1">
+                              <p className="text-gray-400">Last payment</p>
+                              <p className="font-medium text-gray-700">{row.last_payment_by_name || '—'}</p>
+                              {row.last_payment_at && <p className="text-gray-400">{String(row.last_payment_at).slice(0, 19).replace('T', ' ')}</p>}
+                            </div>
+                            <div className="rounded border border-amber-100 bg-white px-2 py-1">
+                              <p className="text-gray-400">Returned by</p>
+                              <p className="font-medium text-gray-700">{row.returned_by_name || '—'}</p>
+                              {row.returned_at && <p className="text-gray-400">{String(row.returned_at).slice(0, 19).replace('T', ' ')}</p>}
+                            </div>
+                          </div>
                           {row.notes && <p className="italic text-gray-400">📝 {row.notes}</p>}
                           {isAdmin && <InvoicePaymentHistory invoiceId={row.id} currency={currency} />}
+                          <BillingActivityTimeline invoiceId={row.id} />
                           <div className="flex flex-wrap gap-2 pt-1">
                             <InlineBtn icon={<Pencil size={11} />} label="Edit" onClick={() => { void openEdit(row) }} />
                             {isAdmin && <InlineBtn icon={<CreditCard size={11} />} label="Apply Payment" onClick={() => openApplyPayment(row)} />}
@@ -1500,6 +1587,43 @@ function InvoicePaymentHistory({ invoiceId, currency }: { invoiceId: string; cur
                 <span className={`font-semibold ${amount < 0 ? 'text-amber-700' : 'text-emerald-700'}`}>
                   {formatCurrency(amount, currency)}
                 </span>
+              </div>
+            )
+          })}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function BillingActivityTimeline({ invoiceId }: { invoiceId: string }) {
+  const { data, isLoading } = useQuery<{ items: BillingActivityRow[] }>({
+    queryKey: ['billing-activity', invoiceId],
+    queryFn: () => api.get(`/billing/${invoiceId}/activity`, { params: { limit: 20 } }).then((r) => r.data),
+    enabled: !!invoiceId,
+  })
+
+  const items = data?.items ?? []
+  return (
+    <div className="rounded-md border border-amber-100 bg-white px-3 py-2">
+      <p className="text-[11px] font-semibold text-gray-700 mb-1">Activity Timeline</p>
+      {isLoading ? (
+        <p className="text-[11px] text-gray-400">Loading activity...</p>
+      ) : items.length === 0 ? (
+        <p className="text-[11px] text-gray-400">No activity recorded yet.</p>
+      ) : (
+        <div className="space-y-1.5">
+          {items.map((item) => {
+            const label = String(item.action || '').replace(/_/g, ' ').toUpperCase() || 'EVENT'
+            const when = String(item.created_at || '').slice(0, 19).replace('T', ' ')
+            const detail = item.detail || {}
+            const actor = detail.edited_by_name || detail.applied_by_name || detail.created_by_name || item.performed_by || ''
+            return (
+              <div key={item.id} className="flex items-start justify-between gap-4 text-[11px]">
+                <div>
+                  <p className="font-medium text-gray-700">{label}</p>
+                  <p className="text-gray-500">{when}{actor ? ` • ${actor}` : ''}</p>
+                </div>
               </div>
             )
           })}

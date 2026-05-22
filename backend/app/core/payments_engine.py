@@ -131,6 +131,9 @@ def apply_invoice_payment(
         "payment_status": new_status,
         "paid_date": resolved_date if new_status == "PAID" else None,
         "paid_at": datetime.utcnow().isoformat() if new_status == "PAID" else None,
+        "last_payment_by": applied_by,
+        "last_payment_by_name": applied_by_name,
+        "last_payment_at": datetime.utcnow().isoformat(),
     }
     updated_invoice = (
         sb.table("service_jobs")
@@ -220,6 +223,9 @@ def reverse_invoice_payment(
                 "payment_status": new_status,
                 "paid_date": resolved_date if new_status == "PAID" else None,
                 "paid_at": datetime.utcnow().isoformat() if new_status == "PAID" else None,
+                "last_payment_by": reversed_by,
+                "last_payment_by_name": reversed_by_name,
+                "last_payment_at": datetime.utcnow().isoformat(),
             }
         )
         .eq("id", service_job_id)
