@@ -1,9 +1,9 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useForm } from 'react-hook-form'
 import { useSearchParams } from 'react-router-dom'
 import {
-  Calendar, ChevronDown, ChevronLeft, ChevronRight,
+  Calendar, ChevronLeft, ChevronRight,
   Copy, CreditCard, MessageCircle, Pencil, Plus,
   RotateCcw, Search, Trash2, X,
 } from 'lucide-react'
@@ -49,6 +49,10 @@ interface GroupedResponse {
   total_pages: number
   total: number
 }
+
+type FlatBillingEntry =
+  | { kind: 'separator'; key: string; group: BillingGroup }
+  | { kind: 'item'; key: string; group: BillingGroup; row: BillingRow }
 
 interface FormValues {
   client_id?: string
@@ -159,10 +163,11 @@ export default function Billing() {
   const [clientSearch, setClientSearch] = useState('')
   const [showClientDropdown, setShowClientDropdown] = useState(false)
   const [selectedClientId, setSelectedClientId] = useState('')
-  const [collapsedDates, setCollapsedDates] = useState<Record<string, boolean>>({})
   const [expandedRows, setExpandedRows] = useState<Set<string>>(new Set())
   const [applyPayRow, setApplyPayRow] = useState<BillingRow | null>(null)
   const [applyPayAmount, setApplyPayAmount] = useState('')
+  const [visibleCount, setVisibleCount] = useState(140)
+  const loadMoreRef = useRef<HTMLDivElement | null>(null)
 
   const page = Number(searchParams.get('page') || '1')
   const statusFilter = searchParams.get('payment_status') || ''
@@ -375,6 +380,40 @@ export default function Billing() {
 
   const grouped: BillingGroup[] = useMemo(() => groupedData?.groups ?? [], [groupedData])
 
+  const flatRows: FlatBillingEntry[] = useMemo(() => {
+    const entries: FlatBillingEntry[] = []
+    for (const group of grouped) {
+      entries.push({ kind: 'separator', key: `sep-${group.service_date}`, group })
+      for (const row of group.items) {
+        entries.push({ kind: 'item', key: `row-${row.id}`, group, row })
+      }
+    }
+    return entries
+  }, [grouped])
+
+  useEffect(() => {
+    setVisibleCount(140)
+  }, [groupedData?.page, groupedData?.total, search, dateFrom, dateTo, statusFilter, paidState, minAmount, maxAmount, returned])
+
+  useEffect(() => {
+    if (!loadMoreRef.current) return
+    if (visibleCount >= flatRows.length) return
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          if (entry.isIntersecting) {
+            setVisibleCount((prev) => Math.min(prev + 120, flatRows.length))
+          }
+        }
+      },
+      { rootMargin: '320px' }
+    )
+
+    observer.observe(loadMoreRef.current)
+    return () => observer.disconnect()
+  }, [visibleCount, flatRows.length])
+
   const totalSummary = useMemo(() => {
     let totalAmount = 0, totalPaid = 0, totalOutstanding = 0, jobs = 0
     for (const g of grouped) {
@@ -471,6 +510,7 @@ export default function Billing() {
     setSelectedClientId('')
     setClientSearch('')
     setShowClientDropdown(false)
+    setExpandedRows(new Set())
     reset()
   }
 
@@ -701,143 +741,138 @@ export default function Billing() {
         )}
       </div>
 
-      {/* ── Grouped sections ── */}
+      {/* ── Continuous table with sticky date separators ── */}
       {isLoading ? (
         <LoadingSpinner />
       ) : (
         <div className="space-y-3">
-          {grouped.length === 0 && (
+          {flatRows.length === 0 && (
             <div className="rounded-xl border p-8 text-sm text-gray-400 text-center" style={{ borderColor: '#e7d89f' }}>
               No jobs found for the current filters.
             </div>
           )}
 
-          {grouped.map((group: BillingGroup) => {
-            const collapsed = !!collapsedDates[group.service_date]
-            const hasOutstanding = Number(group.summary.total_outstanding) > 0
-
-            return (
-              <section key={group.service_date} className="rounded-xl border bg-white" style={{ borderColor: '#e7d89f' }}>
-
-                {/* Sticky group header */}
-                <div className="sticky top-0 z-10 bg-white border-b rounded-t-xl" style={{ borderColor: '#f1e7bf' }}>
-                  <button
-                    className="w-full flex items-center justify-between gap-3 px-4 py-3 text-left"
-                    onClick={() => setCollapsedDates((prev) => ({ ...prev, [group.service_date]: !collapsed }))}
-                  >
-                    <div className="flex items-center gap-2 min-w-0">
-                      <ChevronDown size={14} className={`shrink-0 text-gray-400 transition-transform ${collapsed ? '-rotate-90' : ''}`} />
-                      <span className="font-semibold text-sm text-gray-900">{labelForDate(group.service_date)}</span>
-                      <span className="text-xs text-gray-400 hidden sm:inline">{group.service_date}</span>
-                    </div>
-                    <div className="flex items-center gap-3 shrink-0 text-xs text-gray-500">
-                      <span className="hidden sm:inline">{group.summary.job_count} jobs</span>
-                      {isAdmin && <span className="hidden lg:inline"><span className="text-gray-400">Total </span>{formatCurrency(group.summary.total_amount, currency)}</span>}
-                      {isAdmin && <span className="hidden lg:inline text-emerald-600">{formatCurrency(group.summary.total_paid, currency)} paid</span>}
-                      {isAdmin && hasOutstanding ? (
-                        <span className="font-semibold text-amber-700 bg-amber-50 border border-amber-200 px-2 py-0.5 rounded-full">
-                          {formatCurrency(group.summary.total_outstanding, currency)} due
-                        </span>
-                      ) : (
-                        <span className="text-emerald-600 text-xs font-medium">✓ Settled</span>
-                      )}
-                    </div>
-                  </button>
+          {flatRows.length > 0 && (
+            <section className="rounded-xl border bg-white" style={{ borderColor: '#e7d89f' }}>
+              <div className="max-h-[68vh] overflow-y-auto">
+                <div
+                  className="sticky top-0 z-30 grid items-center gap-2 px-4 py-2 text-xs font-medium text-gray-400 uppercase tracking-wide border-b bg-white"
+                  style={{ gridTemplateColumns: '1.8fr 1.8fr 1fr 1fr 1fr 1fr 6rem', borderColor: '#f7f1d8' }}
+                >
+                  <span>Client</span>
+                  <span>Service</span>
+                  <span>Total</span>
+                  <span>Paid</span>
+                  <span>Balance</span>
+                  <span>Status</span>
+                  <span />
                 </div>
 
-                {!collapsed && (
-                  <div>
-                    {/* Column headers */}
-                    <div
-                      className="grid items-center gap-2 px-4 py-1.5 text-xs font-medium text-gray-400 uppercase tracking-wide border-b"
-                      style={{ gridTemplateColumns: '1.8fr 1.8fr 1fr 1fr 1fr 1fr 6rem', borderColor: '#f7f1d8' }}
-                    >
-                      <span>Client</span>
-                      <span>Service</span>
-                      <span>Total</span>
-                      <span>Paid</span>
-                      <span>Balance</span>
-                      <span>Status</span>
-                      <span />
-                    </div>
-
-                    {group.items.map((row, idx) => {
-                      const expanded = expandedRows.has(row.id)
-                      const isLast = idx === group.items.length - 1
-                      const balancePositive = Number(row.balance) > 0
-
-                      return (
-                        <div
-                          key={row.id}
-                          className={`${!isLast ? 'border-b' : ''}`}
-                          style={{ borderColor: '#f7f1d8' }}
-                        >
-                          {/* Main row */}
-                          <div
-                            className="group grid items-center gap-2 px-4 py-3 text-sm hover:bg-[#fffdf5] cursor-pointer transition-colors"
-                            style={{ gridTemplateColumns: '1.8fr 1.8fr 1fr 1fr 1fr 1fr 6rem' }}
-                            onClick={() => toggleRow(row.id)}
-                          >
-                            <span className="truncate font-medium text-gray-900" title={row.client_name}>{row.client_name}</span>
-                            <span className="truncate text-gray-600" title={row.service_name}>{row.service_name}</span>
-                            <span className="text-gray-800 tabular-nums">{isAdmin ? formatCurrency(row.total_amount, currency) : 'Hidden'}</span>
-                            <span className="text-emerald-700 tabular-nums">{isAdmin ? formatCurrency(row.amount_paid, currency) : 'Hidden'}</span>
-                            <span className={`tabular-nums font-medium ${balancePositive ? 'text-amber-700' : 'text-gray-300'}`}>
-                              {isAdmin ? (balancePositive ? formatCurrency(row.balance, currency) : '—') : 'Hidden'}
-                            </span>
-                            <span>
-                              <span className={statusBadgeClass(row.status)}>{statusLabel(row.status)}</span>
-                            </span>
-                            {/* Row quick actions — visible on hover */}
-                            <div
-                              className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity"
-                              onClick={(e) => e.stopPropagation()}
-                            >
-                              <ActionBtn title="Edit" icon={<Pencil size={13} />} onClick={() => openEdit(row)} />
-                              {isAdmin && <ActionBtn title="Apply Payment" icon={<CreditCard size={13} />} onClick={() => { setApplyPayRow(row); setApplyPayAmount(String(row.amount_paid)) }} />}
-                              <ActionBtn title="WhatsApp Bill" icon={<MessageCircle size={13} />} onClick={() => openWhatsApp(row)} colorClass="hover:text-green-600" />
-                              <ActionBtn title="Copy Bill" icon={<Copy size={13} />} onClick={() => copyBill(row)} />
-                              <ActionBtn title="Mark Returned" icon={<RotateCcw size={13} />} onClick={() => { if (confirm('Mark as returned?')) markReturnedMutation.mutate(row.id) }} />
-                              <ActionBtn title="Delete" icon={<Trash2 size={13} />} onClick={() => { if (confirm('Delete invoice?')) deleteMutation.mutate(row.id) }} colorClass="hover:text-red-600" />
-                            </div>
+                {flatRows.slice(0, visibleCount).map((entry, idx) => {
+                  if (entry.kind === 'separator') {
+                    const g = entry.group
+                    const hasOutstanding = Number(g.summary.total_outstanding) > 0
+                    return (
+                      <div
+                        key={entry.key}
+                        className="sticky top-9 z-20 border-b border-t px-4 py-2 bg-[#fffdf5]"
+                        style={{ borderColor: '#f1e7bf' }}
+                      >
+                        <div className="flex items-center justify-between gap-3 text-xs">
+                          <div className="flex items-center gap-2 min-w-0">
+                            <span className="font-semibold text-sm text-gray-900">{labelForDate(g.service_date)}</span>
+                            <span className="text-gray-400 hidden sm:inline">{g.service_date}</span>
                           </div>
-
-                          {/* Expandable detail panel */}
-                          {expanded && (
-                            <div
-                              className="px-6 pb-3 pt-2 bg-[#fffdf5] border-t text-xs text-gray-600 space-y-2"
-                              style={{ borderColor: '#f7f1d8' }}
-                              onClick={(e) => e.stopPropagation()}
-                            >
-                              <div className="flex flex-wrap gap-x-6 gap-y-1 text-gray-500">
-                                {row.phone_number && <span>📱 <strong className="text-gray-700">{row.phone_number}</strong></span>}
-                                {(row.invoice_date || row.service_date) && <span>📅 {(row.invoice_date || row.service_date)!.slice(0, 10)}</span>}
-                                <span>Qty: <strong className="text-gray-700">{row.quantity}</strong></span>
-                                <span>Unit price: <strong className="text-gray-700">{formatCurrency(Number(row.total_amount) / (Number(row.quantity) || 1), currency)}</strong></span>
-                                <span>ID: <span className="font-mono text-gray-400">{row.id.slice(0, 8)}…</span></span>
-                              </div>
-                              {row.notes && <p className="italic text-gray-400">📝 {row.notes}</p>}
-                              {/* Inline action buttons */}
-                              <div className="flex flex-wrap gap-2 pt-1">
-                                <InlineBtn icon={<Pencil size={11} />} label="Edit" onClick={() => openEdit(row)} />
-                                {isAdmin && <InlineBtn icon={<CreditCard size={11} />} label="Apply Payment" onClick={() => { setApplyPayRow(row); setApplyPayAmount(String(row.amount_paid)) }} />}
-                                <InlineBtn icon={<MessageCircle size={11} />} label="WhatsApp" onClick={() => openWhatsApp(row)} extraClass="text-green-700 hover:bg-green-50" />
-                                <InlineBtn icon={<Copy size={11} />} label="Copy Bill" onClick={() => copyBill(row)} />
-                                {row.status !== 'RETURNED' && (
-                                  <InlineBtn icon={<RotateCcw size={11} />} label="Mark Returned" onClick={() => { if (confirm('Mark as returned?')) markReturnedMutation.mutate(row.id) }} />
-                                )}
-                                <InlineBtn icon={<Trash2 size={11} />} label="Delete" onClick={() => { if (confirm('Delete invoice?')) deleteMutation.mutate(row.id) }} extraClass="text-red-600 hover:bg-red-50" />
-                              </div>
-                            </div>
-                          )}
+                          <div className="flex items-center gap-3 shrink-0 text-gray-500">
+                            <span>{g.summary.job_count} jobs</span>
+                            {isAdmin && <span className="hidden lg:inline"><span className="text-gray-400">Total </span>{formatCurrency(g.summary.total_amount, currency)}</span>}
+                            {isAdmin && <span className="hidden lg:inline text-emerald-600">{formatCurrency(g.summary.total_paid, currency)} paid</span>}
+                            {isAdmin && hasOutstanding ? (
+                              <span className="font-semibold text-amber-700 bg-amber-50 border border-amber-200 px-2 py-0.5 rounded-full">
+                                {formatCurrency(g.summary.total_outstanding, currency)} due
+                              </span>
+                            ) : (
+                              <span className="text-emerald-600 text-xs font-medium">✓ Settled</span>
+                            )}
+                          </div>
                         </div>
-                      )
-                    })}
+                      </div>
+                    )
+                  }
+
+                  const row = entry.row
+                  const expanded = expandedRows.has(row.id)
+                  const balancePositive = Number(row.balance) > 0
+                  const showBottomBorder = idx < Math.min(visibleCount, flatRows.length) - 1
+
+                  return (
+                    <div key={entry.key} className={`${showBottomBorder ? 'border-b' : ''}`} style={{ borderColor: '#f7f1d8' }}>
+                      <div
+                        className="group grid items-center gap-2 px-4 py-3 text-sm hover:bg-[#fffdf5] cursor-pointer transition-colors"
+                        style={{ gridTemplateColumns: '1.8fr 1.8fr 1fr 1fr 1fr 1fr 6rem' }}
+                        onClick={() => toggleRow(row.id)}
+                      >
+                        <span className="truncate font-medium text-gray-900" title={row.client_name}>{row.client_name}</span>
+                        <span className="truncate text-gray-600" title={row.service_name}>{row.service_name}</span>
+                        <span className="text-gray-800 tabular-nums">{isAdmin ? formatCurrency(row.total_amount, currency) : 'Hidden'}</span>
+                        <span className="text-emerald-700 tabular-nums">{isAdmin ? formatCurrency(row.amount_paid, currency) : 'Hidden'}</span>
+                        <span className={`tabular-nums font-medium ${balancePositive ? 'text-amber-700' : 'text-gray-300'}`}>
+                          {isAdmin ? (balancePositive ? formatCurrency(row.balance, currency) : '—') : 'Hidden'}
+                        </span>
+                        <span>
+                          <span className={statusBadgeClass(row.status)}>{statusLabel(row.status)}</span>
+                        </span>
+                        <div
+                          className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity"
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          <ActionBtn title="Edit" icon={<Pencil size={13} />} onClick={() => openEdit(row)} />
+                          {isAdmin && <ActionBtn title="Apply Payment" icon={<CreditCard size={13} />} onClick={() => { setApplyPayRow(row); setApplyPayAmount(String(row.amount_paid)) }} />}
+                          <ActionBtn title="WhatsApp Bill" icon={<MessageCircle size={13} />} onClick={() => openWhatsApp(row)} colorClass="hover:text-green-600" />
+                          <ActionBtn title="Copy Bill" icon={<Copy size={13} />} onClick={() => copyBill(row)} />
+                          <ActionBtn title="Mark Returned" icon={<RotateCcw size={13} />} onClick={() => { if (confirm('Mark as returned?')) markReturnedMutation.mutate(row.id) }} />
+                          <ActionBtn title="Delete" icon={<Trash2 size={13} />} onClick={() => { if (confirm('Delete invoice?')) deleteMutation.mutate(row.id) }} colorClass="hover:text-red-600" />
+                        </div>
+                      </div>
+
+                      {expanded && (
+                        <div
+                          className="px-6 pb-3 pt-2 bg-[#fffdf5] border-t text-xs text-gray-600 space-y-2"
+                          style={{ borderColor: '#f7f1d8' }}
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          <div className="flex flex-wrap gap-x-6 gap-y-1 text-gray-500">
+                            {row.phone_number && <span>📱 <strong className="text-gray-700">{row.phone_number}</strong></span>}
+                            {(row.invoice_date || row.service_date) && <span>📅 {(row.invoice_date || row.service_date)!.slice(0, 10)}</span>}
+                            <span>Qty: <strong className="text-gray-700">{row.quantity}</strong></span>
+                            <span>Unit price: <strong className="text-gray-700">{formatCurrency(Number(row.total_amount) / (Number(row.quantity) || 1), currency)}</strong></span>
+                            <span>ID: <span className="font-mono text-gray-400">{row.id.slice(0, 8)}…</span></span>
+                          </div>
+                          {row.notes && <p className="italic text-gray-400">📝 {row.notes}</p>}
+                          <div className="flex flex-wrap gap-2 pt-1">
+                            <InlineBtn icon={<Pencil size={11} />} label="Edit" onClick={() => openEdit(row)} />
+                            {isAdmin && <InlineBtn icon={<CreditCard size={11} />} label="Apply Payment" onClick={() => { setApplyPayRow(row); setApplyPayAmount(String(row.amount_paid)) }} />}
+                            <InlineBtn icon={<MessageCircle size={11} />} label="WhatsApp" onClick={() => openWhatsApp(row)} extraClass="text-green-700 hover:bg-green-50" />
+                            <InlineBtn icon={<Copy size={11} />} label="Copy Bill" onClick={() => copyBill(row)} />
+                            {row.status !== 'RETURNED' && (
+                              <InlineBtn icon={<RotateCcw size={11} />} label="Mark Returned" onClick={() => { if (confirm('Mark as returned?')) markReturnedMutation.mutate(row.id) }} />
+                            )}
+                            <InlineBtn icon={<Trash2 size={11} />} label="Delete" onClick={() => { if (confirm('Delete invoice?')) deleteMutation.mutate(row.id) }} extraClass="text-red-600 hover:bg-red-50" />
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )
+                })}
+
+                {visibleCount < flatRows.length && (
+                  <div ref={loadMoreRef} className="px-4 py-3 text-center text-xs text-gray-400">
+                    Loading more rows...
                   </div>
                 )}
-              </section>
-            )
-          })}
+              </div>
+            </section>
+          )}
 
           <div className="flex gap-2 justify-end">
             <button disabled={page === 1} onClick={() => setParam('page', String(page - 1))} className="btn-secondary">Prev</button>
