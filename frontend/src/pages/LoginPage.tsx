@@ -4,7 +4,6 @@ import { useForm } from 'react-hook-form'
 import api from '@/lib/api'
 import { useAuthStore } from '@/store/authStore'
 import toast from 'react-hot-toast'
-import axios from 'axios'
 
 interface FormValues {
   email: string
@@ -22,13 +21,10 @@ export default function LoginPage() {
     setLoading(true)
     try {
       const res = await api.post('/auth/login', data)
-      setAuth(res.data.access_token, res.data.user)
+      setAuth(res.data.access_token, res.data.user, res.data.refresh_token)
       navigate('/dashboard')
-    } catch (error) {
-      const detail = axios.isAxiosError(error)
-        ? error.response?.data?.detail ?? error.message
-        : 'Invalid email or password'
-      toast.error(String(detail))
+    } catch (e: any) {
+      toast.error(e?.response?.data?.detail ?? 'Invalid email or password')
     } finally {
       setLoading(false)
     }

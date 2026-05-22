@@ -13,6 +13,7 @@ import api from '@/lib/api'
 import LoadingSpinner from '@/components/LoadingSpinner'
 import Modal from '@/components/Modal'
 import { formatCurrency, statusBadgeClass, statusLabel } from '@/lib/utils'
+import { useAuthStore } from '@/store/authStore'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -133,11 +134,25 @@ function normalizePhone(raw?: string): string {
   return digits
 }
 
+function parseApiError(error: any, fallback: string): string {
+  const detail = error?.response?.data?.detail
+  if (Array.isArray(detail) && detail.length > 0) {
+    const first = detail[0]
+    return String(first?.msg || first?.message || fallback)
+  }
+  if (typeof detail === 'string' && detail.trim()) return detail
+  if (error?.response?.status) return `Request failed (${error.response.status})`
+  if (error?.message === 'Network Error') return 'Network/CORS error: cannot reach API'
+  return String(error?.message || fallback)
+}
+
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export default function Billing() {
   const qc = useQueryClient()
   const [searchParams, setSearchParams] = useSearchParams()
+  const user = useAuthStore((s) => s.user)
+  const isAdmin = user?.role === 'admin'
 
   const [showForm, setShowForm] = useState(false)
   const [editRow, setEditRow] = useState<BillingRow | null>(null)
@@ -170,8 +185,15 @@ export default function Billing() {
     const id = setTimeout(() => {
       const next = new URLSearchParams(searchParams)
       const trimmed = searchInput.trim()
-      if (trimmed) next.set('search', trimmed)
-      else next.delete('search')
+      if (trimmed) {
+        // Global search spans all services regardless of date window.
+        next.set('search', trimmed)
+        next.delete('from_date')
+        next.delete('to_date')
+        next.delete('month')
+      } else {
+        next.delete('search')
+      }
       next.set('page', '1')
       setSearchParams(next, { replace: true })
     }, 300)
@@ -209,6 +231,7 @@ export default function Billing() {
   const { data: status } = useQuery<{ currency?: string }>({
     queryKey: ['system-status'],
     queryFn: () => api.get('/settings/status').then((r) => r.data),
+    enabled: isAdmin,
   })
   const currency = status?.currency ?? localStorage.getItem('currency') ?? 'NGN'
 
@@ -285,6 +308,7 @@ export default function Billing() {
 
       return editRow ? api.put(`/billing/${editRow.id}`, payload) : api.post('/billing', payload)
     },
+    retry: 1,
     onSuccess: () => {
       toast.success('Saved')
       qc.invalidateQueries({ queryKey: ['billing-grouped'] })
@@ -292,15 +316,7 @@ export default function Billing() {
       qc.invalidateQueries({ queryKey: ['dashboard'] })
       closeForm()
     },
-    onError: (e: any) => {
-      const detail = e?.response?.data?.detail
-      if (Array.isArray(detail) && detail.length > 0) {
-        const first = detail[0]
-        toast.error(String(first?.msg || first?.message || 'Save failed'))
-        return
-      }
-      toast.error(String(detail || e?.message || 'Save failed'))
-    },
+    onError: (e: any) => toast.error(parseApiError(e, 'Save failed')),
   })
 
   const deleteMutation = useMutation({
@@ -314,6 +330,7 @@ export default function Billing() {
   const applyPaymentMutation = useMutation({
     mutationFn: ({ id, amount_paid }: { id: string; amount_paid: number }) =>
       api.put(`/billing/${id}`, { amount_paid }),
+    retry: 1,
     onSuccess: () => {
       toast.success('Payment applied')
       qc.invalidateQueries({ queryKey: ['billing-grouped'] })
@@ -322,16 +339,22 @@ export default function Billing() {
       setApplyPayRow(null)
       setApplyPayAmount('')
     },
-    onError: (e: any) => toast.error(e?.response?.data?.detail ?? 'Payment update failed'),
+    onError: (e: any) => toast.error(parseApiError(e, 'Payment update failed')),
   })
 
   const markReturnedMutation = useMutation({
     mutationFn: (id: string) => api.put(`/billing/${id}`, { status: 'RETURNED' }),
+    retry: 1,
     onSuccess: () => {
       toast.success('Marked as returned')
       qc.invalidateQueries({ queryKey: ['billing-grouped'] })
     },
-    onError: (e: any) => toast.error(e?.response?.data?.detail ?? 'Update failed'),
+    onError: (e: any) => toast.error(parseApiError(e, 'Update failed')),
+  })
+
+  const whatsappTrackMutation = useMutation({
+    mutationFn: ({ clientName, phoneNumber }: { clientName: string; phoneNumber: string }) =>
+      api.post(`/billing/debtors/${encodeURIComponent(clientName)}/whatsapp`, { phone_number: phoneNumber }),
   })
 
   const openEdit = (row: BillingRow) => {
@@ -384,6 +407,27 @@ export default function Billing() {
     next.set('month', nextMonth)
     next.set('from_date', bounds.from)
     next.set('to_date', bounds.to)
+    next.set('page', '1')
+    setSearchParams(next, { replace: true })
+  }
+
+  const shiftDay = (delta: number) => {
+    const base = dateFrom || new Date().toISOString().slice(0, 10)
+    const d = new Date(`${base}T00:00:00`)
+    d.setDate(d.getDate() + delta)
+    const day = d.toISOString().slice(0, 10)
+    const next = new URLSearchParams(searchParams)
+    next.set('from_date', day)
+    next.set('to_date', day)
+    next.set('page', '1')
+    setSearchParams(next, { replace: true })
+  }
+
+  const applySingleDay = (day: string) => {
+    if (!day) return
+    const next = new URLSearchParams(searchParams)
+    next.set('from_date', day)
+    next.set('to_date', day)
     next.set('page', '1')
     setSearchParams(next, { replace: true })
   }
@@ -455,10 +499,20 @@ export default function Billing() {
       .filter(Boolean)
       .join('\n')
 
-  const openWhatsApp = (row: BillingRow) => {
+  const openWhatsApp = async (row: BillingRow) => {
     const text = encodeURIComponent(generateBillText(row))
-    const phone = normalizePhone(row.phone_number)
+    const fallbackRaw = row.phone_number || prompt('Client phone missing. Enter WhatsApp number:') || ''
+    const phone = normalizePhone(fallbackRaw)
+    if (!phone) {
+      toast.error('No client phone number found')
+      return
+    }
     window.open(`https://wa.me/${phone}?text=${text}`, '_blank', 'noopener,noreferrer')
+    try {
+      await whatsappTrackMutation.mutateAsync({ clientName: row.client_name, phoneNumber: fallbackRaw })
+    } catch {
+      // Sending already initiated; tracker failure should not block operator flow.
+    }
   }
 
   const copyBill = async (row: BillingRow) => {
@@ -581,11 +635,13 @@ export default function Billing() {
             <option value="UNPAID">Unpaid</option>
             <option value="RETURNED">Returned</option>
           </select>
-          <select className="form-input py-2 text-sm" style={{ minWidth: '8.5rem' }} value={paidState} onChange={(e) => setParam('paid_state', e.target.value)}>
-            <option value="">All paid states</option>
-            <option value="paid">Paid only</option>
-            <option value="unpaid">Unpaid / partial</option>
-          </select>
+          {isAdmin && (
+            <select className="form-input py-2 text-sm" style={{ minWidth: '8.5rem' }} value={paidState} onChange={(e) => setParam('paid_state', e.target.value)}>
+              <option value="">All paid states</option>
+              <option value="paid">Paid only</option>
+              <option value="unpaid">Unpaid / partial</option>
+            </select>
+          )}
           <select className="form-input py-2 text-sm" style={{ minWidth: '8rem' }} value={returned} onChange={(e) => setParam('is_return', e.target.value)}>
             <option value="">All returns</option>
             <option value="false">Not returned</option>
@@ -603,8 +659,11 @@ export default function Billing() {
             <span className="text-xs text-gray-400 whitespace-nowrap">To</span>
             <input type="date" className="form-input py-1.5 text-xs" value={dateTo} onChange={(e) => setParam('to_date', e.target.value)} />
           </div>
-          <input type="number" min="0" className="form-input py-1.5 text-xs" style={{ width: '7rem' }} placeholder="Min amount" value={minAmount} onChange={(e) => setParam('min_amount', e.target.value)} />
-          <input type="number" min="0" className="form-input py-1.5 text-xs" style={{ width: '7rem' }} placeholder="Max amount" value={maxAmount} onChange={(e) => setParam('max_amount', e.target.value)} />
+          {isAdmin && <input type="number" min="0" className="form-input py-1.5 text-xs" style={{ width: '7rem' }} placeholder="Min amount" value={minAmount} onChange={(e) => setParam('min_amount', e.target.value)} />}
+          {isAdmin && <input type="number" min="0" className="form-input py-1.5 text-xs" style={{ width: '7rem' }} placeholder="Max amount" value={maxAmount} onChange={(e) => setParam('max_amount', e.target.value)} />}
+          <button type="button" className="btn-secondary text-xs" onClick={() => shiftDay(-1)}>Prev Day</button>
+          <input type="date" className="form-input py-1.5 text-xs" value={dateFrom || ''} onChange={(e) => applySingleDay(e.target.value)} />
+          <button type="button" className="btn-secondary text-xs" onClick={() => shiftDay(1)}>Next Day</button>
           {hasActiveFilters && (
             <button type="button" className="flex items-center gap-1 text-xs text-gray-500 hover:text-red-600 border rounded-lg px-2 py-1.5 hover:border-red-300 transition-colors ml-auto" style={{ borderColor: '#e5e7eb' }} onClick={clearFilters}>
               <X size={12} /> Clear filters
@@ -619,9 +678,9 @@ export default function Billing() {
             {dateFrom && <FilterBadge label={`From ${dateFrom}`} onRemove={() => setParam('from_date')} />}
             {dateTo && <FilterBadge label={`To ${dateTo}`} onRemove={() => setParam('to_date')} />}
             {statusFilter && <FilterBadge label={statusFilter} onRemove={() => setParam('payment_status')} />}
-            {paidState && <FilterBadge label={`Paid: ${paidState}`} onRemove={() => setParam('paid_state')} />}
-            {minAmount && <FilterBadge label={`Min ${minAmount}`} onRemove={() => setParam('min_amount')} />}
-            {maxAmount && <FilterBadge label={`Max ${maxAmount}`} onRemove={() => setParam('max_amount')} />}
+            {isAdmin && paidState && <FilterBadge label={`Paid: ${paidState}`} onRemove={() => setParam('paid_state')} />}
+            {isAdmin && minAmount && <FilterBadge label={`Min ${minAmount}`} onRemove={() => setParam('min_amount')} />}
+            {isAdmin && maxAmount && <FilterBadge label={`Max ${maxAmount}`} onRemove={() => setParam('max_amount')} />}
             {returned && <FilterBadge label={returned === 'true' ? 'Returned' : 'Not returned'} onRemove={() => setParam('is_return')} />}
           </div>
         )}
@@ -630,14 +689,16 @@ export default function Billing() {
       {/* ── Summary Cards ── */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
         <SummaryCard label="Jobs" value={String(totalSummary.jobs)} />
-        <SummaryCard label="Total Amount" value={formatCurrency(totalSummary.totalAmount, currency)} />
-        <SummaryCard label="Paid" value={formatCurrency(totalSummary.totalPaid, currency)} valueClass="text-emerald-700" />
-        <SummaryCard
-          label="Outstanding"
-          value={formatCurrency(totalSummary.totalOutstanding, currency)}
-          prominent
-          valueClass={totalSummary.totalOutstanding > 0 ? 'text-amber-700' : 'text-emerald-600'}
-        />
+        {isAdmin && <SummaryCard label="Total Amount" value={formatCurrency(totalSummary.totalAmount, currency)} />}
+        {isAdmin && <SummaryCard label="Paid" value={formatCurrency(totalSummary.totalPaid, currency)} valueClass="text-emerald-700" />}
+        {isAdmin && (
+          <SummaryCard
+            label="Outstanding"
+            value={formatCurrency(totalSummary.totalOutstanding, currency)}
+            prominent
+            valueClass={totalSummary.totalOutstanding > 0 ? 'text-amber-700' : 'text-emerald-600'}
+          />
+        )}
       </div>
 
       {/* ── Grouped sections ── */}
@@ -671,9 +732,9 @@ export default function Billing() {
                     </div>
                     <div className="flex items-center gap-3 shrink-0 text-xs text-gray-500">
                       <span className="hidden sm:inline">{group.summary.job_count} jobs</span>
-                      <span className="hidden lg:inline"><span className="text-gray-400">Total </span>{formatCurrency(group.summary.total_amount, currency)}</span>
-                      <span className="hidden lg:inline text-emerald-600">{formatCurrency(group.summary.total_paid, currency)} paid</span>
-                      {hasOutstanding ? (
+                      {isAdmin && <span className="hidden lg:inline"><span className="text-gray-400">Total </span>{formatCurrency(group.summary.total_amount, currency)}</span>}
+                      {isAdmin && <span className="hidden lg:inline text-emerald-600">{formatCurrency(group.summary.total_paid, currency)} paid</span>}
+                      {isAdmin && hasOutstanding ? (
                         <span className="font-semibold text-amber-700 bg-amber-50 border border-amber-200 px-2 py-0.5 rounded-full">
                           {formatCurrency(group.summary.total_outstanding, currency)} due
                         </span>
@@ -719,10 +780,10 @@ export default function Billing() {
                           >
                             <span className="truncate font-medium text-gray-900" title={row.client_name}>{row.client_name}</span>
                             <span className="truncate text-gray-600" title={row.service_name}>{row.service_name}</span>
-                            <span className="text-gray-800 tabular-nums">{formatCurrency(row.total_amount, currency)}</span>
-                            <span className="text-emerald-700 tabular-nums">{formatCurrency(row.amount_paid, currency)}</span>
+                            <span className="text-gray-800 tabular-nums">{isAdmin ? formatCurrency(row.total_amount, currency) : 'Hidden'}</span>
+                            <span className="text-emerald-700 tabular-nums">{isAdmin ? formatCurrency(row.amount_paid, currency) : 'Hidden'}</span>
                             <span className={`tabular-nums font-medium ${balancePositive ? 'text-amber-700' : 'text-gray-300'}`}>
-                              {balancePositive ? formatCurrency(row.balance, currency) : '—'}
+                              {isAdmin ? (balancePositive ? formatCurrency(row.balance, currency) : '—') : 'Hidden'}
                             </span>
                             <span>
                               <span className={statusBadgeClass(row.status)}>{statusLabel(row.status)}</span>
@@ -733,7 +794,7 @@ export default function Billing() {
                               onClick={(e) => e.stopPropagation()}
                             >
                               <ActionBtn title="Edit" icon={<Pencil size={13} />} onClick={() => openEdit(row)} />
-                              <ActionBtn title="Apply Payment" icon={<CreditCard size={13} />} onClick={() => { setApplyPayRow(row); setApplyPayAmount(String(row.amount_paid)) }} />
+                              {isAdmin && <ActionBtn title="Apply Payment" icon={<CreditCard size={13} />} onClick={() => { setApplyPayRow(row); setApplyPayAmount(String(row.amount_paid)) }} />}
                               <ActionBtn title="WhatsApp Bill" icon={<MessageCircle size={13} />} onClick={() => openWhatsApp(row)} colorClass="hover:text-green-600" />
                               <ActionBtn title="Copy Bill" icon={<Copy size={13} />} onClick={() => copyBill(row)} />
                               <ActionBtn title="Mark Returned" icon={<RotateCcw size={13} />} onClick={() => { if (confirm('Mark as returned?')) markReturnedMutation.mutate(row.id) }} />
@@ -759,7 +820,7 @@ export default function Billing() {
                               {/* Inline action buttons */}
                               <div className="flex flex-wrap gap-2 pt-1">
                                 <InlineBtn icon={<Pencil size={11} />} label="Edit" onClick={() => openEdit(row)} />
-                                <InlineBtn icon={<CreditCard size={11} />} label="Apply Payment" onClick={() => { setApplyPayRow(row); setApplyPayAmount(String(row.amount_paid)) }} />
+                                {isAdmin && <InlineBtn icon={<CreditCard size={11} />} label="Apply Payment" onClick={() => { setApplyPayRow(row); setApplyPayAmount(String(row.amount_paid)) }} />}
                                 <InlineBtn icon={<MessageCircle size={11} />} label="WhatsApp" onClick={() => openWhatsApp(row)} extraClass="text-green-700 hover:bg-green-50" />
                                 <InlineBtn icon={<Copy size={11} />} label="Copy Bill" onClick={() => copyBill(row)} />
                                 {row.status !== 'RETURNED' && (

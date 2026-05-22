@@ -3,7 +3,7 @@ import { useMemo, useState } from 'react'
 import {
   LayoutDashboard, Users, FileText, Package,
   AlertCircle, DollarSign, TrendingDown, BarChart2,
-  Settings, RefreshCw, Sheet, LogOut, ClipboardList,
+  Settings, RefreshCw, Sheet, LogOut, ClipboardList, Shield,
 } from 'lucide-react'
 import { useAuthStore } from '@/store/authStore'
 import api from '@/lib/api'
@@ -23,12 +23,21 @@ const nav = [
   { to: '/settings',   label: 'Settings',     icon: Settings },
 ]
 
+const staffNav = [
+  { to: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
+  { to: '/billing', label: 'Services', icon: FileText },
+  { to: '/inventory', label: 'Inventory', icon: Package },
+  { to: '/clients', label: 'Clients', icon: Users },
+]
+
 export default function Layout() {
   const { clear, user } = useAuthStore()
   const navigate = useNavigate()
   const [pendingAction, setPendingAction] = useState<'refreshSheets' | 'refreshWorkspace' | 'sync' | 'resetRebuild' | null>(null)
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [logoFailed, setLogoFailed] = useState(false)
+  const isAdmin = user?.role === 'admin'
+  const navItems = isAdmin ? [...nav, { to: '/users', label: 'Users', icon: Shield }] : staffNav
 
   const warningText = useMemo(() => {
     if (pendingAction === 'refreshSheets') {
@@ -190,7 +199,7 @@ export default function Layout() {
         </div>
 
         <nav className="flex-1 overflow-y-auto py-3 space-y-0.5 px-2">
-          {nav.map(({ to, label, icon: Icon }) => (
+          {navItems.map(({ to, label, icon: Icon }) => (
             <NavLink
               key={to}
               to={to}
@@ -210,18 +219,22 @@ export default function Layout() {
         </nav>
 
         <div className="px-2 pb-4 space-y-1 border-t pt-3" style={{ borderColor: '#3b3b3b' }}>
-          <button onClick={() => setPendingAction('refreshSheets')} className="flex items-center gap-3 w-full rounded-lg px-3 py-2 text-sm text-gray-200 hover:text-black transition-colors hover:bg-[#D4AF37]">
-            <RefreshCw size={16} /> Refresh from Google Sheets
-          </button>
-          <button onClick={() => setPendingAction('refreshWorkspace')} className="flex items-center gap-3 w-full rounded-lg px-3 py-2 text-sm text-gray-200 hover:text-black transition-colors hover:bg-[#D4AF37]">
-            <RefreshCw size={16} /> Refresh Workspace
-          </button>
-          <button onClick={() => setPendingAction('sync')} className="flex items-center gap-3 w-full rounded-lg px-3 py-2 text-sm text-gray-200 hover:text-black transition-colors hover:bg-[#D4AF37]">
-            <Sheet size={16} /> Sync to Google Sheets
-          </button>
-          <button onClick={() => setPendingAction('resetRebuild')} className="flex items-center gap-3 w-full rounded-lg px-3 py-2 text-sm text-gray-200 hover:text-black transition-colors hover:bg-[#D4AF37]">
-            <RefreshCw size={16} /> Reset Imported Data and Rebuild
-          </button>
+          {isAdmin && (
+            <>
+              <button onClick={() => setPendingAction('refreshSheets')} className="flex items-center gap-3 w-full rounded-lg px-3 py-2 text-sm text-gray-200 hover:text-black transition-colors hover:bg-[#D4AF37]">
+                <RefreshCw size={16} /> Refresh from Google Sheets
+              </button>
+              <button onClick={() => setPendingAction('refreshWorkspace')} className="flex items-center gap-3 w-full rounded-lg px-3 py-2 text-sm text-gray-200 hover:text-black transition-colors hover:bg-[#D4AF37]">
+                <RefreshCw size={16} /> Refresh Workspace
+              </button>
+              <button onClick={() => setPendingAction('sync')} className="flex items-center gap-3 w-full rounded-lg px-3 py-2 text-sm text-gray-200 hover:text-black transition-colors hover:bg-[#D4AF37]">
+                <Sheet size={16} /> Sync to Google Sheets
+              </button>
+              <button onClick={() => setPendingAction('resetRebuild')} className="flex items-center gap-3 w-full rounded-lg px-3 py-2 text-sm text-gray-200 hover:text-black transition-colors hover:bg-[#D4AF37]">
+                <RefreshCw size={16} /> Reset Imported Data and Rebuild
+              </button>
+            </>
+          )}
           <button onClick={handleLogout} className="flex items-center gap-3 w-full rounded-lg px-3 py-2 text-sm text-gray-200 hover:text-black transition-colors hover:bg-[#D4AF37]">
             <LogOut size={16} /> Logout
           </button>

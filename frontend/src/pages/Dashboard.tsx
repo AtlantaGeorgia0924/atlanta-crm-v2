@@ -2,6 +2,7 @@ import { useQuery } from '@tanstack/react-query'
 import api from '@/lib/api'
 import LoadingSpinner from '@/components/LoadingSpinner'
 import { Users, FileText, AlertCircle, Package, TrendingDown } from 'lucide-react'
+import { useAuthStore } from '@/store/authStore'
 
 interface Summary {
   clients: number
@@ -30,6 +31,8 @@ function StatCard({ label, value, icon: Icon, color }: { label: string; value: s
 }
 
 export default function Dashboard() {
+  const user = useAuthStore((s) => s.user)
+  const isAdmin = user?.role === 'admin'
   const { data, isLoading } = useQuery<Summary>({
     queryKey: ['dashboard'],
     queryFn: () => api.get('/dashboard').then((r) => r.data),
@@ -45,7 +48,7 @@ export default function Dashboard() {
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <StatCard label="Clients"            value={s.clients} icon={Users} color="bg-blue-500" />
         <StatCard label="Total Invoices"     value={s.total_invoices} icon={FileText} color="bg-indigo-500" />
-        <StatCard label="Total Unpaid"       value={s.total_unpaid} icon={AlertCircle} color="bg-red-500" />
+        {isAdmin && <StatCard label="Total Unpaid" value={s.total_unpaid} icon={AlertCircle} color="bg-red-500" />}
         <StatCard label="Available Products" value={s.available_products} icon={Package} color="bg-green-600" />
         <StatCard label="Pending Products"   value={s.pending_products} icon={Package} color="bg-amber-500" />
         <StatCard label="Low Quality Stock"  value={s.low_quality_stock} icon={TrendingDown} color="bg-orange-600" />

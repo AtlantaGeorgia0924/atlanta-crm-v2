@@ -8,6 +8,7 @@ configure_logging(level="DEBUG" if settings.ENV != "production" else "INFO")
 
 from app.api.routes import (
     auth,
+    users,
     clients,
     billing,
     inventory,
@@ -42,6 +43,7 @@ app.add_middleware(
 
 # ── Routers ────────────────────────────────────────────────
 app.include_router(auth.router,            prefix="/auth",       tags=["Auth"])
+app.include_router(users.router,           prefix="/users",      tags=["Users"])
 app.include_router(clients.router,         prefix="/clients",    tags=["Clients"])
 app.include_router(billing.router,         prefix="/billing",    tags=["Billing"])
 app.include_router(inventory.router,       prefix="/inventory",  tags=["Inventory"])

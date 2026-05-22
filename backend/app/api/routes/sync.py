@@ -46,6 +46,7 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException
 from app.db.supabase_client import get_supabase
 from app.core.auth import get_current_user
+from app.core.rbac import require_admin
 from app.core.config import settings as app_settings
 from app.core.cashflow_sheet_sync import read_sheet_id
 from app.core.google_sheets_auth import (
@@ -57,7 +58,22 @@ from app.core.metrics_refresh import recompute_and_persist_metrics
 from app.core.sheets_import_sync import import_google_sheets_to_supabase
 from app.core.service_normalization import normalize_service_jobs_data
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_admin)])
+
+
+def _log_sync_audit(sb, action: str, performed_by: str, detail: dict | None = None) -> None:
+    try:
+        sb.table("crm_audit_log").insert(
+            {
+                "action": action,
+                "entity_type": "sync",
+                "entity_id": action,
+                "performed_by": performed_by,
+                "detail": detail or {},
+            }
+        ).execute()
+    except Exception:
+        pass
 
 
 def _backup_imported_rows(sb, backup_stamp: str) -> dict:
@@ -438,7 +454,9 @@ def sync_to_sheets(_user=Depends(get_current_user)):
     if not is_valid:
         raise HTTPException(400, config_error)
     try:
-        return _sync_to_google_sheets(sb, services_sheet_id, stocks_sheet_id)
+        result = _sync_to_google_sheets(sb, services_sheet_id, stocks_sheet_id)
+        _log_sync_audit(sb, "sync_to_google_sheets", str(_user.id), result)
+        return result
     except GoogleSheetsConfigError as e:
         raise HTTPException(400, str(e))
     except (ssl.SSLError, OSError, ConnectionError) as e:
@@ -467,6 +485,7 @@ def refresh_workspace(_user=Depends(get_current_user)):
     sb.table("app_settings").upsert(
         {"key": "last_workspace_refresh", "value": refreshed_at}
     ).execute()
+    _log_sync_audit(sb, "refresh_workspace", str(_user.id), {"refreshed_at": refreshed_at})
     return {
         "message": "Workspace refreshed from Supabase.",
         "refreshed_at": refreshed_at,
@@ -512,6 +531,7 @@ def refresh_from_google_sheets(_user=Depends(get_current_user)):
     sb.table("app_settings").upsert(
         {"key": "last_google_sheets_refresh", "value": refreshed_at}
     ).execute()
+    _log_sync_audit(sb, "refresh_from_google_sheets", str(_user.id), {"refreshed_at": refreshed_at})
     return {
         "message": "Google Sheets imported into Supabase.",
         "refreshed_at": refreshed_at,
@@ -557,6 +577,12 @@ def reset_imported_data_and_rebuild(_user=Depends(get_current_user)):
     sb.table("app_settings").upsert(
         {"key": "last_reset_imported_data_rebuild", "value": refreshed_at}
     ).execute()
+    _log_sync_audit(
+        sb,
+        "reset_imported_data_rebuild",
+        str(_user.id),
+        {"refreshed_at": refreshed_at, "backup_stamp": backup_stamp},
+    )
 
     return {
         "message": "Imported data reset and rebuild completed.",

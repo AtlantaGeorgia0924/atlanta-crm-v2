@@ -14,8 +14,9 @@ from app.core.google_sheets_auth import (
 from app.core.auth import get_current_user
 from app.core.financials import to_number
 from app.core.debtors import compute_debtors_from_supabase
+from app.core.rbac import require_admin
 
-router = APIRouter(tags=["Debug"])
+router = APIRouter(tags=["Debug"], dependencies=[Depends(require_admin)])
 
 
 def _normalize_header(value: str) -> str:

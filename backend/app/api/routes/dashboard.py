@@ -3,6 +3,7 @@ from fastapi import APIRouter, Depends
 from app.core.auth import get_current_user
 from app.core.dashboard_metrics import app_settings_payload, compute_metrics_from_supabase
 from app.core.financials import to_number
+from app.core.rbac import user_is_admin
 from app.db.supabase_client import get_supabase
 
 router = APIRouter()
@@ -59,7 +60,14 @@ def _get_dashboard_values(sb):
 @router.get("")
 def get_dashboard(_user=Depends(get_current_user)):
     sb = get_supabase()
-    return _get_dashboard_values(sb)
+    values = _get_dashboard_values(sb)
+    if user_is_admin(_user):
+        return values
+    values["total_unpaid"] = 0
+    values["amount_owed"] = 0
+    values["monthly_sales"] = 0
+    values["net_profit"] = 0
+    return values
 
 
 @router.get("/validation")

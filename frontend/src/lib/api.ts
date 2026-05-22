@@ -15,10 +15,32 @@ api.interceptors.request.use((config) => {
 
 api.interceptors.response.use(
   (r) => r,
-  (err) => {
+  async (err) => {
     const requestUrl = String(err?.config?.url ?? '')
     const isAuthRequest = requestUrl.includes('/auth/login') || requestUrl.includes('/auth/signup')
-    if (err.response?.status === 401 && !isAuthRequest) {
+    const isRefreshRequest = requestUrl.includes('/auth/refresh')
+
+    if (err.response?.status === 401 && !isAuthRequest && !isRefreshRequest) {
+      const state = useAuthStore.getState()
+      const refreshToken = state.refreshToken
+
+      if (refreshToken && !err.config?._retry) {
+        try {
+          err.config._retry = true
+          const refreshRes = await api.post('/auth/refresh', { refresh_token: refreshToken })
+          const newAccessToken = refreshRes.data?.access_token
+          const newRefreshToken = refreshRes.data?.refresh_token ?? refreshToken
+          if (newAccessToken && state.user) {
+            useAuthStore.getState().setAuth(newAccessToken, state.user, newRefreshToken)
+            err.config.headers = err.config.headers || {}
+            err.config.headers.Authorization = `Bearer ${newAccessToken}`
+            return api.request(err.config)
+          }
+        } catch {
+          // fall through to forced logout
+        }
+      }
+
       useAuthStore.getState().clear()
       window.location.href = '/login'
     }

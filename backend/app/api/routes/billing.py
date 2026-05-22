@@ -14,6 +14,7 @@ from app.core.financials import (
 )
 from app.core.debtors import compute_debtors_from_supabase
 from app.core.metrics_refresh import recompute_and_persist_metrics
+from app.core.rbac import user_is_admin
 
 router = APIRouter()
 
@@ -267,6 +268,15 @@ def _track_whatsapp_send(sb, client_name: str, phone_number: str) -> dict:
     }
 
 
+def _mask_financial_fields_for_staff(row: dict) -> dict:
+    row["total_amount"] = None
+    row["amount_paid"] = None
+    row["balance"] = None
+    row["gross_profit"] = None
+    row["net_profit"] = None
+    return row
+
+
 class BillingCreate(BaseModel):
     client_id: Optional[str] = None
     client_name: str
@@ -317,6 +327,7 @@ def list_billing(
     page_size: int = Query(50, ge=1, le=200),
     _user=Depends(get_current_user),
 ):
+    is_admin = user_is_admin(_user)
     sb = get_supabase()
     offset = (page - 1) * page_size
     query = (
@@ -396,7 +407,7 @@ def list_billing(
         row["service_name"] = _best_service_name(row)
         row["description"] = row.get("description") or row.get("service_name")
         row["quantity"] = qty
-        rows.append(row)
+        rows.append(row if is_admin else _mask_financial_fields_for_staff(row))
     total = int(result.count or 0)
     total_pages = max(1, (total + page_size - 1) // page_size)
     print(f"[billing] rows={len(rows)} total={total} page={page} page_size={page_size}")
@@ -429,6 +440,7 @@ def list_billing_grouped(
     page_size: int = Query(200, ge=1, le=500),
     _user=Depends(get_current_user),
 ):
+    is_admin = user_is_admin(_user)
     sb = get_supabase()
     offset = (page - 1) * page_size
     query = (
@@ -512,11 +524,12 @@ def list_billing_grouped(
         row["balance"] = balance
         row["status"] = compute_payment_status(total, paid).lower()
         row["service_name"] = _best_service_name(row)
-        group["items"].append(row)
+        group["items"].append(row if is_admin else _mask_financial_fields_for_staff(row))
         group["summary"]["job_count"] += 1
-        group["summary"]["total_amount"] += total
-        group["summary"]["total_paid"] += paid
-        group["summary"]["total_outstanding"] += balance
+        if is_admin:
+            group["summary"]["total_amount"] += total
+            group["summary"]["total_paid"] += paid
+            group["summary"]["total_outstanding"] += balance
 
     grouped = sorted(groups.values(), key=lambda g: g["service_date"], reverse=True)
     total = int(result.count or 0)
@@ -533,6 +546,8 @@ def list_billing_grouped(
 @router.get("/debtors")
 def list_debtors(search: Optional[str] = Query(None), _user=Depends(get_current_user)):
     """Grouped debtor balances calculated dynamically from live service rows."""
+    if not user_is_admin(_user):
+        raise HTTPException(status_code=403, detail="Forbidden")
     sb = get_supabase()
     debtors = compute_debtors_from_supabase(sb)
     grouped_rows = debtors["grouped_clients"]
@@ -639,6 +654,11 @@ def update_billing(billing_id: str, payload: BillingUpdate, _user=Depends(get_cu
     if not data:
         raise HTTPException(400, "No fields to update")
 
+    if not user_is_admin(_user):
+        restricted_fields = {"amount_paid", "status", "payment_date", "unit_price", "service_expense"}
+        if restricted_fields.intersection(set(data.keys())):
+            raise HTTPException(status_code=403, detail="Forbidden")
+
     if "status" in data:
         data["payment_status"] = str(data.pop("status")).upper()
     if "amount_paid" in data:
@@ -718,6 +738,8 @@ def delete_billing(billing_id: str, _user=Depends(get_current_user)):
 @router.get("/debtors/{client_name}/items")
 def get_debtor_items(client_name: str, _user=Depends(get_current_user)):
     """Get all outstanding items for a specific client (used in Debtor Details page)."""
+    if not user_is_admin(_user):
+        raise HTTPException(status_code=403, detail="Forbidden")
     sb = get_supabase()
     debtors = compute_debtors_from_supabase(sb)
     included_rows = debtors["included_rows"]
@@ -773,6 +795,18 @@ def track_whatsapp_send(client_name: str, payload: WhatsAppTracker, _user=Depend
         raise HTTPException(422, "Phone number is required")
 
     tracked = _track_whatsapp_send(sb, client_name, raw_phone)
+    _log_billing_audit(
+        sb,
+        action="whatsapp_sent",
+        entity_id=str(tracked.get("client_id") or client_name),
+        performed_by=str(_user.id),
+        detail={
+            "client_name": client_name,
+            "phone_number": tracked.get("phone_number"),
+            "whatsapp_sent_count": tracked.get("whatsapp_sent_count"),
+            "last_whatsapp_sent_at": tracked.get("last_whatsapp_sent_at"),
+        },
+    )
     return {
         "message": "WhatsApp send tracked",
         **tracked,

@@ -14,10 +14,11 @@ from app.core.financial_integrity import run_all_checks
 from app.core.logging_config import get_metrics_summary, log_event
 from app.core.cache import cache_hit_rate
 from app.db.supabase_client import get_supabase
+from app.core.rbac import require_admin
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_admin)])
 
 
 @router.get("/financial-integrity-report")

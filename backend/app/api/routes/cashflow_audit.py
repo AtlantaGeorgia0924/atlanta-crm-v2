@@ -16,6 +16,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from app.core.auth import get_current_user
 from app.db.supabase_client import get_supabase
 from app.core.logging_config import log_event
+from app.core.rbac import user_is_admin
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +32,8 @@ def _require_admin(user) -> None:
     # Admin check: look for user id or email in app_settings key "admin_user_ids".
     # If the key doesn't exist yet, only super-admin (first user) can see this.
     # This is intentionally permissive at the DB layer – tighten with RLS policies.
-    pass   # Currently all authenticated users can view; add RBAC here when roles are implemented.
+    if not user_is_admin(user):
+        raise HTTPException(status_code=403, detail="Forbidden")
 
 
 # ── List / filter ─────────────────────────────────────────────────────────────

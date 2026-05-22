@@ -31,10 +31,11 @@ from app.core.metrics_refresh import recompute_and_persist_metrics
 from app.core.cache import get_statement_cache, set_statement_cache
 from app.core.financial_events import emit_financial_event
 from app.core.logging_config import record_latency
+from app.core.rbac import require_admin
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_admin)])
 
 SLOW_QUERY_THRESHOLD_MS = 1000
 PAGE_SIZE_DEFAULT = 50

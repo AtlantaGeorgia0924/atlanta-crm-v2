@@ -11,8 +11,9 @@ from app.db.supabase_client import get_supabase
 from app.core.auth import get_current_user
 from app.core.financials import compute_outstanding, compute_payment_status, to_number
 from app.core.metrics_refresh import recompute_and_persist_metrics
+from app.core.rbac import require_admin
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_admin)])
 
 
 class PaymentCreate(BaseModel):
