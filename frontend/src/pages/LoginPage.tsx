@@ -11,10 +11,15 @@ interface FormValues {
 }
 
 function parseLoginError(error: any): string {
-  const detail = error?.response?.data?.detail
+  const responseData = error?.response?.data
+  const detail = responseData?.detail
   if (typeof detail === 'string' && detail.trim()) return detail
   if (detail?.code && detail?.message) return `${detail.code}: ${detail.message}`
   if (detail?.message) return String(detail.message)
+  if (typeof responseData?.message === 'string' && responseData.message.trim()) return responseData.message
+  if (typeof responseData?.error === 'string' && responseData.error.trim()) return responseData.error
+  if (typeof error?.response?.data === 'string' && error.response.data.trim()) return error.response.data
+  if (typeof error?.message === 'string' && error.message.trim() && error.message !== 'Network Error') return error.message
   if (Array.isArray(detail) && detail.length > 0) {
     const first = detail[0]
     return String(first?.msg || first?.message || 'Unable to login')
