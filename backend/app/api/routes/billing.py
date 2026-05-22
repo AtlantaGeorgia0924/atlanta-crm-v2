@@ -159,6 +159,54 @@ def _log_billing_audit(
         pass
 
 
+def _normalize_payment_status(value: Optional[str]) -> str:
+    status = str(value or "").strip().upper()
+    if status == "PARTIAL":
+        return "PART PAYMENT"
+    return status
+
+
+def _compute_financial_state(total_amount, paid_amount) -> tuple[float, float, str]:
+    total = max(0.0, to_number(total_amount))
+    paid = max(0.0, to_number(paid_amount))
+    if paid > total:
+        raise HTTPException(status_code=422, detail="Paid amount cannot exceed total amount")
+
+    outstanding = compute_outstanding(total, paid)
+    if paid <= 0:
+        status = "UNPAID"
+    elif paid < total:
+        status = "PART PAYMENT"
+    else:
+        status = "PAID"
+    return total, paid, status
+
+
+def _serialize_billing_row(row: dict, *, is_admin: bool = True) -> dict:
+    total = to_number(row.get("amount_charged"))
+    paid = to_number(row.get("paid_amount"))
+    outstanding = compute_outstanding(total, paid)
+    service_expense = to_number(row.get("service_expense"))
+    if service_expense == 0:
+        service_expense = to_number(row.get("service_expense_amount")) or to_number(row.get("expense_amount"))
+    status_value = _normalize_payment_status(row.get("payment_status") or compute_payment_status(total, paid))
+
+    serialized = dict(row)
+    serialized["unit_price"] = total
+    serialized["total_amount"] = total
+    serialized["amount_paid"] = paid
+    serialized["balance"] = outstanding
+    serialized["status"] = status_value.lower()
+    serialized["service_expense"] = service_expense
+    serialized["gross_profit"] = paid
+    serialized["net_profit"] = to_number(row.get("service_profit")) or (paid - service_expense)
+    serialized["invoice_date"] = row.get("service_date")
+    serialized["service_name"] = _best_service_name(row)
+    serialized["description"] = row.get("description") or row.get("service_name")
+    serialized["quantity"] = to_number(row.get("quantity")) or 1
+    return serialized if is_admin else _mask_financial_fields_for_staff(serialized)
+
+
 def _best_service_name(row: dict) -> str:
     candidates = [
         row.get("service_name"),
@@ -398,6 +446,13 @@ class BillingCreate(BaseModel):
     due_date: Optional[str] = None
     notes: Optional[str] = None
     source: Optional[str] = "manual"
+    phone_number: Optional[str] = None
+    client_phone: Optional[str] = None
+    imei: Optional[str] = None
+    serial_number: Optional[str] = None
+    condition: Optional[str] = None
+    lock_status: Optional[str] = None
+    unlock_method: Optional[str] = None
 
 
 class BillingUpdate(BaseModel):
@@ -409,10 +464,18 @@ class BillingUpdate(BaseModel):
     amount_paid: Optional[float] = None
     service_expense: Optional[float] = None
     status: Optional[str] = None
+    payment_status: Optional[str] = None
     invoice_date: Optional[str] = None
     due_date: Optional[str] = None
     payment_date: Optional[str] = None
     notes: Optional[str] = None
+    phone_number: Optional[str] = None
+    client_phone: Optional[str] = None
+    imei: Optional[str] = None
+    serial_number: Optional[str] = None
+    condition: Optional[str] = None
+    lock_status: Optional[str] = None
+    unlock_method: Optional[str] = None
 
 
 @router.get("")
@@ -477,29 +540,7 @@ def list_billing(
             query = query.neq("payment_status", "PAID")
 
     result = query.execute()
-    rows = []
-    for row in (result.data or []):
-        total = to_number(row.get("amount_charged"))
-        paid = to_number(row.get("paid_amount"))
-        qty = to_number(row.get("quantity")) or 1
-        service_expense = to_number(row.get("service_expense"))
-        if service_expense == 0:
-            service_expense = to_number(row.get("service_expense_amount")) or to_number(row.get("expense_amount"))
-        outstanding = compute_outstanding(total, paid)
-        status_value = compute_payment_status(total, paid)
-        row["unit_price"] = total
-        row["total_amount"] = total
-        row["amount_paid"] = paid
-        row["balance"] = outstanding
-        row["status"] = status_value.lower()
-        row["service_expense"] = service_expense
-        row["gross_profit"] = paid
-        row["net_profit"] = to_number(row.get("service_profit")) or (paid - service_expense)
-        row["invoice_date"] = row.get("service_date")
-        row["service_name"] = _best_service_name(row)
-        row["description"] = row.get("description") or row.get("service_name")
-        row["quantity"] = qty
-        rows.append(row if is_admin else _mask_financial_fields_for_staff(row))
+    rows = [_serialize_billing_row(row, is_admin=is_admin) for row in (result.data or [])]
     total = int(result.count or 0)
     total_pages = max(1, (total + page_size - 1) // page_size)
     print(f"[billing] rows={len(rows)} total={total} page={page} page_size={page_size}")
@@ -596,12 +637,8 @@ def list_billing_grouped(
                 },
             },
         )
-        row["total_amount"] = total
-        row["amount_paid"] = paid
-        row["balance"] = balance
-        row["status"] = compute_payment_status(total, paid).lower()
-        row["service_name"] = _best_service_name(row)
-        group["items"].append(row if is_admin else _mask_financial_fields_for_staff(row))
+        serialized = _serialize_billing_row(row, is_admin=is_admin)
+        group["items"].append(serialized)
         group["summary"]["job_count"] += 1
         if is_admin:
             group["summary"]["total_amount"] += total
@@ -832,8 +869,8 @@ def apply_debtor_payment(client_name: str, payload: DebtorPaymentApplyPayload, _
         total = to_number(before.get("amount_charged"))
         prev_balance = to_number(before.get("balance"))
         new_paid = prev_paid + applied_amount
-        new_balance = max(total - new_paid, 0.0)
-        new_status = compute_payment_status(total, new_paid)
+        total, new_paid, new_status = _compute_financial_state(total, new_paid)
+        new_balance = compute_outstanding(total, new_paid)
 
         sb.table("service_jobs").update(
             {
@@ -936,40 +973,27 @@ def get_billing(billing_id: str, _user=Depends(get_current_user)):
     result = sb.table("service_jobs").select("*").eq("id", billing_id).single().execute()
     if not result.data:
         raise HTTPException(404, "Billing row not found")
-    row = result.data
-    total = to_number(row.get("amount_charged"))
-    paid = to_number(row.get("paid_amount"))
-    outstanding = compute_outstanding(total, paid)
-    service_expense = to_number(row.get("service_expense"))
-    if service_expense == 0:
-        service_expense = to_number(row.get("service_expense_amount")) or to_number(row.get("expense_amount"))
-    status_value = compute_payment_status(total, paid)
-    row["total_amount"] = total
-    row["amount_paid"] = paid
-    row["balance"] = outstanding
-    row["status"] = status_value.lower()
-    row["service_expense"] = service_expense
-    row["gross_profit"] = paid
-    row["net_profit"] = to_number(row.get("service_profit")) or (paid - service_expense)
-    row["invoice_date"] = row.get("service_date")
-    row["service_name"] = _best_service_name(row)
-    return row
+    return _serialize_billing_row(result.data, is_admin=user_is_admin(_user))
 
 
 @router.post("", status_code=201)
 def create_billing(payload: BillingCreate, _user=Depends(get_current_user)):
     sb = get_supabase()
     data = payload.model_dump(exclude_none=True)
-    # Determine status
     amount_paid = to_number(data.get("amount_paid", 0))
     unit_price = to_number(data.get("unit_price", 0))
     quantity = to_number(data.get("quantity", 1)) or 1
-    total       = unit_price * quantity
-    payment_status = compute_payment_status(total, amount_paid)
+    if quantity <= 0:
+        raise HTTPException(status_code=422, detail="Quantity must be greater than zero")
+    total = unit_price * quantity
+    total, amount_paid, payment_status = _compute_financial_state(total, amount_paid)
+
+    service_columns = _service_job_columns(sb)
 
     mapped = {
         "client_id": data.get("client_id"),
         "client_name": data.get("client_name"),
+        "phone_number": data.get("phone_number") or data.get("client_phone"),
         "service_name": data.get("service_name"),
         "description": data.get("description"),
         "quantity": quantity,
@@ -984,7 +1008,13 @@ def create_billing(payload: BillingCreate, _user=Depends(get_current_user)):
         "service_date": data.get("invoice_date"),
         "due_date": data.get("due_date"),
         "notes": data.get("notes"),
+        "imei": data.get("imei"),
+        "serial_number": data.get("serial_number"),
+        "condition": data.get("condition"),
+        "lock_status": data.get("lock_status"),
+        "unlock_method": data.get("unlock_method"),
     }
+    mapped = {k: v for k, v in mapped.items() if k in service_columns and v is not None}
     result = sb.table("service_jobs").insert(mapped).execute()
     created = result.data[0]
     _log_billing_audit(
@@ -1003,8 +1033,20 @@ def create_billing(payload: BillingCreate, _user=Depends(get_current_user)):
             "service_name": created.get("service_name"),
         },
     )
+    emit_financial_event(
+        sb,
+        "invoice_updated",
+        performed_by=str(_user.id),
+        record_id=str(created.get("id")),
+        amount=to_number(created.get("amount_charged")),
+        detail={
+            "reason": "invoice_create",
+            "client_name": created.get("client_name"),
+            "payment_status": created.get("payment_status"),
+        },
+    )
     recompute_and_persist_metrics(sb, source="supabase_after_billing_create")
-    return created
+    return _serialize_billing_row(created, is_admin=user_is_admin(_user))
 
 
 @router.put("/{billing_id}")
@@ -1023,34 +1065,64 @@ def update_billing(billing_id: str, payload: BillingUpdate, _user=Depends(get_cu
         if restricted_fields.intersection(set(data.keys())):
             raise HTTPException(status_code=403, detail="Forbidden")
 
+    requested_status = None
+    if "payment_status" in data:
+        requested_status = _normalize_payment_status(data.get("payment_status"))
+        data["payment_status"] = requested_status
     if "status" in data:
-        data["payment_status"] = str(data.pop("status")).upper()
+        requested_status = _normalize_payment_status(data.pop("status"))
+        data["payment_status"] = requested_status
     if "amount_paid" in data:
         data["paid_amount"] = data.pop("amount_paid")
+    if "client_phone" in data:
+        data["phone_number"] = data.pop("client_phone")
     if "invoice_date" in data:
         data["service_date"] = data.pop("invoice_date")
     if "payment_date" in data:
         data["paid_date"] = data.pop("payment_date")
 
+    existing_amount = to_number(existing_before.get("amount_charged"))
+    existing_paid = to_number(existing_before.get("paid_amount"))
+    existing_qty = to_number(existing_before.get("quantity") or 1) or 1
+
     if "unit_price" in data or "quantity" in data:
-        existing = sb.table("service_jobs").select("amount_charged,quantity").eq("id", billing_id).single().execute().data
-        qty = to_number(data.get("quantity", existing.get("quantity") or 1)) or 1
-        current_total = to_number(existing.get("amount_charged") or 0)
-        existing_qty = to_number(existing.get("quantity") or 1) or 1
+        qty = to_number(data.get("quantity", existing_qty)) or 1
+        if qty <= 0:
+            raise HTTPException(status_code=422, detail="Quantity must be greater than zero")
+        current_total = existing_amount
         inferred_unit = current_total / existing_qty
         unit = to_number(data.pop("unit_price", inferred_unit))
+        if unit < 0:
+            raise HTTPException(status_code=422, detail="Unit price cannot be negative")
         data["amount_charged"] = qty * unit
 
-    if any(field in data for field in ["amount_charged", "paid_amount", "payment_status"]):
-        existing = sb.table("service_jobs").select("amount_charged,paid_amount").eq("id", billing_id).single().execute().data
-        total = to_number(data.get("amount_charged", existing.get("amount_charged") or 0))
-        paid = to_number(data.get("paid_amount", existing.get("paid_amount") or 0))
-        data["payment_status"] = compute_payment_status(total, paid)
-        if data["payment_status"] == "PAID":
-            data["paid_date"] = data.get("paid_date")
+    # RETURNED must never be overwritten by automatic recomputation.
+    if requested_status == "RETURNED":
+        data["is_return"] = True
+        data["paid_amount"] = 0
+        data["payment_status"] = "RETURNED"
+        data["paid_date"] = None
+        data["paid_at"] = None
+    else:
+        total_input = data.get("amount_charged", existing_amount)
+        paid_input = data.get("paid_amount", existing_paid)
+        total, paid, payment_status = _compute_financial_state(total_input, paid_input)
+        data["amount_charged"] = total
+        data["paid_amount"] = paid
+        data["payment_status"] = payment_status
+        data["is_return"] = False
+        if payment_status == "PAID":
+            if not data.get("paid_date"):
+                data["paid_date"] = data.get("service_date") or existing_before.get("paid_date") or datetime.utcnow().date().isoformat()
             data.setdefault("paid_at", datetime.utcnow().isoformat())
         else:
             data["paid_date"] = None
+            data["paid_at"] = None
+
+    service_columns = _service_job_columns(sb)
+    data = {k: v for k, v in data.items() if k in service_columns}
+    if not data:
+        raise HTTPException(status_code=400, detail="No valid fields to update")
 
     result = sb.table("service_jobs").update(data).eq("id", billing_id).execute()
     updated = result.data[0]
@@ -1070,7 +1142,17 @@ def update_billing(billing_id: str, payload: BillingUpdate, _user=Depends(get_cu
             "paid_amount": to_number(updated.get("paid_amount")),
             "payment_status": str(updated.get("payment_status") or ""),
         },
-        detail={"fields_updated": sorted(list(data.keys()))},
+        detail={
+            "fields_updated": sorted(list(data.keys())),
+            "edited_by": str(_user.id),
+            "previous_amount": to_number(existing_before.get("amount_charged")),
+            "new_amount": to_number(updated.get("amount_charged")),
+            "previous_paid_amount": to_number(existing_before.get("paid_amount")),
+            "new_paid_amount": to_number(updated.get("paid_amount")),
+            "previous_status": str(existing_before.get("payment_status") or ""),
+            "new_status": str(updated.get("payment_status") or ""),
+            "timestamp": datetime.utcnow().isoformat(),
+        },
     )
 
     before_paid = to_number(existing_before.get("paid_amount"))
@@ -1088,13 +1170,36 @@ def update_billing(billing_id: str, payload: BillingUpdate, _user=Depends(get_cu
             detail={"reason": "billing_update"},
         )
 
+    emit_financial_event(
+        sb,
+        "invoice_updated",
+        performed_by=str(_user.id),
+        record_id=billing_id,
+        amount=to_number(updated.get("amount_charged")),
+        detail={
+            "previous_amount": to_number(existing_before.get("amount_charged")),
+            "new_amount": to_number(updated.get("amount_charged")),
+            "previous_paid_amount": before_paid,
+            "new_paid_amount": after_paid,
+            "previous_status": before_status,
+            "new_status": after_status,
+        },
+    )
     recompute_and_persist_metrics(sb, source="supabase_after_billing_update")
-    return updated
+    return _serialize_billing_row(updated, is_admin=user_is_admin(_user))
 
 
 @router.delete("/{billing_id}", status_code=204)
 def delete_billing(billing_id: str, _user=Depends(get_current_user)):
     sb = get_supabase()
+    emit_financial_event(
+        sb,
+        "invoice_deleted",
+        performed_by=str(_user.id),
+        record_id=billing_id,
+        amount=0.0,
+        detail={"reason": "billing_delete"},
+    )
     sb.table("service_jobs").delete().eq("id", billing_id).execute()
     recompute_and_persist_metrics(sb, source="supabase_after_billing_delete")
 

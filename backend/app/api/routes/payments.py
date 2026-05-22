@@ -12,6 +12,7 @@ from app.core.auth import get_current_user
 from app.core.financials import compute_outstanding, compute_payment_status, to_number
 from app.core.metrics_refresh import recompute_and_persist_metrics
 from app.core.rbac import require_admin
+from app.core.financial_events import emit_financial_event
 
 router = APIRouter(dependencies=[Depends(require_admin)])
 
@@ -60,15 +61,23 @@ def apply_payment(payload: PaymentCreate, _user=Depends(get_current_user)):
         raise HTTPException(404, "Billing row not found")
 
     row = row_res.data
-    total = to_number(row.get("amount_charged"))
-    current_paid = to_number(row.get("paid_amount"))
-    new_paid = current_paid + to_number(payload.amount)
+    total = max(0.0, to_number(row.get("amount_charged")))
+    current_paid = max(0.0, to_number(row.get("paid_amount")))
+    payment_amount = to_number(payload.amount)
+    if payment_amount <= 0:
+        raise HTTPException(422, "Payment amount must be greater than zero")
+
+    new_paid = current_paid + payment_amount
+    if new_paid > total:
+        raise HTTPException(400, f"Payment amount exceeds outstanding balance ({max(total - current_paid, 0.0):.2f})")
+
     outstanding = compute_outstanding(total, new_paid)
-
-    if outstanding < 0:
-        raise HTTPException(400, f"Payment amount exceeds outstanding balance ({total - current_paid:.2f})")
-
-    new_status = compute_payment_status(total, new_paid)
+    if new_paid <= 0:
+        new_status = "UNPAID"
+    elif new_paid < total:
+        new_status = "PART PAYMENT"
+    else:
+        new_status = "PAID"
     pay_date   = payload.payment_date or str(date.today())
 
     # 2. Insert payment record
@@ -101,6 +110,20 @@ def apply_payment(payload: PaymentCreate, _user=Depends(get_current_user)):
     )
 
     # Keep dashboard/cashflow cards in sync after payment updates.
+    emit_financial_event(
+        sb,
+        "payment_updated",
+        performed_by=str(_user.id),
+        record_id=str(payload.billing_row_id),
+        amount=payment_amount,
+        detail={
+            "previous_paid_amount": current_paid,
+            "new_paid_amount": new_paid,
+            "payment_status": new_status,
+            "payment_method": payload.payment_method,
+            "reference_no": payload.reference_no,
+        },
+    )
     recompute_and_persist_metrics(sb, source="supabase_after_payment")
 
     return update_res.data[0]

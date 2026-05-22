@@ -22,11 +22,18 @@ interface BillingRow {
   client_name: string
   phone_number?: string
   service_name: string
+  imei?: string
+  serial_number?: string
+  condition?: string
+  lock_status?: string
   quantity: number
   total_amount: number
+  amount_charged?: number
   amount_paid: number
+  paid_amount?: number
   balance: number
   status: string
+  payment_status?: string
   invoice_date?: string
   service_date?: string
   notes?: string
@@ -63,6 +70,11 @@ interface FormValues {
   client_company?: string
   client_notes?: string
   service_name: string
+  imei?: string
+  serial_number?: string
+  condition?: string
+  lock_status?: string
+  payment_status?: string
   description: string
   quantity: number
   unit_price: number
@@ -142,11 +154,18 @@ function parseApiError(error: any, fallback: string): string {
   const detail = error?.response?.data?.detail
   if (Array.isArray(detail) && detail.length > 0) {
     const first = detail[0]
-    return String(first?.msg || first?.message || fallback)
+    const loc = Array.isArray(first?.loc) ? first.loc.join('.') : ''
+    const msg = String(first?.msg || first?.message || fallback)
+    return loc ? `${loc}: ${msg}` : msg
   }
   if (typeof detail === 'string' && detail.trim()) return detail
+  if (error?.response?.status === 403) return 'Permission denied for this action'
+  if (error?.response?.status === 404) return 'Invoice was not found or may have been removed'
+  if (error?.response?.status === 408) return 'Request timed out, please try again'
+  if (error?.response?.status === 422) return 'Validation failed. Please check the values and try again'
   if (error?.response?.status) return `Request failed (${error.response.status})`
   if (error?.message === 'Network Error') return 'Network/CORS error: cannot reach API'
+  if (String(error?.code || '').toUpperCase() === 'ECONNABORTED') return 'Request timed out, please retry'
   return String(error?.message || fallback)
 }
 
@@ -295,6 +314,12 @@ export default function Billing() {
       if (!Number.isFinite(unitPrice) || unitPrice <= 0) {
         throw new Error('Unit Price must be greater than zero')
       }
+      if (!Number.isFinite(quantity) || quantity <= 0) {
+        throw new Error('Quantity must be greater than zero')
+      }
+      if (!Number.isFinite(amountPaid) || amountPaid < 0) {
+        throw new Error('Amount paid cannot be negative')
+      }
 
       const normalizedClientName = String(values.client_name || '').trim()
       const normalizedServiceName = String(values.service_name || '').trim()
@@ -302,10 +327,20 @@ export default function Billing() {
         throw new Error('Client Name and Service Name are required')
       }
 
+      const computedTotal = quantity * unitPrice
+      if (amountPaid > computedTotal) {
+        throw new Error('Paid amount cannot exceed total amount')
+      }
+
       const payload = {
         ...values,
         client_name: normalizedClientName,
         service_name: normalizedServiceName,
+        imei: values.imei?.trim() || undefined,
+        serial_number: values.serial_number?.trim() || undefined,
+        condition: values.condition?.trim() || undefined,
+        lock_status: values.lock_status?.trim() || undefined,
+        payment_status: values.payment_status?.trim() || undefined,
         quantity: Number.isFinite(quantity) && quantity > 0 ? quantity : 1,
         unit_price: unitPrice,
         amount_paid: Number.isFinite(amountPaid) && amountPaid >= 0 ? amountPaid : 0,
@@ -322,16 +357,46 @@ export default function Billing() {
         delete (finalPayload as any).unit_price
         delete (finalPayload as any).amount_paid
         delete (finalPayload as any).service_expense
+        delete (finalPayload as any).payment_status
       }
 
       return editRow ? api.put(`/billing/${editRow.id}`, finalPayload) : api.post('/billing', payload)
     },
     retry: 1,
-    onSuccess: () => {
+    onSuccess: (res) => {
+      const updated = res?.data
+      if (updated?.id) {
+        qc.setQueriesData({ queryKey: ['billing-grouped'] }, (old: any) => {
+          if (!old?.groups) return old
+          const groups = (old.groups || []).map((g: any) => ({ ...g, items: [...(g.items || [])] }))
+          let found = false
+          for (const g of groups) {
+            const idx = (g.items || []).findIndex((r: any) => r.id === updated.id)
+            if (idx >= 0) {
+              g.items[idx] = { ...g.items[idx], ...updated }
+              found = true
+              break
+            }
+          }
+          if (!found) {
+            const dateKey = String(updated.service_date || updated.invoice_date || '').slice(0, 10) || 'Unknown'
+            const target = groups.find((g: any) => g.service_date === dateKey)
+            if (target) target.items.unshift(updated)
+            else groups.unshift({
+              service_date: dateKey,
+              items: [updated],
+              summary: { job_count: 0, total_amount: 0, total_paid: 0, total_outstanding: 0 },
+            })
+          }
+          return { ...old, groups }
+        })
+      }
       toast.success('Saved')
       qc.invalidateQueries({ queryKey: ['billing-grouped'] })
       qc.invalidateQueries({ queryKey: ['debtors'] })
       qc.invalidateQueries({ queryKey: ['dashboard'] })
+      qc.invalidateQueries({ queryKey: ['cashflow-page-data'] })
+      qc.invalidateQueries({ queryKey: ['system-status'] })
       closeForm()
     },
     onError: (e: any) => toast.error(parseApiError(e, 'Save failed')),
@@ -354,6 +419,8 @@ export default function Billing() {
       qc.invalidateQueries({ queryKey: ['billing-grouped'] })
       qc.invalidateQueries({ queryKey: ['debtors'] })
       qc.invalidateQueries({ queryKey: ['dashboard'] })
+      qc.invalidateQueries({ queryKey: ['cashflow-page-data'] })
+      qc.invalidateQueries({ queryKey: ['system-status'] })
       setApplyPayRow(null)
       setApplyPayAmount('')
     },
@@ -391,6 +458,12 @@ export default function Billing() {
         client_name: details?.client_name ?? row.client_name,
         client_phone: details?.phone_number ?? row.phone_number ?? '',
         service_name: details?.service_name ?? row.service_name,
+        imei: details?.imei ?? '',
+        serial_number: details?.serial_number ?? '',
+        condition: details?.condition ?? '',
+        lock_status: details?.lock_status ?? '',
+        payment_status: String(details?.payment_status || details?.status || row.payment_status || row.status || '').toUpperCase(),
+        description: details?.description ?? '',
         quantity,
         unit_price: Number.isFinite(unitPrice) ? unitPrice : 0,
         amount_paid: Number.isFinite(amountPaid) ? amountPaid : 0,
@@ -669,6 +742,15 @@ export default function Billing() {
             setSelectedClientId('')
             setShowClientDropdown(false)
             reset({
+              client_name: '',
+              client_phone: '',
+              service_name: '',
+              description: '',
+              imei: '',
+              serial_number: '',
+              condition: '',
+              lock_status: '',
+              payment_status: 'UNPAID',
               quantity: 1,
               unit_price: 0,
               amount_paid: 0,
@@ -1069,6 +1151,22 @@ export default function Billing() {
             <input className="form-input" {...register('service_name', { required: 'Required' })} />
           </div>
           <div>
+            <label className="form-label">IMEI</label>
+            <input className="form-input" {...register('imei')} />
+          </div>
+          <div>
+            <label className="form-label">Serial Number</label>
+            <input className="form-input" {...register('serial_number')} />
+          </div>
+          <div>
+            <label className="form-label">Condition</label>
+            <input className="form-input" {...register('condition')} placeholder="e.g. Used - Clean" />
+          </div>
+          <div>
+            <label className="form-label">Lock Status</label>
+            <input className="form-input" {...register('lock_status')} placeholder="e.g. Unlocked" />
+          </div>
+          <div>
             <label className="form-label">Quantity</label>
             <input type="number" step="0.01" min="0.01" className="form-input"
               {...register('quantity', { valueAsNumber: true, min: { value: 0.01, message: 'Must be > 0' } })} />
@@ -1084,6 +1182,17 @@ export default function Billing() {
             <label className="form-label">Amount Paid</label>
             <input type="number" step="0.01" className="form-input" {...register('amount_paid', { valueAsNumber: true })} />
           </div>
+          {isAdmin && (
+            <div>
+              <label className="form-label">Payment Status</label>
+              <select className="form-input" {...register('payment_status')}>
+                <option value="UNPAID">UNPAID</option>
+                <option value="PART PAYMENT">PART PAYMENT</option>
+                <option value="PAID">PAID</option>
+                <option value="RETURNED">RETURNED</option>
+              </select>
+            </div>
+          )}
           <div>
             <label className="form-label">Service Expense</label>
             <input type="number" step="0.01" className="form-input" {...register('service_expense', { valueAsNumber: true })} />
@@ -1095,6 +1204,10 @@ export default function Billing() {
           <div>
             <label className="form-label">Due Date</label>
             <input type="date" className="form-input" {...register('due_date')} />
+          </div>
+          <div className="col-span-2">
+            <label className="form-label">Description</label>
+            <textarea className="form-input" rows={2} {...register('description')} />
           </div>
           <div className="col-span-2">
             <label className="form-label">Notes</label>

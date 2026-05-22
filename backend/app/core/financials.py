@@ -44,7 +44,7 @@ def compute_payment_status(total_amount, amount_paid) -> str:
     if raw_outstanding <= 0:
         return "PAID"
     if paid > 0:
-        return "PARTIAL"
+        return "PART PAYMENT"
     return "UNPAID"
 
 
