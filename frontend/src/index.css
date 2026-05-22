@@ -94,6 +94,10 @@
   .billing-table-enter-fade {
     animation: billingTableEnterFade 220ms ease-out;
   }
+
+  .billing-row-stagger-enter {
+    animation: billingRowStaggerEnter 300ms ease-out both;
+  }
 }
 
 @keyframes billingTableEnterLeft {
@@ -126,5 +130,16 @@
   100% {
     opacity: 1;
     transform: scale(1);
+  }
+}
+
+@keyframes billingRowStaggerEnter {
+  0% {
+    opacity: 0;
+    transform: translateY(5px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0);
   }
 }

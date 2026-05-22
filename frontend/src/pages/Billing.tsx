@@ -167,6 +167,8 @@ export default function Billing() {
   const [applyPayRow, setApplyPayRow] = useState<BillingRow | null>(null)
   const [applyPayAmount, setApplyPayAmount] = useState('')
   const [visibleCount, setVisibleCount] = useState(140)
+  const [revealStartIndex, setRevealStartIndex] = useState<number | null>(null)
+  const [revealEndIndex, setRevealEndIndex] = useState<number | null>(null)
   const [tableMotion, setTableMotion] = useState<'left' | 'right' | 'fade' | ''>('')
   const loadMoreRef = useRef<HTMLDivElement | null>(null)
   const motionTimerRef = useRef<number | null>(null)
@@ -395,6 +397,8 @@ export default function Billing() {
 
   useEffect(() => {
     setVisibleCount(140)
+    setRevealStartIndex(null)
+    setRevealEndIndex(null)
   }, [groupedData?.page, groupedData?.total, search, dateFrom, dateTo, statusFilter, paidState, minAmount, maxAmount, returned])
 
   useEffect(() => {
@@ -405,7 +409,14 @@ export default function Billing() {
       (entries) => {
         for (const entry of entries) {
           if (entry.isIntersecting) {
-            setVisibleCount((prev) => Math.min(prev + 120, flatRows.length))
+            setVisibleCount((prev) => {
+              const next = Math.min(prev + 120, flatRows.length)
+              if (next > prev) {
+                setRevealStartIndex(prev)
+                setRevealEndIndex(next)
+              }
+              return next
+            })
           }
         }
       },
@@ -423,6 +434,15 @@ export default function Billing() {
       }
     }
   }, [])
+
+  useEffect(() => {
+    if (revealStartIndex == null || revealEndIndex == null) return
+    const timer = window.setTimeout(() => {
+      setRevealStartIndex(null)
+      setRevealEndIndex(null)
+    }, 520)
+    return () => window.clearTimeout(timer)
+  }, [revealStartIndex, revealEndIndex])
 
   const triggerTableMotion = (direction: 'left' | 'right' | 'fade') => {
     setTableMotion(direction)
@@ -838,9 +858,18 @@ export default function Billing() {
                   const expanded = expandedRows.has(row.id)
                   const balancePositive = Number(row.balance) > 0
                   const showBottomBorder = idx < Math.min(visibleCount, flatRows.length) - 1
+                  const isRevealedRow = revealStartIndex != null && revealEndIndex != null && idx >= revealStartIndex && idx < revealEndIndex
+                  const revealDelay = revealStartIndex == null ? 0 : Math.min((idx - revealStartIndex) * 14, 180)
 
                   return (
-                    <div key={entry.key} className={`${showBottomBorder ? 'border-b' : ''}`} style={{ borderColor: '#f7f1d8' }}>
+                    <div
+                      key={entry.key}
+                      className={`${showBottomBorder ? 'border-b' : ''} ${isRevealedRow ? 'billing-row-stagger-enter' : ''}`}
+                      style={{
+                        borderColor: '#f7f1d8',
+                        animationDelay: isRevealedRow ? `${revealDelay}ms` : undefined,
+                      }}
+                    >
                       <div
                         className="group grid items-center gap-2 px-4 py-3 text-sm hover:bg-[#fffdf5] cursor-pointer transition-colors"
                         style={{ gridTemplateColumns: '1.8fr 1.8fr 1fr 1fr 1fr 1fr 6rem' }}
