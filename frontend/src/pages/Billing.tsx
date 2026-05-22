@@ -166,6 +166,7 @@ export default function Billing() {
   const [expandedRows, setExpandedRows] = useState<Set<string>>(new Set())
   const [applyPayRow, setApplyPayRow] = useState<BillingRow | null>(null)
   const [applyPayAmount, setApplyPayAmount] = useState('')
+  const [loadingEdit, setLoadingEdit] = useState(false)
   const [visibleCount, setVisibleCount] = useState(140)
   const [revealStartIndex, setRevealStartIndex] = useState<number | null>(null)
   const [revealEndIndex, setRevealEndIndex] = useState<number | null>(null)
@@ -314,8 +315,16 @@ export default function Billing() {
         notes: values.notes?.trim() ? values.notes : undefined,
         client_id: clientId || undefined,
       }
+      const finalPayload = { ...payload }
 
-      return editRow ? api.put(`/billing/${editRow.id}`, payload) : api.post('/billing', payload)
+      // Staff can edit operational fields but not financial fields.
+      if (editRow && !isAdmin) {
+        delete (finalPayload as any).unit_price
+        delete (finalPayload as any).amount_paid
+        delete (finalPayload as any).service_expense
+      }
+
+      return editRow ? api.put(`/billing/${editRow.id}`, finalPayload) : api.post('/billing', payload)
     },
     retry: 1,
     onSuccess: () => {
@@ -366,20 +375,37 @@ export default function Billing() {
       api.post(`/billing/debtors/${encodeURIComponent(clientName)}/whatsapp`, { phone_number: phoneNumber }),
   })
 
-  const openEdit = (row: BillingRow) => {
+  const openEdit = async (row: BillingRow) => {
+    setLoadingEdit(true)
     setEditRow(row)
     setClientSearch(row.client_name)
     setSelectedClientId('')
-    reset({
-      client_name: row.client_name,
-      service_name: row.service_name,
-      quantity: row.quantity,
-      unit_price: Number(row.total_amount) / (Number(row.quantity) || 1),
-      amount_paid: row.amount_paid,
-      invoice_date: (row.invoice_date || row.service_date || '').slice(0, 10),
-      due_date: '',
-    } as FormValues)
-    setShowForm(true)
+    try {
+      const details = await api.get(`/billing/${row.id}`).then((r) => r.data)
+      const quantity = Number(details?.quantity ?? row.quantity ?? 1) || 1
+      const totalAmount = Number(details?.total_amount ?? details?.amount_charged ?? row.total_amount ?? 0)
+      const unitPrice = Number(details?.unit_price ?? (quantity ? totalAmount / quantity : 0))
+      const amountPaid = Number(details?.amount_paid ?? details?.paid_amount ?? row.amount_paid ?? 0)
+
+      reset({
+        client_name: details?.client_name ?? row.client_name,
+        client_phone: details?.phone_number ?? row.phone_number ?? '',
+        service_name: details?.service_name ?? row.service_name,
+        quantity,
+        unit_price: Number.isFinite(unitPrice) ? unitPrice : 0,
+        amount_paid: Number.isFinite(amountPaid) ? amountPaid : 0,
+        service_expense: Number(details?.service_expense ?? 0) || 0,
+        invoice_date: String(details?.invoice_date || details?.service_date || row.invoice_date || row.service_date || '').slice(0, 10),
+        due_date: String(details?.due_date || '').slice(0, 10),
+        notes: details?.notes ?? '',
+      } as FormValues)
+      setClientSearch(details?.client_name ?? row.client_name)
+      setShowForm(true)
+    } catch (e: any) {
+      toast.error(parseApiError(e, 'Unable to open invoice for edit'))
+    } finally {
+      setLoadingEdit(false)
+    }
   }
 
   const grouped: BillingGroup[] = useMemo(() => groupedData?.groups ?? [], [groupedData])
@@ -889,7 +915,7 @@ export default function Billing() {
                           className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity"
                           onClick={(e) => e.stopPropagation()}
                         >
-                          <ActionBtn title="Edit" icon={<Pencil size={13} />} onClick={() => openEdit(row)} />
+                          <ActionBtn title="Edit" icon={<Pencil size={13} />} onClick={() => { void openEdit(row) }} />
                           {isAdmin && <ActionBtn title="Apply Payment" icon={<CreditCard size={13} />} onClick={() => { setApplyPayRow(row); setApplyPayAmount(String(row.amount_paid)) }} />}
                           <ActionBtn title="WhatsApp Bill" icon={<MessageCircle size={13} />} onClick={() => openWhatsApp(row)} colorClass="hover:text-green-600" />
                           <ActionBtn title="Copy Bill" icon={<Copy size={13} />} onClick={() => copyBill(row)} />
@@ -913,7 +939,7 @@ export default function Billing() {
                           </div>
                           {row.notes && <p className="italic text-gray-400">📝 {row.notes}</p>}
                           <div className="flex flex-wrap gap-2 pt-1">
-                            <InlineBtn icon={<Pencil size={11} />} label="Edit" onClick={() => openEdit(row)} />
+                            <InlineBtn icon={<Pencil size={11} />} label="Edit" onClick={() => { void openEdit(row) }} />
                             {isAdmin && <InlineBtn icon={<CreditCard size={11} />} label="Apply Payment" onClick={() => { setApplyPayRow(row); setApplyPayAmount(String(row.amount_paid)) }} />}
                             <InlineBtn icon={<MessageCircle size={11} />} label="WhatsApp" onClick={() => openWhatsApp(row)} extraClass="text-green-700 hover:bg-green-50" />
                             <InlineBtn icon={<Copy size={11} />} label="Copy Bill" onClick={() => copyBill(row)} />
@@ -955,8 +981,8 @@ export default function Billing() {
         footer={(
           <div className="flex justify-end gap-2">
             <button type="button" className="btn-secondary" onClick={closeForm}>Cancel</button>
-            <button type="submit" form="invoice-form" className="btn-primary" disabled={saveMutation.isPending}>
-              {saveMutation.isPending ? 'Saving...' : 'Save'}
+            <button type="submit" form="invoice-form" className="btn-primary" disabled={saveMutation.isPending || loadingEdit}>
+              {loadingEdit ? 'Loading...' : saveMutation.isPending ? 'Saving...' : 'Save'}
             </button>
           </div>
         )}
