@@ -1,0 +1,6 @@
+{
+  "private": true,
+  "scripts": {
+    "verify-system": "backend/.venv/bin/python scripts/verify_system.py"
+  }
+}

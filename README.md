@@ -50,12 +50,18 @@ Google Sheets is only written to when you click "Sync to Sheets".
 
 ## Step 2 — Run database migrations
 
-Open your new project's **SQL Editor** and run each file in order:
+Open your new project's **SQL Editor** and run every file in `database/migrations`
+in numeric order. The current deterministic sequence is:
 
 ```
 database/migrations/001_initial_schema.sql
 database/migrations/002_rls_policies.sql
 database/migrations/003_functions_and_views.sql
+database/migrations/004_mvp_destination_tables.sql
+database/migrations/005_add_imei_columns.sql
+database/migrations/006_expand_cashflow_numeric_precision.sql
+...
+database/migrations/022_service_ownership_and_activity_tracking.sql
 ```
 
 ---
@@ -65,6 +71,7 @@ database/migrations/003_functions_and_views.sql
 ### Prerequisites
 
 ```bash
+source backend/.venv/bin/activate
 pip install gspread google-auth supabase python-dotenv
 ```
 
@@ -85,9 +92,7 @@ cp backend/.env.example scripts/.env
 ### Run
 
 ```bash
-cd scripts
-SUPABASE_URL=... SUPABASE_SERVICE_ROLE_KEY=... GOOGLE_SHEET_ID=... GOOGLE_SERVICE_ACCOUNT_JSON=./service_account.json \
-  python import_sheets.py
+backend/.venv/bin/python scripts/import_sheets.py
 ```
 
 The script maps the following sheet tabs (rename to match your sheet):
@@ -107,11 +112,13 @@ The script maps the following sheet tabs (rename to match your sheet):
 
 ```bash
 cd backend
-python -m venv .venv && source .venv/bin/activate
+python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
 cp .env.example .env
-# Fill in SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, SUPABASE_ANON_KEY
+# Fill in SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, SUPABASE_ANON_KEY,
+# GOOGLE_SERVICE_ACCOUNT_JSON, GOOGLE_SHEET_ID_STOCKS,
+# GOOGLE_SHEET_ID_SERVICES, and REDIS_URL.
 
 uvicorn app.main:app --reload --port 8000
 ```
@@ -127,7 +134,7 @@ cd frontend
 npm install
 
 cp .env.example .env
-# Fill in VITE_API_URL=http://localhost:8000
+# Fill in VITE_API_BASE_URL=/api
 # Fill in VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY
 
 npm run dev
@@ -152,7 +159,7 @@ Frontend: http://localhost:5173
 1. Go to [vercel.com](https://vercel.com) → **New Project** → connect your repo.
 2. Set **Root Directory** to `frontend`.
 3. Add environment variables:
-   - `VITE_API_URL` = your Render backend URL (e.g. `https://crm-api.onrender.com`)
+   - `VITE_API_BASE_URL` = `/api` when using the included Vercel rewrite, or your Render backend URL (e.g. `https://crm-api.onrender.com`)
    - `VITE_SUPABASE_URL`
    - `VITE_SUPABASE_ANON_KEY`
 
@@ -170,14 +177,17 @@ Frontend: http://localhost:5173
 
 ---
 
-## Add Zustand to package.json
+## Production Readiness Verification
 
-The auth store uses `zustand`. Add it:
+Run the full local gate before deployment:
 
 ```bash
-cd frontend
-npm install zustand
+npm run verify-system
 ```
+
+This validates frontend build/lint, backend startup and health, migration
+numbering, environment formats, Redis, Supabase, Google Sheets access, and
+critical route presence. It never prints secret values.
 
 ---
 
@@ -190,13 +200,17 @@ SUPABASE_SERVICE_ROLE_KEY=
 SUPABASE_ANON_KEY=
 GOOGLE_SERVICE_ACCOUNT_JSON=./service_account.json
 GOOGLE_SHEET_ID=
+GOOGLE_SHEET_ID_STOCKS=
+GOOGLE_SHEET_ID_SERVICES=
+REDIS_URL=
 ALLOWED_ORIGINS=http://localhost:5173,https://your-app.vercel.app
 ENV=development
 ```
 
 ### Frontend (`frontend/.env`)
 ```
-VITE_API_URL=http://localhost:8000
+VITE_API_BASE_URL=/api
+VITE_API_URL=/api
 VITE_SUPABASE_URL=
 VITE_SUPABASE_ANON_KEY=
 ```

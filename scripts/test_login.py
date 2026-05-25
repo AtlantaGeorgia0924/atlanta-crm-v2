@@ -20,8 +20,7 @@ if not SUPABASE_URL or not SUPABASE_ANON_KEY or not email or not password:
     print("Missing required env vars: SUPABASE_URL, SUPABASE_ANON_KEY, TEST_LOGIN_EMAIL, TEST_LOGIN_PASSWORD")
     sys.exit(1)
 
-print(f"Testing login with:")
-print(f"  URL: {SUPABASE_URL}")
+print("Testing login with configured Supabase project.")
 print(f"  Email: {email}")
 print("  Password: ********")
 print()
@@ -32,7 +31,7 @@ try:
     print("✓ Login successful!")
     print(f"  User ID: {result.user.id}")
     print(f"  Email: {result.user.email}")
-    print(f"  Access Token: {result.session.access_token[:50]}...")
+    print("  Access Token: issued")
 except Exception as e:
     print(f"✗ Login failed: {str(e)}")
     import traceback

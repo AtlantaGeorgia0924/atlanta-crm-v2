@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import settings
 from app.core.logging_config import configure_logging
+from app.core.operational_validation import run_startup_validation
 
 configure_logging(level="DEBUG" if settings.ENV != "production" else "INFO")
 
@@ -62,3 +63,8 @@ app.include_router(admin.router,           prefix="/admin",      tags=["Admin"])
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+@app.on_event("startup")
+def validate_operational_readiness():
+    run_startup_validation()

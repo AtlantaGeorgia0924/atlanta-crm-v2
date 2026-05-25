@@ -16,14 +16,14 @@ Expand all monetary columns from `numeric(12,2)` to `numeric(18,2)` to support v
 - monthly_net_profit_left
 
 ## SQL Command
-See: `/database/migrations/005_expand_cashflow_numeric_precision.sql`
+See: `/database/migrations/006_expand_cashflow_numeric_precision.sql`
 
 ## How to Apply
 
 ### Option 1: Via Supabase Dashboard (Recommended)
 1. Navigate to https://app.supabase.com/project/rwyplndwzrqdsyhsyjue/sql
 2. Click "New Query"
-3. Copy and paste the SQL from `005_expand_cashflow_numeric_precision.sql`
+3. Copy and paste the SQL from `006_expand_cashflow_numeric_precision.sql`
 4. Click "Execute" or press Cmd+Enter
 5. Verify all columns show `numeric(18,2)` in the results
 
@@ -32,7 +32,7 @@ See: `/database/migrations/005_expand_cashflow_numeric_precision.sql`
 cd /Users/mac/crm-app
 PGPASSWORD="$(grep 'SUPABASE_SERVICE_ROLE_KEY=' backend/.env | cut -d= -f2)" \
 psql -h rwyplndwzrqdsyhsyjue.supabase.co -U postgres -d postgres \
-  -f database/migrations/005_expand_cashflow_numeric_precision.sql
+  -f database/migrations/006_expand_cashflow_numeric_precision.sql
 ```
 
 ## After Migration
@@ -58,7 +58,7 @@ ORDER BY column_name;
 ```
 
 ## Migration Status
-- [ ] Migration file created: `005_expand_cashflow_numeric_precision.sql`
+- [ ] Migration file created: `006_expand_cashflow_numeric_precision.sql`
 - [ ] Applied to Supabase database
 - [ ] Dashboard refresh tested
 - [ ] Large totals working (> ₦100,000,000)

@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import api from '@/lib/api'
+import api, { apiBaseUrl } from '@/lib/api'
 import { formatCurrency } from '@/lib/utils'
 import LoadingSpinner from '@/components/LoadingSpinner'
 import { ClipboardList, Download, Search, X } from 'lucide-react'
@@ -59,7 +59,7 @@ function buildExportUrl(params: Record<string, string>) {
   const qs = new URLSearchParams(
     Object.fromEntries(Object.entries(params).filter(([, v]) => v !== ''))
   ).toString()
-  return `${import.meta.env.VITE_API_URL ?? ''}/cashflow/audit/export-csv${qs ? '?' + qs : ''}`
+  return `${apiBaseUrl}/cashflow/audit/export-csv${qs ? '?' + qs : ''}`
 }
 
 // ── Main component ─────────────────────────────────────────────────────────────

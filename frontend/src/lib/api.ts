@@ -1,11 +1,15 @@
 import axios from 'axios'
 import { useAuthStore } from '@/store/authStore'
 
-// In development Vite proxies /api → localhost:8000 (vite.config.ts).
-// In production, prefer VITE_API_URL when set, otherwise fall back to /api rewrite.
-const envApiUrl = String(import.meta.env.VITE_API_URL || '').trim().replace(/\/$/, '')
+// In development Vite proxies /api -> localhost:8000 (vite.config.ts).
+// VITE_API_BASE_URL is the production name; VITE_API_URL remains supported
+// for older deployments.
+export const apiBaseUrl = String(
+  import.meta.env.VITE_API_BASE_URL || import.meta.env.VITE_API_URL || '',
+).trim().replace(/\/$/, '')
+
 const api = axios.create({
-  baseURL: envApiUrl || '/api',
+  baseURL: apiBaseUrl || '/api',
 })
 
 api.interceptors.request.use((config) => {

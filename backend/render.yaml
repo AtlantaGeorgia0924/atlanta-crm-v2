@@ -18,6 +18,12 @@ services:
         sync: false
       - key: GOOGLE_SHEET_ID
         sync: false
+      - key: GOOGLE_SHEET_ID_STOCKS
+        sync: false
+      - key: GOOGLE_SHEET_ID_SERVICES
+        sync: false
+      - key: REDIS_URL
+        sync: false
       - key: ALLOWED_ORIGINS
         sync: false
       - key: ENV
