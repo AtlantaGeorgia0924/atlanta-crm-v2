@@ -21,6 +21,26 @@ BEGIN
 END;
 $$;
 
+CREATE OR REPLACE FUNCTION prevent_append_only_mutation()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    RAISE EXCEPTION '% is append-only; % is not allowed', TG_TABLE_NAME, TG_OP;
+END;
+$$;
+
+CREATE TABLE IF NOT EXISTS migration_version_log (
+    migration_version TEXT PRIMARY KEY,
+    description TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'applied' CHECK (status IN ('applied', 'rolled_back')),
+    applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    rolled_back_at TIMESTAMPTZ,
+    rollback_reference TEXT,
+    applied_by TEXT NOT NULL DEFAULT CURRENT_USER,
+    metadata JSONB NOT NULL DEFAULT '{}'::JSONB
+);
+
 DO $$
 BEGIN
     IF to_regclass('public.service_jobs') IS NOT NULL THEN
@@ -275,13 +295,16 @@ CREATE TABLE IF NOT EXISTS inventory_cart_items (
 );
 
 DROP TRIGGER IF EXISTS trg_service_payments_updated ON service_payments;
-CREATE TRIGGER trg_service_payments_updated BEFORE UPDATE ON service_payments FOR EACH ROW EXECUTE FUNCTION set_updated_at_generic();
+DROP TRIGGER IF EXISTS trg_service_payments_append_only ON service_payments;
+CREATE TRIGGER trg_service_payments_append_only BEFORE UPDATE OR DELETE ON service_payments FOR EACH ROW EXECUTE FUNCTION prevent_append_only_mutation();
 
 DROP TRIGGER IF EXISTS trg_sale_payments_updated ON sale_payments;
-CREATE TRIGGER trg_sale_payments_updated BEFORE UPDATE ON sale_payments FOR EACH ROW EXECUTE FUNCTION set_updated_at_generic();
+DROP TRIGGER IF EXISTS trg_sale_payments_append_only ON sale_payments;
+CREATE TRIGGER trg_sale_payments_append_only BEFORE UPDATE OR DELETE ON sale_payments FOR EACH ROW EXECUTE FUNCTION prevent_append_only_mutation();
 
 DROP TRIGGER IF EXISTS trg_audit_logs_updated ON audit_logs;
-CREATE TRIGGER trg_audit_logs_updated BEFORE UPDATE ON audit_logs FOR EACH ROW EXECUTE FUNCTION set_updated_at_generic();
+DROP TRIGGER IF EXISTS trg_audit_logs_append_only ON audit_logs;
+CREATE TRIGGER trg_audit_logs_append_only BEFORE UPDATE OR DELETE ON audit_logs FOR EACH ROW EXECUTE FUNCTION prevent_append_only_mutation();
 
 DROP TRIGGER IF EXISTS trg_inventory_sales_updated_phase2 ON inventory_sales;
 CREATE TRIGGER trg_inventory_sales_updated_phase2 BEFORE UPDATE ON inventory_sales FOR EACH ROW EXECUTE FUNCTION set_updated_at_generic();
@@ -511,5 +534,37 @@ CREATE INDEX IF NOT EXISTS idx_inventory_sales_client_name_phase2_trgm ON invent
 CREATE INDEX IF NOT EXISTS idx_inventory_sales_client_phone_phase2_trgm ON inventory_sales USING gin (client_phone gin_trgm_ops) WHERE deleted_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_inventory_carts_status_created ON inventory_carts(status, created_at DESC) WHERE deleted_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_inventory_cart_items_cart_active ON inventory_cart_items(cart_id) WHERE deleted_at IS NULL;
+
+INSERT INTO migration_version_log (
+    migration_version,
+    description,
+    status,
+    applied_at,
+    rollback_reference,
+    applied_by,
+    metadata
+)
+VALUES (
+    '025_phase2_core_restructure',
+    'Phase 2 core restructure',
+    'applied',
+    NOW(),
+    'database/migrations/025_phase2_core_restructure.rollback.sql',
+    CURRENT_USER,
+    jsonb_build_object(
+        'validation_sql', 'database/validation/025_phase2_core_restructure_validation.sql',
+        'baseline_sql', 'database/validation/025_phase2_core_restructure_baseline.sql',
+        'rollback_validation_sql', 'database/validation/025_phase2_core_restructure_rollback_validation.sql',
+        'append_only_tables', jsonb_build_array('service_payments', 'sale_payments', 'audit_logs')
+    )
+)
+ON CONFLICT (migration_version) DO UPDATE
+SET description = EXCLUDED.description,
+    status = 'applied',
+    applied_at = EXCLUDED.applied_at,
+    rolled_back_at = NULL,
+    rollback_reference = EXCLUDED.rollback_reference,
+    applied_by = EXCLUDED.applied_by,
+    metadata = migration_version_log.metadata || EXCLUDED.metadata;
 
 COMMIT;

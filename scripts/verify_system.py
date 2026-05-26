@@ -81,10 +81,6 @@ def check_env() -> list[Check]:
         "SUPABASE_URL",
         "SUPABASE_SERVICE_ROLE_KEY",
         "SUPABASE_ANON_KEY",
-        "GOOGLE_SERVICE_ACCOUNT_JSON",
-        "GOOGLE_SHEET_ID",
-        "GOOGLE_SHEET_ID_STOCKS",
-        "GOOGLE_SHEET_ID_SERVICES",
         "REDIS_URL",
     ]
 
@@ -159,7 +155,7 @@ required = [
     "/payments",
     "/billing/debtors/{client_name}/apply-payment",
     "/billing/debtors/{client_name}/whatsapp",
-    "/sync/to-sheets",
+    "/sync/refresh-workspace",
 ]
 missing = [path for path in required if path not in paths]
 print("missing=" + ",".join(missing))
