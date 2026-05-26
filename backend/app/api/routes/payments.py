@@ -39,6 +39,7 @@ class PaymentCreate(BaseModel):
     reference_no: Optional[str] = None
     payment_date: Optional[str] = None
     notes: Optional[str] = None
+    idempotency_key: Optional[str] = None
 
 
 class PaymentReverse(BaseModel):
@@ -47,6 +48,7 @@ class PaymentReverse(BaseModel):
     amount: float
     reversal_date: Optional[str] = None
     reason: Optional[str] = None
+    idempotency_key: Optional[str] = None
 
 
 def _resolve_service_job_id(billing_row_id: Optional[str], service_job_id: Optional[str]) -> str:
@@ -97,6 +99,7 @@ def apply_payment(payload: PaymentCreate, _user=Depends(get_current_user)):
         payment_date=payload.payment_date,
         applied_by=str(_user.id),
         applied_by_name=_user.full_name or _user.email,
+        idempotency_key=payload.idempotency_key,
     )
 
     # Keep dashboard/cashflow cards in sync after payment updates.
@@ -153,6 +156,7 @@ def reverse_payment(payload: PaymentReverse, _user=Depends(get_current_user)):
         reversed_by=str(_user.id),
         reversed_by_name=_user.full_name or _user.email,
         reversal_date=payload.reversal_date,
+        idempotency_key=payload.idempotency_key,
     )
 
     emit_financial_event(

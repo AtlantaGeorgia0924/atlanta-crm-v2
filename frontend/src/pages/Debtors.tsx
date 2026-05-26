@@ -3,6 +3,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useForm } from 'react-hook-form'
 import { useNavigate } from 'react-router-dom'
 import api from '@/lib/api'
+import { buildIdempotencyKey } from '@/lib/idempotency'
 import Table from '@/components/Table'
 import Modal from '@/components/Modal'
 import LoadingSpinner from '@/components/LoadingSpinner'
@@ -154,6 +155,7 @@ export default function Debtors() {
       const payload: any = {
         ...values,
         mode: allocationMode,
+        idempotency_key: buildIdempotencyKey('debtor-payment-apply'),
       }
       if (allocationMode === 'manual') {
         payload.allocations = Object.entries(manualAllocations)

@@ -7,7 +7,7 @@ from typing import Optional
 
 from fastapi import HTTPException
 
-from app.core.financials import compute_outstanding, compute_payment_status, to_number
+from app.core.financials import to_number
 
 _REF_CHARS = string.ascii_uppercase + string.digits
 
@@ -51,20 +51,6 @@ def generate_payment_reference(sb=None, *, prefix: str = "ATL-PAY") -> str:
     return f"{prefix}-{stamp}-{_random_suffix(6)}"
 
 
-def _load_service_job(sb, service_job_id: str) -> dict:
-    result = (
-        sb.table("service_jobs")
-        .select("id,client_id,client_name,phone_number,amount_charged,paid_amount,payment_status")
-        .eq("id", service_job_id)
-        .single()
-        .execute()
-    )
-    row = result.data
-    if not row:
-        raise HTTPException(404, "Invoice not found")
-    return row
-
-
 def apply_invoice_payment(
     sb,
     *,
@@ -76,72 +62,79 @@ def apply_invoice_payment(
     payment_date: Optional[str],
     applied_by: Optional[str],
     applied_by_name: Optional[str],
+    idempotency_key: Optional[str] = None,
 ) -> dict:
-    row = _load_service_job(sb, service_job_id)
-
-    total = max(0.0, to_number(row.get("amount_charged")))
-    previous_paid_amount = max(0.0, to_number(row.get("paid_amount")))
-    previous_balance = compute_outstanding(total, previous_paid_amount)
-    previous_status = _normalize_status(row.get("payment_status") or compute_payment_status(total, previous_paid_amount))
-
     amount = to_number(payment_amount)
     if amount <= 0:
         raise HTTPException(422, "Payment amount must be greater than zero")
 
-    new_paid_amount = previous_paid_amount + amount
-    if new_paid_amount > total + 1e-6:
-        raise HTTPException(400, f"Payment amount exceeds outstanding balance ({max(total - previous_paid_amount, 0.0):.2f})")
-
-    new_paid_amount = min(new_paid_amount, total)
-    new_balance = compute_outstanding(total, new_paid_amount)
-    new_status = _normalize_status(compute_payment_status(total, new_paid_amount))
-
-    resolved_reference = str(reference_no or "").strip() or generate_payment_reference(sb)
+    resolved_reference = str(reference_no or "").strip() or None
     resolved_date = _normalize_date(payment_date)
     resolved_note = str(payment_note or "").strip() or None
     resolved_method = str(payment_method or "cash").strip() or "cash"
+    resolved_idempotency = str(idempotency_key or "").strip() or None
 
-    payment_payload = {
-        "reference_no": resolved_reference,
-        "client_id": row.get("client_id"),
-        "service_job_id": service_job_id,
-        "billing_row_id": service_job_id,
-        "client_name": row.get("client_name"),
-        "client_phone": row.get("phone_number"),
-        "payment_amount": amount,
-        "amount": amount,
-        "payment_method": resolved_method,
-        "payment_note": resolved_note,
-        "notes": resolved_note,
-        "previous_balance": previous_balance,
-        "new_balance": new_balance,
-        "previous_paid_amount": previous_paid_amount,
-        "new_paid_amount": new_paid_amount,
-        "previous_status": previous_status,
-        "new_status": new_status,
-        "applied_by": applied_by,
-        "applied_by_name": applied_by_name,
-        "performed_by": applied_by,
-        "payment_date": resolved_date,
-    }
-    inserted_payment = sb.table("payments").insert(payment_payload).execute().data[0]
+    try:
+        rpc_rows = (
+            sb.rpc(
+                "apply_service_payment_tx",
+                {
+                    "p_service_job_id": service_job_id,
+                    "p_payment_amount": amount,
+                    "p_payment_method": resolved_method,
+                    "p_payment_note": resolved_note,
+                    "p_reference_no": resolved_reference,
+                    "p_payment_date": resolved_date,
+                    "p_applied_by": applied_by,
+                    "p_applied_by_name": applied_by_name,
+                    "p_idempotency_key": resolved_idempotency,
+                },
+            )
+            .execute()
+            .data
+            or []
+        )
+    except Exception as exc:
+        message = str(exc)
+        if "exceeds outstanding balance" in message.lower():
+            raise HTTPException(400, message)
+        if "must be greater than zero" in message.lower():
+            raise HTTPException(422, message)
+        raise HTTPException(500, f"Payment apply failed: {message}")
 
-    update_payload = {
-        "paid_amount": new_paid_amount,
-        "payment_status": new_status,
-        "paid_date": resolved_date if new_status == "PAID" else None,
-        "paid_at": datetime.utcnow().isoformat() if new_status == "PAID" else None,
-        "last_payment_by": applied_by,
-        "last_payment_by_name": applied_by_name,
-        "last_payment_at": datetime.utcnow().isoformat(),
-    }
+    if not rpc_rows:
+        raise HTTPException(500, "Payment apply failed")
+
+    rpc_result = rpc_rows[0]
+    payment_id = str(rpc_result.get("payment_id") or "").strip()
+    inserted_payment = (
+        sb.table("payments")
+        .select("*")
+        .eq("id", payment_id)
+        .single()
+        .execute()
+        .data
+    )
+    if not inserted_payment:
+        raise HTTPException(500, "Payment record could not be loaded")
+
     updated_invoice = (
         sb.table("service_jobs")
-        .update(update_payload)
+        .select("*")
         .eq("id", service_job_id)
+        .single()
         .execute()
-        .data[0]
+        .data
     )
+    if not updated_invoice:
+        raise HTTPException(500, "Invoice could not be loaded")
+
+    previous_balance = to_number(rpc_result.get("previous_balance"))
+    new_balance = to_number(rpc_result.get("new_balance"))
+    previous_paid_amount = to_number(rpc_result.get("previous_paid_amount"))
+    new_paid_amount = to_number(rpc_result.get("new_paid_amount"))
+    previous_status = _normalize_status(rpc_result.get("previous_status"))
+    new_status = _normalize_status(rpc_result.get("new_status"))
 
     return {
         "payment": inserted_payment,
@@ -165,73 +158,75 @@ def reverse_invoice_payment(
     reversed_by: Optional[str],
     reversed_by_name: Optional[str],
     reversal_date: Optional[str],
+    idempotency_key: Optional[str] = None,
 ) -> dict:
-    row = _load_service_job(sb, service_job_id)
-
-    total = max(0.0, to_number(row.get("amount_charged")))
-    previous_paid_amount = max(0.0, to_number(row.get("paid_amount")))
-    previous_balance = compute_outstanding(total, previous_paid_amount)
-    previous_status = _normalize_status(row.get("payment_status") or compute_payment_status(total, previous_paid_amount))
-
     amount = to_number(reversal_amount)
     if amount <= 0:
         raise HTTPException(422, "Reversal amount must be greater than zero")
-    if amount > previous_paid_amount + 1e-6:
-        raise HTTPException(400, f"Reversal exceeds paid amount ({previous_paid_amount:.2f})")
-
-    new_paid_amount = max(0.0, previous_paid_amount - amount)
-    new_balance = compute_outstanding(total, new_paid_amount)
-    new_status = _normalize_status(compute_payment_status(total, new_paid_amount))
 
     resolved_date = _normalize_date(reversal_date)
     reason = str(reversal_reason or "").strip() or "Payment reversal"
+    resolved_idempotency = str(idempotency_key or "").strip() or None
 
-    payment_payload = {
-        "reference_no": generate_payment_reference(sb, prefix="ATL-REV"),
-        "client_id": row.get("client_id"),
-        "service_job_id": service_job_id,
-        "billing_row_id": service_job_id,
-        "client_name": row.get("client_name"),
-        "client_phone": row.get("phone_number"),
-        "payment_amount": -amount,
-        "amount": -amount,
-        "payment_method": "reversal",
-        "payment_note": reason,
-        "notes": reason,
-        "previous_balance": previous_balance,
-        "new_balance": new_balance,
-        "previous_paid_amount": previous_paid_amount,
-        "new_paid_amount": new_paid_amount,
-        "previous_status": previous_status,
-        "new_status": new_status,
-        "applied_by": reversed_by,
-        "applied_by_name": reversed_by_name,
-        "performed_by": reversed_by,
-        "payment_date": resolved_date,
-        "is_reversed": True,
-        "reversed_at": datetime.utcnow().isoformat(),
-        "reversed_by": reversed_by,
-        "reversal_reason": reason,
-    }
-    inserted_payment = sb.table("payments").insert(payment_payload).execute().data[0]
+    try:
+        rpc_rows = (
+            sb.rpc(
+                "reverse_service_payment_tx",
+                {
+                    "p_service_job_id": service_job_id,
+                    "p_reversal_amount": amount,
+                    "p_reversal_reason": reason,
+                    "p_reversed_by": reversed_by,
+                    "p_reversed_by_name": reversed_by_name,
+                    "p_reversal_date": resolved_date,
+                    "p_idempotency_key": resolved_idempotency,
+                },
+            )
+            .execute()
+            .data
+            or []
+        )
+    except Exception as exc:
+        message = str(exc)
+        if "exceeds paid amount" in message.lower():
+            raise HTTPException(400, message)
+        if "must be greater than zero" in message.lower():
+            raise HTTPException(422, message)
+        raise HTTPException(500, f"Payment reversal failed: {message}")
+
+    if not rpc_rows:
+        raise HTTPException(500, "Payment reversal failed")
+
+    rpc_result = rpc_rows[0]
+    payment_id = str(rpc_result.get("payment_id") or "").strip()
+    inserted_payment = (
+        sb.table("payments")
+        .select("*")
+        .eq("id", payment_id)
+        .single()
+        .execute()
+        .data
+    )
+    if not inserted_payment:
+        raise HTTPException(500, "Reversal payment record could not be loaded")
 
     updated_invoice = (
         sb.table("service_jobs")
-        .update(
-            {
-                "paid_amount": new_paid_amount,
-                "payment_status": new_status,
-                "paid_date": resolved_date if new_status == "PAID" else None,
-                "paid_at": datetime.utcnow().isoformat() if new_status == "PAID" else None,
-                "last_payment_by": reversed_by,
-                "last_payment_by_name": reversed_by_name,
-                "last_payment_at": datetime.utcnow().isoformat(),
-            }
-        )
+        .select("*")
         .eq("id", service_job_id)
+        .single()
         .execute()
-        .data[0]
+        .data
     )
+    if not updated_invoice:
+        raise HTTPException(500, "Invoice could not be loaded")
+
+    previous_balance = to_number(rpc_result.get("previous_balance"))
+    new_balance = to_number(rpc_result.get("new_balance"))
+    previous_paid_amount = to_number(rpc_result.get("previous_paid_amount"))
+    new_paid_amount = to_number(rpc_result.get("new_paid_amount"))
+    previous_status = _normalize_status(rpc_result.get("previous_status"))
+    new_status = _normalize_status(rpc_result.get("new_status"))
 
     return {
         "payment": inserted_payment,

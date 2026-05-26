@@ -237,8 +237,7 @@ class InventoryCheckoutPayload(BaseModel):
     amount_paid: float = 0
     payment_method: Optional[str] = "cash"
     discount: float = 0
-    assigned_staff_id: Optional[str] = None
-    assigned_staff_name: Optional[str] = None
+    idempotency_key: str
 
 
 def _normalize_payment_status(value: Optional[str]) -> str:
@@ -252,46 +251,6 @@ def _normalize_payment_status(value: Optional[str]) -> str:
 
 def _normalize_phone(value: Optional[str]) -> str:
     return "".join(ch for ch in str(value or "") if ch.isdigit())
-
-
-_TABLE_COLUMNS_CACHE: dict[str, set[str]] = {}
-
-
-def _table_columns(sb, table_name: str) -> set[str]:
-    cached = _TABLE_COLUMNS_CACHE.get(table_name)
-    if cached is not None:
-        return cached
-    rows = (
-        sb.table("information_schema.columns")
-        .select("column_name")
-        .eq("table_schema", "public")
-        .eq("table_name", table_name)
-        .execute()
-        .data
-        or []
-    )
-    columns = {str(row.get("column_name")) for row in rows if row.get("column_name")}
-    _TABLE_COLUMNS_CACHE[table_name] = columns
-    return columns
-
-
-def _actor_display_name(user) -> str:
-    role = str(getattr(user, "role", "staff") or "staff").strip().lower()
-    label = "Admin" if role == "admin" else "Staff"
-    name = str(getattr(user, "full_name", "") or "").strip() or str(getattr(user, "email", "") or "").strip()
-    return f"{name} ({label})" if name else label
-
-
-def _payment_state(total: float, paid: float) -> tuple[float, str]:
-    normalized_total = max(_as_float(total), 0)
-    normalized_paid = max(_as_float(paid), 0)
-    if normalized_paid > normalized_total:
-        normalized_paid = normalized_total
-    if normalized_paid <= 0:
-        return 0, "UNPAID"
-    if normalized_paid < normalized_total:
-        return normalized_paid, "PART PAYMENT"
-    return normalized_total, "PAID"
 
 
 def _upsert_client(sb, client_name: str, client_phone: Optional[str]) -> Optional[str]:
@@ -599,6 +558,7 @@ def get_item_transactions(
 @router.post("/checkout", status_code=201)
 def checkout_inventory_cart(payload: InventoryCheckoutPayload, _user=Depends(get_current_user)):
     sb = get_supabase()
+
     if not payload.items:
         raise HTTPException(422, "Cart is empty")
 
@@ -606,243 +566,83 @@ def checkout_inventory_cart(payload: InventoryCheckoutPayload, _user=Depends(get
     if not buyer_name:
         raise HTTPException(422, "Buyer/client name is required")
 
-    item_ids = [str(item.item_id).strip() for item in payload.items if str(item.item_id).strip()]
-    if len(item_ids) != len(payload.items):
-        raise HTTPException(422, "Every cart item requires an item_id")
-    if len(set(item_ids)) != len(item_ids):
-        raise HTTPException(422, "Duplicate cart items are not allowed")
+    idempotency_key = str(payload.idempotency_key or "").strip()
+    if not idempotency_key:
+        raise HTTPException(422, "idempotency_key is required")
 
-    inventory_rows = (
-        sb.table("inventory_items")
-        .select("*")
-        .in_("id", item_ids)
+    client_id = _upsert_client(sb, buyer_name, payload.buyer_phone)
+    items_payload = []
+    for item in payload.items:
+        item_id = str(item.item_id or "").strip()
+        quantity = _as_float(item.quantity)
+        if not item_id:
+            raise HTTPException(422, "Every cart item requires item_id")
+        if quantity <= 0:
+            raise HTTPException(422, "Every cart item quantity must be greater than zero")
+        line_unit_price = _as_float(item.unit_price)
+        items_payload.append(
+            {
+                "item_id": item_id,
+                "quantity": quantity,
+                "unit_price": line_unit_price if line_unit_price > 0 else None,
+            }
+        )
+
+    try:
+        rpc = (
+            sb.rpc(
+                "checkout_inventory_cart_tx",
+                {
+                    "p_items": items_payload,
+                    "p_client_id": client_id,
+                    "p_client_name": buyer_name,
+                    "p_client_phone": payload.buyer_phone,
+                    "p_amount_paid": max(_as_float(payload.amount_paid), 0),
+                    "p_payment_method": payload.payment_method,
+                    "p_discount": max(_as_float(payload.discount), 0),
+                    "p_notes": payload.notes,
+                    "p_sold_by": str(_user.id),
+                    "p_idempotency_key": idempotency_key,
+                },
+            )
+            .execute()
+            .data
+            or []
+        )
+    except Exception as exc:
+        message = str(exc)
+        if "Insufficient stock" in message or "Negative stock prevented" in message:
+            raise HTTPException(409, message)
+        if "idempotency_key is required" in message:
+            raise HTTPException(422, message)
+        raise HTTPException(500, f"Checkout failed: {message}")
+
+    if not rpc:
+        raise HTTPException(500, "Checkout failed")
+
+    row = rpc[0]
+    sale_id = row.get("sale_id")
+    sale_items = (
+        sb.table("inventory_sale_items")
+        .select("id,service_job_id,source_inventory_item_id,quantity,amount_charged")
+        .eq("sale_id", sale_id)
+        .order("created_at")
         .execute()
         .data
         or []
     )
-    inventory_by_id = {str(row.get("id")): row for row in inventory_rows}
-    missing = [item_id for item_id in item_ids if item_id not in inventory_by_id]
-    if missing:
-        raise HTTPException(404, f"Inventory item not found: {missing[0]}")
 
-    prepared_items = []
-    subtotal = 0.0
-    total_cost = 0.0
-    for cart_item in payload.items:
-        item_id = str(cart_item.item_id).strip()
-        inventory = inventory_by_id[item_id]
-        quantity = _as_float(cart_item.quantity)
-        if quantity <= 0:
-            raise HTTPException(422, f"Quantity must be greater than zero for {inventory.get('item_name')}")
-        quantity_before = _as_float(inventory.get("quantity"))
-        if quantity_before < quantity:
-            raise HTTPException(409, f"Insufficient stock for {inventory.get('item_name')}. Remaining: {quantity_before}, requested: {quantity}")
-        unit_price = _as_float(cart_item.unit_price)
-        if unit_price <= 0:
-            unit_price = _as_float(inventory.get("selling_price"))
-        if unit_price <= 0:
-            raise HTTPException(422, f"Selling price must be greater than zero for {inventory.get('item_name')}")
-        unit_cost = _as_float(inventory.get("cost_price"))
-        line_subtotal = round(quantity * unit_price, 2)
-        subtotal += line_subtotal
-        total_cost += round(quantity * unit_cost, 2)
-        prepared_items.append(
-            {
-                "inventory": inventory,
-                "quantity": quantity,
-                "quantity_before": quantity_before,
-                "unit_price": unit_price,
-                "unit_cost": unit_cost,
-                "line_subtotal": line_subtotal,
-            }
-        )
-
-    discount = min(max(_as_float(payload.discount), 0), subtotal)
-    sale_total = round(subtotal - discount, 2)
-    paid_amount, sale_status = _payment_state(sale_total, payload.amount_paid)
-    balance = round(sale_total - paid_amount, 2)
-    client_id = _upsert_client(sb, buyer_name, payload.buyer_phone)
-    actor_name = _actor_display_name(_user)
-    actor_role = str(getattr(_user, "role", "staff") or "staff").strip().lower()
-    assigned_staff_id = str(payload.assigned_staff_id or _user.id)
-    assigned_staff_name = str(payload.assigned_staff_name or actor_name)
-    now_iso = datetime.utcnow().isoformat()
-
-    sale_columns = _table_columns(sb, "inventory_sales")
-    sale_payload = {
-        "client_id": client_id,
-        "client_name": buyer_name,
-        "client_phone": payload.buyer_phone,
-        "payment_status": sale_status,
-        "amount_charged": sale_total,
-        "paid_amount": paid_amount,
-        "balance": balance,
-        "total_profit": round(sale_total - total_cost, 2),
-        "notes": payload.notes,
-        "sold_by": str(_user.id),
-        "payment_method": payload.payment_method,
-        "discount_amount": discount,
-        "invoice_reference": f"ATL-SALE-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}",
-    }
-    sale_payload = {k: v for k, v in sale_payload.items() if k in sale_columns and v is not None}
-    sale = (sb.table("inventory_sales").insert(sale_payload).execute().data or [None])[0]
-    if not sale:
-        raise HTTPException(500, "Unable to create inventory sale")
-    sale_id = str(sale.get("id"))
-
-    service_columns = _table_columns(sb, "service_jobs")
-    sale_item_columns = _table_columns(sb, "inventory_sale_items")
-    transaction_columns = _table_columns(sb, "inventory_transactions")
-    created_items = []
-    created_service_ids = []
-    remaining_paid = paid_amount
-
-    for index, prepared in enumerate(prepared_items):
-        inventory = prepared["inventory"]
-        item_id = str(inventory.get("id"))
-        quantity = prepared["quantity"]
-        quantity_before = prepared["quantity_before"]
-        quantity_after = round(quantity_before - quantity, 2)
-        line_discount = round(discount * (prepared["line_subtotal"] / subtotal), 2) if subtotal else 0
-        if index == len(prepared_items) - 1:
-            previous_discounts = sum(float(item.get("line_discount", 0)) for item in created_items)
-            line_discount = round(discount - previous_discounts, 2)
-        line_total = round(prepared["line_subtotal"] - line_discount, 2)
-        line_paid = min(remaining_paid, line_total)
-        remaining_paid = round(remaining_paid - line_paid, 2)
-        line_paid, line_status = _payment_state(line_total, line_paid)
-        line_cost = round(prepared["unit_cost"] * quantity, 2)
-        line_profit = round(line_total - line_cost, 2)
-
-        latest = sb.table("inventory_items").select("quantity").eq("id", item_id).single().execute().data or {}
-        latest_qty = _as_float(latest.get("quantity"))
-        if latest_qty < quantity:
-            raise HTTPException(409, f"Insufficient stock for {inventory.get('item_name')}. Remaining: {latest_qty}, requested: {quantity}")
-
-        sb.table("inventory_items").update(
-            {
-                "quantity": round(latest_qty - quantity, 2),
-                "payment_status": "SOLD" if round(latest_qty - quantity, 2) <= 0 else inventory.get("payment_status"),
-                "sync_dirty": True,
-                "sync_source": "app",
-                "updated_at": now_iso,
-            }
-        ).eq("id", item_id).execute()
-
-        service_payload = {
-            "client_id": client_id,
-            "client_name": buyer_name,
-            "phone_number": payload.buyer_phone,
-            "service_name": f"Sale: {inventory.get('item_name') or 'Inventory Item'}",
-            "description": f"Inventory sale: {inventory.get('item_name') or 'Inventory Item'} x {quantity}",
-            "quantity": quantity,
-            "amount_charged": line_total,
-            "expense_amount": line_cost,
-            "service_expense_amount": line_cost,
-            "payment_status": line_status,
-            "paid_amount": line_paid,
-            "paid_date": datetime.utcnow().date().isoformat() if line_status == "PAID" else None,
-            "paid_at": now_iso if line_status == "PAID" else None,
-            "service_date": datetime.utcnow().date().isoformat(),
-            "due_date": datetime.utcnow().date().isoformat(),
-            "notes": payload.notes,
-            "imei": inventory.get("imei") or inventory.get("sku"),
-            "serial_number": inventory.get("serial_number") or inventory.get("sku"),
-            "device_model": inventory.get("item_name"),
-            "condition": inventory.get("condition"),
-            "lock_status": inventory.get("lock_status"),
-            "unlock_method": inventory.get("unlock_method"),
-            "created_by": str(_user.id),
-            "created_by_name": actor_name,
-            "created_by_role": actor_role,
-            "last_edited_by": str(_user.id),
-            "last_edited_by_name": actor_name,
-            "last_edited_at": now_iso,
-            "assigned_staff_id": assigned_staff_id,
-            "assigned_staff_name": assigned_staff_name,
-            "source_created_at": now_iso,
-            "source_updated_at": now_iso,
-            "sync_dirty": True,
-            "sync_source": "app",
-        }
-        service_payload = {k: v for k, v in service_payload.items() if k in service_columns and v is not None}
-        service = (sb.table("service_jobs").insert(service_payload).execute().data or [None])[0]
-        if not service:
-            raise HTTPException(500, "Unable to create service/billing row for inventory sale")
-        service_job_id = str(service.get("id"))
-        created_service_ids.append(service_job_id)
-
-        sale_item_payload = {
-            "sale_id": sale_id,
-            "source_inventory_item_id": item_id,
-            "service_job_id": service_job_id,
-            "quantity": quantity,
-            "unit_price": prepared["unit_price"],
-            "unit_cost": prepared["unit_cost"],
-            "amount_charged": line_total,
-            "profit": line_profit,
-            "notes": payload.notes,
-            "sold_by": str(_user.id),
-        }
-        sale_item_payload = {k: v for k, v in sale_item_payload.items() if k in sale_item_columns and v is not None}
-        sale_item = (sb.table("inventory_sale_items").insert(sale_item_payload).execute().data or [None])[0]
-        if not sale_item:
-            raise HTTPException(500, "Unable to create inventory sale item")
-
-        tx_payload = {
-            "inventory_item_id": item_id,
-            "action": "SALE",
-            "quantity_change": -quantity,
-            "quantity_before": latest_qty,
-            "quantity_after": round(latest_qty - quantity, 2),
-            "related_sale_id": sale_id,
-            "related_sale_item_id": sale_item.get("id"),
-            "performed_by": str(_user.id),
-            "note": f"Cart checkout for {buyer_name}",
-        }
-        tx_payload = {k: v for k, v in tx_payload.items() if k in transaction_columns and v is not None}
-        sb.table("inventory_transactions").insert(tx_payload).execute()
-        created_items.append(
-            {
-                "sale_item_id": sale_item.get("id"),
-                "service_job_id": service_job_id,
-                "inventory_item_id": item_id,
-                "item_name": inventory.get("item_name"),
-                "quantity": quantity,
-                "line_total": line_total,
-                "line_paid": line_paid,
-                "payment_status": line_status,
-                "remaining_quantity": round(latest_qty - quantity, 2),
-                "line_discount": line_discount,
-            }
-        )
-
-    _log_inventory_audit(
-        sb,
-        action="inventory_cart_checkout",
-        entity_type="inventory_sale",
-        entity_id=sale_id,
-        performed_by=str(_user.id),
-        detail={
-            "client_name": buyer_name,
-            "items": len(created_items),
-            "amount_charged": sale_total,
-            "paid_amount": paid_amount,
-            "payment_status": sale_status,
-            "service_job_ids": created_service_ids,
-        },
-    )
     recompute_and_persist_metrics(sb, source="supabase_after_inventory_cart_checkout")
     return {
         "sale_id": sale_id,
-        "service_job_ids": created_service_ids,
-        "items": created_items,
-        "subtotal": round(subtotal, 2),
-        "discount": discount,
-        "total_amount": sale_total,
-        "amount_paid": paid_amount,
-        "balance": balance,
-        "payment_status": sale_status,
+        "transaction_reference": row.get("transaction_reference"),
+        "payment_status": row.get("payment_status"),
+        "total_amount": _as_float(row.get("total_amount")),
+        "amount_paid": _as_float(row.get("paid_amount")),
+        "balance": _as_float(row.get("balance")),
+        "item_count": int(row.get("item_count") or 0),
+        "service_job_ids": [str(sale_item.get("service_job_id")) for sale_item in sale_items if sale_item.get("service_job_id")],
+        "items": sale_items,
     }
 
 
@@ -1021,17 +821,49 @@ def update_item(item_id: str, payload: StockUpdate, _user=Depends(get_current_us
     before_qty = _as_float(existing.get("quantity"))
     after_qty = _as_float(updated.get("quantity"))
     if before_qty != after_qty:
+        qty_delta = after_qty - before_qty
         sb.table("inventory_transactions").insert(
             {
                 "inventory_item_id": item_id,
                 "action": "MANUAL_ADJUSTMENT",
-                "quantity_change": after_qty - before_qty,
+                "quantity_change": qty_delta,
                 "quantity_before": before_qty,
                 "quantity_after": after_qty,
                 "performed_by": str(_user.id),
                 "note": "Manual inventory update",
             }
         ).execute()
+        try:
+            sb.table("inventory_movement_history").insert(
+                {
+                    "inventory_item_id": item_id,
+                    "movement_type": "MANUAL_ADJUSTMENT",
+                    "quantity_change": qty_delta,
+                    "quantity_before": before_qty,
+                    "quantity_after": after_qty,
+                    "reference_type": "inventory_item",
+                    "reference_id": item_id,
+                    "performed_by": str(_user.id),
+                    "note": "Manual inventory update",
+                    "metadata": {"fields_updated": sorted(list(data.keys()))},
+                }
+            ).execute()
+            sb.table("stock_adjustment_audit").insert(
+                {
+                    "inventory_item_id": item_id,
+                    "adjustment_type": "MANUAL_ADJUSTMENT",
+                    "quantity_before": before_qty,
+                    "quantity_after": after_qty,
+                    "quantity_change": qty_delta,
+                    "reason": "Manual inventory update",
+                    "reference_type": "inventory_item",
+                    "reference_id": item_id,
+                    "performed_by": str(_user.id),
+                    "detail": {"fields_updated": sorted(list(data.keys()))},
+                }
+            ).execute()
+        except Exception:
+            pass
 
     _log_inventory_audit(
         sb,

@@ -6,6 +6,7 @@ import Table from '@/components/Table'
 import Modal from '@/components/Modal'
 import LoadingSpinner from '@/components/LoadingSpinner'
 import { formatCurrency } from '@/lib/utils'
+import { buildIdempotencyKey } from '@/lib/idempotency'
 import { Plus, Pencil, Trash2, ShoppingCart, History, RotateCcw, X } from 'lucide-react'
 import toast from 'react-hot-toast'
 
@@ -321,6 +322,7 @@ export default function Inventory() {
         payment_method: values.payment_method || 'cash',
         discount: Number(values.discount || 0),
         assigned_staff_name: values.assigned_staff_name?.trim() || undefined,
+        idempotency_key: buildIdempotencyKey('cart-checkout'),
       })
     },
     onSuccess: (res) => {
