@@ -1,0 +1,59 @@
+BEGIN;
+
+DROP TRIGGER IF EXISTS trg_inventory_cart_items_updated ON inventory_cart_items;
+DROP TRIGGER IF EXISTS trg_inventory_carts_updated ON inventory_carts;
+DROP TRIGGER IF EXISTS trg_inventory_sale_items_updated_phase2 ON inventory_sale_items;
+DROP TRIGGER IF EXISTS trg_inventory_sales_updated_phase2 ON inventory_sales;
+DROP TRIGGER IF EXISTS trg_audit_logs_updated ON audit_logs;
+DROP TRIGGER IF EXISTS trg_sale_payments_updated ON sale_payments;
+DROP TRIGGER IF EXISTS trg_service_payments_updated ON service_payments;
+
+DROP TABLE IF EXISTS inventory_cart_items;
+DROP TABLE IF EXISTS inventory_carts;
+DROP TABLE IF EXISTS audit_logs;
+DROP TABLE IF EXISTS sale_payments;
+DROP TABLE IF EXISTS service_payments;
+
+ALTER TABLE IF EXISTS service_jobs DROP CONSTRAINT IF EXISTS fk_service_jobs_client_uuid;
+ALTER TABLE IF EXISTS inventory_sales DROP CONSTRAINT IF EXISTS fk_inventory_sales_client_uuid;
+
+ALTER TABLE IF EXISTS service_jobs
+    DROP COLUMN IF EXISTS client_uuid,
+    DROP COLUMN IF EXISTS invoice_reference,
+    DROP COLUMN IF EXISTS deleted_at,
+    DROP COLUMN IF EXISTS deleted_by,
+    DROP COLUMN IF EXISTS restored_at,
+    DROP COLUMN IF EXISTS restored_by;
+
+ALTER TABLE IF EXISTS inventory_items
+    DROP COLUMN IF EXISTS deleted_at,
+    DROP COLUMN IF EXISTS deleted_by,
+    DROP COLUMN IF EXISTS restored_at,
+    DROP COLUMN IF EXISTS restored_by;
+
+ALTER TABLE IF EXISTS clients
+    DROP COLUMN IF EXISTS deleted_at,
+    DROP COLUMN IF EXISTS deleted_by,
+    DROP COLUMN IF EXISTS restored_at,
+    DROP COLUMN IF EXISTS restored_by;
+
+ALTER TABLE IF EXISTS payments
+    DROP COLUMN IF EXISTS updated_at;
+
+ALTER TABLE IF EXISTS inventory_sales
+    DROP COLUMN IF EXISTS client_uuid,
+    DROP COLUMN IF EXISTS deleted_at,
+    DROP COLUMN IF EXISTS deleted_by,
+    DROP COLUMN IF EXISTS restored_at,
+    DROP COLUMN IF EXISTS restored_by;
+
+ALTER TABLE IF EXISTS inventory_sale_items
+    DROP COLUMN IF EXISTS updated_at,
+    DROP COLUMN IF EXISTS deleted_at,
+    DROP COLUMN IF EXISTS deleted_by,
+    DROP COLUMN IF EXISTS restored_at,
+    DROP COLUMN IF EXISTS restored_by;
+
+DROP FUNCTION IF EXISTS normalize_phone_digits(TEXT);
+
+COMMIT;

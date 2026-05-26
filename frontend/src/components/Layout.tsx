@@ -3,7 +3,7 @@ import { useMemo, useState } from 'react'
 import {
   LayoutDashboard, Users, FileText, Package,
   AlertCircle, DollarSign, TrendingDown, BarChart2,
-  Settings, RefreshCw, Sheet, LogOut, ClipboardList, Shield,
+  Settings, LogOut, ClipboardList, Shield,
 } from 'lucide-react'
 import { useAuthStore } from '@/store/authStore'
 import api from '@/lib/api'
@@ -33,24 +33,15 @@ const staffNav = [
 export default function Layout() {
   const { clear, user } = useAuthStore()
   const navigate = useNavigate()
-  const [pendingAction, setPendingAction] = useState<'refreshSheets' | 'refreshWorkspace' | 'sync' | 'resetRebuild' | null>(null)
+  const [pendingAction, setPendingAction] = useState<'refreshWorkspace' | null>(null)
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [logoFailed, setLogoFailed] = useState(false)
   const isAdmin = user?.role === 'admin'
   const navItems = isAdmin ? [...nav, { to: '/users', label: 'Users', icon: Shield }] : staffNav
 
   const warningText = useMemo(() => {
-    if (pendingAction === 'refreshSheets') {
-      return 'This will import latest Services, Inventory and Clients from Google Sheets into Supabase. Continue?'
-    }
     if (pendingAction === 'refreshWorkspace') {
       return 'This will recalculate dashboard and financial metrics from Supabase only. Continue?'
-    }
-    if (pendingAction === 'sync') {
-      return 'This will overwrite the selected Google Sheets with the latest Supabase data. Continue?'
-    }
-    if (pendingAction === 'resetRebuild') {
-      return 'This will backup imported rows, truncate Services/Inventory/Clients, clear cached metrics, re-import from Google Sheets, and rebuild all metrics. Continue?'
     }
     return ''
   }, [pendingAction])
@@ -58,37 +49,6 @@ export default function Layout() {
   const handleLogout = () => {
     clear()
     navigate('/login')
-  }
-
-  const handleRefreshFromSheets = async () => {
-    try {
-      const { data } = await api.post('/sync/refresh-from-google-sheets')
-      const sheetsRead = Array.isArray(data?.sheets_read) ? data.sheets_read.join(', ') : ''
-      const rowsProcessed = data?.rows_processed && typeof data.rows_processed === 'object'
-        ? Object.entries(data.rows_processed)
-            .map(([name, count]) => `${name}: ${count}`)
-            .join(' | ')
-        : ''
-      const rowsUpserted = data?.rows_upserted && typeof data.rows_upserted === 'object'
-        ? Object.entries(data.rows_upserted)
-            .map(([name, count]) => `${name}: ${count}`)
-            .join(' | ')
-        : ''
-      const valuesCalculated = data?.values_calculated && typeof data.values_calculated === 'object'
-        ? Object.entries(data.values_calculated)
-            .map(([name, value]) => `${name}: ${typeof value === 'object' ? JSON.stringify(value) : value}`)
-            .join(' | ')
-        : ''
-      toast.success([
-        sheetsRead ? `sheets read: ${sheetsRead}` : '',
-        rowsProcessed ? `rows processed: ${rowsProcessed}` : '',
-        rowsUpserted ? `rows upserted: ${rowsUpserted}` : '',
-        valuesCalculated ? `values calculated: ${valuesCalculated}` : '',
-      ].filter(Boolean).join(' • ') || 'Google Sheets imported')
-      window.location.reload()
-    } catch (e: any) {
-      toast.error(e?.response?.data?.detail ?? 'Google Sheets refresh failed')
-    }
   }
 
   const handleRefreshWorkspace = async () => {
@@ -106,68 +66,13 @@ export default function Layout() {
     }
   }
 
-  const handleSync = async () => {
-    try {
-      const res = await api.post('/sync/to-sheets')
-      const payload = res?.data || {}
-      const sheetCount = Array.isArray(payload.sheets_updated) ? payload.sheets_updated.length : 0
-      const rowsWritten = payload.rows_written && typeof payload.rows_written === 'object'
-        ? Object.entries(payload.rows_written)
-            .map(([name, count]) => `${name}: ${count}`)
-            .join(' | ')
-        : ''
-      const syncTime = payload.sync_timestamp ? new Date(payload.sync_timestamp).toLocaleString() : ''
-      toast.success([
-        sheetCount ? `${sheetCount} sheets updated` : '',
-        rowsWritten,
-        syncTime ? `at ${syncTime}` : '',
-      ].filter(Boolean).join(' • ') || 'Sync completed')
-    } catch (e: any) {
-      toast.error(e?.response?.data?.detail ?? 'Sync failed')
-    }
-  }
-
-  const handleResetImportedDataAndRebuild = async () => {
-    try {
-      const { data } = await api.post('/sync/reset-imported-data-rebuild')
-      const backedUp = data?.backup?.rows_backed_up && typeof data.backup.rows_backed_up === 'object'
-        ? Object.entries(data.backup.rows_backed_up)
-            .map(([name, count]) => `${name}: ${count}`)
-            .join(' | ')
-        : ''
-      const deleted = data?.deleted_rows && typeof data.deleted_rows === 'object'
-        ? Object.entries(data.deleted_rows)
-            .map(([name, count]) => `${name}: ${count}`)
-            .join(' | ')
-        : ''
-      const imported = data?.imported_rows && typeof data.imported_rows === 'object'
-        ? Object.entries(data.imported_rows)
-            .map(([name, count]) => `${name}: ${count}`)
-            .join(' | ')
-        : ''
-      toast.success([
-        backedUp ? `backed up: ${backedUp}` : '',
-        deleted ? `deleted: ${deleted}` : '',
-        imported ? `imported: ${imported}` : '',
-      ].filter(Boolean).join(' • ') || 'Reset and rebuild completed')
-      window.location.reload()
-    } catch (e: any) {
-      toast.error(e?.response?.data?.detail ?? 'Reset imported data and rebuild failed')
-    }
-  }
 
   const executeConfirmedAction = async () => {
     if (!pendingAction) return
     setIsSubmitting(true)
     try {
-      if (pendingAction === 'refreshSheets') {
-        await handleRefreshFromSheets()
-      } else if (pendingAction === 'refreshWorkspace') {
+      if (pendingAction === 'refreshWorkspace') {
         await handleRefreshWorkspace()
-      } else if (pendingAction === 'resetRebuild') {
-        await handleResetImportedDataAndRebuild()
-      } else {
-        await handleSync()
       }
       setPendingAction(null)
     } finally {
@@ -220,20 +125,9 @@ export default function Layout() {
 
         <div className="px-2 pb-4 space-y-1 border-t pt-3" style={{ borderColor: '#3b3b3b' }}>
           {isAdmin && (
-            <>
-              <button onClick={() => setPendingAction('refreshSheets')} className="flex items-center gap-3 w-full rounded-lg px-3 py-2 text-sm text-gray-200 hover:text-black transition-colors hover:bg-[#D4AF37]">
-                <RefreshCw size={16} /> Refresh from Google Sheets
-              </button>
-              <button onClick={() => setPendingAction('refreshWorkspace')} className="flex items-center gap-3 w-full rounded-lg px-3 py-2 text-sm text-gray-200 hover:text-black transition-colors hover:bg-[#D4AF37]">
-                <RefreshCw size={16} /> Refresh Workspace
-              </button>
-              <button onClick={() => setPendingAction('sync')} className="flex items-center gap-3 w-full rounded-lg px-3 py-2 text-sm text-gray-200 hover:text-black transition-colors hover:bg-[#D4AF37]">
-                <Sheet size={16} /> Sync to Google Sheets
-              </button>
-              <button onClick={() => setPendingAction('resetRebuild')} className="flex items-center gap-3 w-full rounded-lg px-3 py-2 text-sm text-gray-200 hover:text-black transition-colors hover:bg-[#D4AF37]">
-                <RefreshCw size={16} /> Reset Imported Data and Rebuild
-              </button>
-            </>
+            <button onClick={() => setPendingAction('refreshWorkspace')} className="flex items-center gap-3 w-full rounded-lg px-3 py-2 text-sm text-gray-200 hover:text-black transition-colors hover:bg-[#D4AF37]">
+              <Settings size={16} /> Refresh Workspace
+            </button>
           )}
           <button onClick={handleLogout} className="flex items-center gap-3 w-full rounded-lg px-3 py-2 text-sm text-gray-200 hover:text-black transition-colors hover:bg-[#D4AF37]">
             <LogOut size={16} /> Logout

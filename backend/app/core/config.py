@@ -62,11 +62,7 @@ class Settings(BaseSettings):
     SUPABASE_SERVICE_ROLE_KEY: str   # server-side key (never sent to browser)
     SUPABASE_ANON_KEY: str
 
-    # Google Sheets
-    GOOGLE_SERVICE_ACCOUNT_JSON: str = ""   # path, raw JSON, or base64-encoded JSON
-    GOOGLE_SHEET_ID: str = ""
-    GOOGLE_SHEET_ID_STOCKS: str = ""
-    GOOGLE_SHEET_ID_SERVICES: str = ""
+    # ...existing code...
 
     # App
     ALLOWED_ORIGINS: str = "http://localhost:5173,https://your-vercel-app.vercel.app"
@@ -89,10 +85,7 @@ class Settings(BaseSettings):
             "SUPABASE_ANON_KEY": self.SUPABASE_ANON_KEY,
         }
         operational = {
-            "GOOGLE_SERVICE_ACCOUNT_JSON": self.GOOGLE_SERVICE_ACCOUNT_JSON,
-            "GOOGLE_SHEET_ID": self.GOOGLE_SHEET_ID,
-            "GOOGLE_SHEET_ID_STOCKS": self.GOOGLE_SHEET_ID_STOCKS,
-            "GOOGLE_SHEET_ID_SERVICES": self.GOOGLE_SHEET_ID_SERVICES,
+            # ...existing code...
             "REDIS_URL": self.REDIS_URL,
         }
 

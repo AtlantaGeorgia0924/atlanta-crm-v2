@@ -490,9 +490,13 @@ class BillingCreate(BaseModel):
     client_phone: Optional[str] = None
     imei: Optional[str] = None
     serial_number: Optional[str] = None
+    device_model: Optional[str] = None
     condition: Optional[str] = None
     lock_status: Optional[str] = None
     unlock_method: Optional[str] = None
+    is_return: Optional[bool] = None
+    assigned_staff_id: Optional[str] = None
+    assigned_staff_name: Optional[str] = None
 
 
 class BillingUpdate(BaseModel):
@@ -513,9 +517,13 @@ class BillingUpdate(BaseModel):
     client_phone: Optional[str] = None
     imei: Optional[str] = None
     serial_number: Optional[str] = None
+    device_model: Optional[str] = None
     condition: Optional[str] = None
     lock_status: Optional[str] = None
     unlock_method: Optional[str] = None
+    is_return: Optional[bool] = None
+    assigned_staff_id: Optional[str] = None
+    assigned_staff_name: Optional[str] = None
 
 
 @router.get("")
@@ -1089,11 +1097,18 @@ def create_billing(payload: BillingCreate, _user=Depends(get_current_user)):
     actor_role = str(getattr(_user, "role", "staff") or "staff").strip().lower()
     actor_name = _actor_display_name(_user)
     now_iso = datetime.utcnow().isoformat()
+    client_id = data.get("client_id")
+    phone_number = data.get("phone_number") or data.get("client_phone")
+    if not client_id and data.get("client_name") and phone_number:
+        client = _upsert_client_phone(sb, str(data.get("client_name") or ""), str(phone_number or ""))
+        client_id = client.get("id")
+        if client.get("name"):
+            data["client_name"] = client.get("name")
 
     mapped = {
-        "client_id": data.get("client_id"),
+        "client_id": client_id,
         "client_name": data.get("client_name"),
-        "phone_number": data.get("phone_number") or data.get("client_phone"),
+        "phone_number": phone_number,
         "service_name": data.get("service_name"),
         "description": data.get("description"),
         "quantity": quantity,
@@ -1110,17 +1125,19 @@ def create_billing(payload: BillingCreate, _user=Depends(get_current_user)):
         "notes": data.get("notes"),
         "imei": data.get("imei"),
         "serial_number": data.get("serial_number"),
+        "device_model": data.get("device_model"),
         "condition": data.get("condition"),
         "lock_status": data.get("lock_status"),
         "unlock_method": data.get("unlock_method"),
+        "is_return": bool(data.get("is_return")) if "is_return" in data else False,
         "created_by": str(_user.id),
         "created_by_name": actor_name,
         "created_by_role": actor_role,
         "last_edited_by": str(_user.id),
         "last_edited_by_name": actor_name,
         "last_edited_at": now_iso,
-        "assigned_staff_id": str(_user.id),
-        "assigned_staff_name": actor_name,
+        "assigned_staff_id": data.get("assigned_staff_id") or str(_user.id),
+        "assigned_staff_name": data.get("assigned_staff_name") or actor_name,
     }
     mapped = {k: v for k, v in mapped.items() if k in service_columns and v is not None}
     result = sb.table("service_jobs").insert(mapped).execute()

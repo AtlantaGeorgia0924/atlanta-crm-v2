@@ -22,6 +22,7 @@ interface BillingRow {
   client_name: string
   phone_number?: string
   service_name: string
+  device_model?: string
   imei?: string
   serial_number?: string
   condition?: string
@@ -34,6 +35,7 @@ interface BillingRow {
   balance: number
   status: string
   payment_status?: string
+  is_return?: boolean
   invoice_date?: string
   service_date?: string
   notes?: string
@@ -97,6 +99,7 @@ interface FormValues {
   invoice_date: string
   due_date: string
   notes: string
+  assigned_staff_id?: string
 }
 
 interface ClientSuggestion {
@@ -255,7 +258,14 @@ export default function Billing() {
 
   const [searchInput, setSearchInput] = useState(search)
 
-  const { register, handleSubmit, reset, setValue, formState: { errors } } = useForm<FormValues>()
+  const { register, handleSubmit, reset, setValue, watch, formState: { errors } } = useForm<FormValues>()
+  const formPhone = watch('client_phone')
+  const formQty = Number(watch('quantity') || 0)
+  const formUnitPrice = Number(watch('unit_price') || 0)
+  const formPaid = Number(watch('amount_paid') || 0)
+  const formTotal = Math.max(formQty * formUnitPrice, 0)
+  const formOutstanding = Math.max(formTotal - Math.max(formPaid, 0), 0)
+  const formAutoStatus = formPaid <= 0 ? 'UNPAID' : formPaid < formTotal ? 'PART PAYMENT' : 'PAID'
 
   useEffect(() => { setSearchInput(search) }, [search])
 
@@ -332,6 +342,13 @@ export default function Billing() {
     enabled: showForm && clientSearch.trim().length > 0,
   })
 
+  const { data: phoneSearchResults } = useQuery({
+    queryKey: ['billing-phone-suggestions', formPhone],
+    queryFn: () => api.get('/clients', { params: { search: formPhone, page: 1, page_size: 3 } }).then((r) => r.data),
+    enabled: showForm && String(formPhone || '').replace(/\D/g, '').length >= 7,
+    staleTime: 10_000,
+  })
+
   const suggestions: ClientSuggestion[] = useMemo(
     () => (clientSearchResults?.items ?? []).map((c: any) => ({
       id: String(c.id),
@@ -345,6 +362,21 @@ export default function Billing() {
     [clientSearchResults]
   )
 
+  useEffect(() => {
+    if (!showForm || editRow) return
+    const normalizedPhone = normalizePhone(String(formPhone || ''))
+    if (!normalizedPhone) return
+    const match = (phoneSearchResults?.items ?? []).find((c: any) => normalizePhone(String(c.phone_number ?? c.phone ?? '')) === normalizedPhone)
+    if (!match) return
+    const existingName = String(match.client_name ?? match.name ?? '').trim()
+    if (existingName) {
+      setSelectedClientId(String(match.id))
+      setClientSearch(existingName)
+      setValue('client_id', String(match.id))
+      setValue('client_name', existingName)
+    }
+  }, [phoneSearchResults, formPhone, showForm, editRow, setValue])
+
   const saveMutation = useMutation({
     mutationFn: async (values: FormValues) => {
       let clientId = selectedClientId || values.client_id || ''
@@ -354,18 +386,6 @@ export default function Billing() {
           (s) => s.name.toLowerCase() === String(values.client_name || '').trim().toLowerCase()
         )
         if (maybeExisting) clientId = maybeExisting.id
-      }
-
-      if (!editRow && !clientId && values.client_name?.trim() && values.client_phone?.trim()) {
-        const createClientRes = await api.post('/clients', {
-          client_name: values.client_name,
-          phone_number: values.client_phone,
-          email: values.client_email || undefined,
-          address: values.client_address || undefined,
-          company: values.client_company || undefined,
-          notes: values.client_notes || undefined,
-        })
-        clientId = createClientRes?.data?.id || ''
       }
 
       const quantity = Number(values.quantity)
@@ -397,7 +417,9 @@ export default function Billing() {
       const payload = {
         ...values,
         client_name: normalizedClientName,
+        client_phone: values.client_phone?.trim() ? normalizePhone(values.client_phone.trim()) : undefined,
         service_name: normalizedServiceName,
+        device_model: values.device_model?.trim() || undefined,
         imei: values.imei?.trim() || undefined,
         serial_number: values.serial_number?.trim() || undefined,
         condition: values.condition?.trim() || undefined,
@@ -411,6 +433,9 @@ export default function Billing() {
         due_date: values.due_date?.trim() ? values.due_date : undefined,
         notes: values.notes?.trim() ? values.notes : undefined,
         client_id: clientId || undefined,
+        is_return: Boolean(values.is_return),
+        assigned_staff_id: values.assigned_staff_id || undefined,
+        assigned_staff_name: userOptions.find((u) => u.id === values.assigned_staff_id)?.label || undefined,
       }
       const finalPayload = { ...payload }
 
@@ -558,6 +583,7 @@ export default function Billing() {
         client_name: details?.client_name ?? row.client_name,
         client_phone: details?.phone_number ?? row.phone_number ?? '',
         service_name: details?.service_name ?? row.service_name,
+        device_model: details?.device_model ?? '',
         imei: details?.imei ?? '',
         serial_number: details?.serial_number ?? '',
         condition: details?.condition ?? '',
@@ -571,6 +597,8 @@ export default function Billing() {
         invoice_date: String(details?.invoice_date || details?.service_date || row.invoice_date || row.service_date || '').slice(0, 10),
         due_date: String(details?.due_date || '').slice(0, 10),
         notes: details?.notes ?? '',
+        assigned_staff_id: details?.assigned_staff_id ?? '',
+        is_return: Boolean(details?.is_return),
       } as FormValues)
       setClientSearch(details?.client_name ?? row.client_name)
       setShowForm(true)

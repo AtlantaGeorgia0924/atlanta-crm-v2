@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from 'react'
+import { useState, useRef, useEffect, useMemo } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useForm } from 'react-hook-form'
 import api from '@/lib/api'
@@ -6,7 +6,7 @@ import Table from '@/components/Table'
 import Modal from '@/components/Modal'
 import LoadingSpinner from '@/components/LoadingSpinner'
 import { formatCurrency } from '@/lib/utils'
-import { Plus, Pencil, Trash2, ShoppingCart, History, RotateCcw } from 'lucide-react'
+import { Plus, Pencil, Trash2, ShoppingCart, History, RotateCcw, X } from 'lucide-react'
 import toast from 'react-hot-toast'
 
 const CONDITION_OPTIONS = ['Brand New', 'Open Box', 'Used - Clean', 'Used - Average', 'Used - Faulty', 'For Parts']
@@ -71,16 +71,6 @@ interface GroupRow {
   product_count: number
 }
 
-interface SellFormValues {
-  quantity: number
-  selling_price?: number
-  client_name: string
-  client_phone?: string
-  payment_status: 'PAID' | 'PART PAYMENT' | 'UNPAID'
-  paid_amount: number
-  notes?: string
-}
-
 interface InventoryTransaction {
   id: string
   action: string
@@ -96,6 +86,23 @@ interface InventoryTransaction {
 type InventoryView = 'products' | 'pending_deals' | 'groups' | 'out_of_stock'
 type CreateMode = 'single' | 'multiple'
 
+interface CartItem extends StockItem {
+  cart_quantity: number
+  cart_unit_price: number
+}
+
+interface CheckoutFormValues {
+  buyer_name: string
+  buyer_phone?: string
+  notes?: string
+  amount_paid: number
+  payment_method: string
+  discount: number
+  assigned_staff_name?: string
+}
+
+const CART_STORAGE_KEY = 'inventory-cart'
+
 export default function Inventory() {
   const qc = useQueryClient()
   const [search, setSearch] = useState('')
@@ -110,11 +117,21 @@ export default function Inventory() {
   const [newGroupName, setNewGroupName] = useState('')
   const [editingGroup, setEditingGroup] = useState<GroupRow | null>(null)
   const [groupRenameValue, setGroupRenameValue] = useState('')
-  const [sellItem, setSellItem] = useState<StockItem | null>(null)
   const [historyItem, setHistoryItem] = useState<StockItem | null>(null)
   const [historyPage, setHistoryPage] = useState(1)
   const [supplierQuery, setSupplierQuery] = useState('')
   const [showSupplierDropdown, setShowSupplierDropdown] = useState(false)
+  const [showCart, setShowCart] = useState(false)
+  const [cartClientQuery, setCartClientQuery] = useState('')
+  const [showCartClientDropdown, setShowCartClientDropdown] = useState(false)
+  const [cart, setCart] = useState<CartItem[]>(() => {
+    try {
+      const parsed = JSON.parse(localStorage.getItem(CART_STORAGE_KEY) || '[]')
+      return Array.isArray(parsed) ? parsed : []
+    } catch {
+      return []
+    }
+  })
   const supplierRef = useRef<HTMLDivElement>(null)
 
   const { data, isLoading } = useQuery({
@@ -137,25 +154,27 @@ export default function Inventory() {
 
   const { register, handleSubmit, reset, setValue: setFormValue, watch: watchForm } = useForm<FormValues>()
   const {
-    register: registerSell,
-    handleSubmit: handleSubmitSell,
-    reset: resetSell,
-    watch: watchSell,
-    setValue: setSellValue,
-  } = useForm<SellFormValues>({
+    register: registerCheckout,
+    handleSubmit: handleSubmitCheckout,
+    reset: resetCheckout,
+    watch: watchCheckout,
+    setValue: setCheckoutValue,
+  } = useForm<CheckoutFormValues>({
     defaultValues: {
-      quantity: 1,
-      selling_price: 0,
-      payment_status: 'UNPAID',
-      paid_amount: 0,
+      payment_method: 'cash',
+      amount_paid: 0,
+      discount: 0,
     },
   })
 
   const groups: GroupRow[] = groupsData?.groups ?? []
-
-  const selectedSellQty = Number(watchSell('quantity') || 0)
-  const selectedSellPrice = Number(watchSell('selling_price') || 0)
-  const estimatedSaleTotal = selectedSellQty > 0 ? selectedSellQty * selectedSellPrice : 0
+  const cartCount = useMemo(() => cart.reduce((sum, item) => sum + Number(item.cart_quantity || 0), 0), [cart])
+  const cartSubtotal = useMemo(() => cart.reduce((sum, item) => sum + Number(item.cart_quantity || 0) * Number(item.cart_unit_price || 0), 0), [cart])
+  const checkoutDiscount = Math.min(Math.max(Number(watchCheckout('discount') || 0), 0), cartSubtotal)
+  const checkoutTotal = Math.max(cartSubtotal - checkoutDiscount, 0)
+  const checkoutPaid = Math.min(Math.max(Number(watchCheckout('amount_paid') || 0), 0), checkoutTotal)
+  const checkoutBalance = Math.max(checkoutTotal - checkoutPaid, 0)
+  const checkoutStatus = checkoutPaid <= 0 ? 'UNPAID' : checkoutPaid < checkoutTotal ? 'PART PAYMENT' : 'PAID'
 
   const previouslyLocked = watchForm('previously_locked')
 
@@ -170,10 +189,21 @@ export default function Inventory() {
     return () => document.removeEventListener('mousedown', handler)
   }, [])
 
+  useEffect(() => {
+    localStorage.setItem(CART_STORAGE_KEY, JSON.stringify(cart))
+  }, [cart])
+
   const { data: clientSuggestions } = useQuery<{ items: ClientSuggestion[] }>({
     queryKey: ['clients-search', supplierQuery],
     queryFn: () => api.get('/clients', { params: { search: supplierQuery, page_size: 8 } }).then((r) => r.data),
     enabled: supplierQuery.trim().length >= 2,
+    staleTime: 10_000,
+  })
+
+  const { data: cartClientSuggestions } = useQuery<{ items: ClientSuggestion[] }>({
+    queryKey: ['cart-client-search', cartClientQuery],
+    queryFn: () => api.get('/clients', { params: { search: cartClientQuery, page_size: 8 } }).then((r) => r.data),
+    enabled: showCart && cartClientQuery.trim().length >= 2,
     staleTime: 10_000,
   })
 
@@ -275,22 +305,40 @@ export default function Inventory() {
     onError: (e: any) => toast.error(e?.response?.data?.detail ?? 'Assign group failed'),
   })
 
-  const sellMutation = useMutation({
-    mutationFn: (values: SellFormValues) => {
-      if (!sellItem) throw new Error('No inventory item selected')
-      return api.post(`/inventory/${sellItem.id}/sell`, values)
+  const checkoutMutation = useMutation({
+    mutationFn: (values: CheckoutFormValues) => {
+      if (!cart.length) throw new Error('Cart is empty')
+      return api.post('/inventory/checkout', {
+        items: cart.map((item) => ({
+          item_id: item.id,
+          quantity: Number(item.cart_quantity || 0),
+          unit_price: Number(item.cart_unit_price || 0),
+        })),
+        buyer_name: values.buyer_name?.trim(),
+        buyer_phone: values.buyer_phone?.trim() ? normalizeNigeriaPhone(values.buyer_phone.trim()) : undefined,
+        notes: values.notes?.trim() || undefined,
+        amount_paid: Number(values.amount_paid || 0),
+        payment_method: values.payment_method || 'cash',
+        discount: Number(values.discount || 0),
+        assigned_staff_name: values.assigned_staff_name?.trim() || undefined,
+      })
     },
     onSuccess: (res) => {
-      toast.success(`Sold successfully. Remaining quantity: ${res?.data?.remaining_quantity ?? '-'}`)
+      toast.success(`Checkout complete: ${res?.data?.items?.length ?? cart.length} item(s) sold`)
       qc.invalidateQueries({ queryKey: ['inventory'] })
+      qc.invalidateQueries({ queryKey: ['inventory-transactions'] })
       qc.invalidateQueries({ queryKey: ['billing'] })
       qc.invalidateQueries({ queryKey: ['billing-grouped'] })
       qc.invalidateQueries({ queryKey: ['debtors'] })
       qc.invalidateQueries({ queryKey: ['dashboard'] })
-      setSellItem(null)
-      resetSell()
+      qc.invalidateQueries({ queryKey: ['cashflow-page-data'] })
+      setCart([])
+      localStorage.removeItem(CART_STORAGE_KEY)
+      setShowCart(false)
+      setCartClientQuery('')
+      resetCheckout({ payment_method: 'cash', amount_paid: 0, discount: 0 })
     },
-    onError: (e: any) => toast.error(e?.response?.data?.detail ?? 'Sell failed'),
+    onError: (e: any) => toast.error(e?.response?.data?.detail ?? 'Checkout failed'),
   })
 
   const reverseSaleMutation = useMutation({
@@ -321,17 +369,51 @@ export default function Inventory() {
     setShowForm(true)
   }
 
-  const openSell = (row: StockItem) => {
-    setSellItem(row)
-    resetSell({
-      quantity: 1,
-      selling_price: Number(row.unit_price || 0),
-      client_name: '',
-      client_phone: '',
-      payment_status: 'UNPAID',
-      paid_amount: 0,
-      notes: '',
+  const addToCart = (row: StockItem) => {
+    const stockQty = Number(row.quantity || 0)
+    if (stockQty <= 0) {
+      toast.error('Item is out of stock')
+      return
+    }
+    setCart((current) => {
+      const existing = current.find((item) => item.id === row.id)
+      if (existing) {
+        if (Number(existing.cart_quantity || 0) >= stockQty) {
+          toast.error(`Cannot add more than ${stockQty} in stock`)
+          return current
+        }
+        return current.map((item) =>
+          item.id === row.id
+            ? { ...item, cart_quantity: Number(item.cart_quantity || 0) + 1 }
+            : item,
+        )
+      }
+      return [...current, { ...row, cart_quantity: 1, cart_unit_price: Number(row.unit_price || 0) }]
     })
+    toast.success('Added to cart')
+  }
+
+  const updateCartQuantity = (itemId: string, quantity: number) => {
+    setCart((current) =>
+      current.flatMap((item) => {
+        if (item.id !== itemId) return [item]
+        const maxQty = Number(item.quantity || 0)
+        const nextQty = Math.min(Math.max(Number(quantity || 0), 0), maxQty)
+        return nextQty > 0 ? [{ ...item, cart_quantity: nextQty }] : []
+      }),
+    )
+  }
+
+  const updateCartPrice = (itemId: string, unitPrice: number) => {
+    setCart((current) =>
+      current.map((item) =>
+        item.id === itemId ? { ...item, cart_unit_price: Math.max(Number(unitPrice || 0), 0) } : item,
+      ),
+    )
+  }
+
+  const removeFromCart = (itemId: string) => {
+    setCart((current) => current.filter((item) => item.id !== itemId))
   }
 
   const openHistory = (row: StockItem) => {
@@ -419,12 +501,12 @@ export default function Inventory() {
       render: (r: StockItem) => (
         <div className="flex gap-2">
           <button
-            onClick={() => openSell(r)}
+            onClick={() => addToCart(r)}
             disabled={Number(r.quantity) <= 0}
-            className="text-gray-400 hover:text-emerald-600 disabled:opacity-40"
-            title="Sell Product"
+            className="inline-flex items-center gap-1 text-xs text-gray-600 hover:text-emerald-700 disabled:opacity-40"
+            title="Add to Cart"
           >
-            <ShoppingCart size={14} />
+            <ShoppingCart size={14} /> Add to Cart
           </button>
           <button onClick={() => openHistory(r)} className="text-gray-400 hover:text-blue-600" title="Transaction History"><History size={14} /></button>
           <button onClick={() => openEdit(r)} className="text-gray-400 hover:text-primary-600"><Pencil size={14} /></button>
@@ -438,18 +520,29 @@ export default function Inventory() {
     <div className="p-8 space-y-5">
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-bold">Inventory</h1>
-        <button
-          onClick={() => {
-            setEditRow(null)
-            setCreateMode('single')
-            reset({ quantity: 1, unit: 'pcs', unit_cost: 0, reorder_level: 0, product_status: 'AVAILABLE', previously_locked: false })
-            setSupplierQuery('')
-            setShowForm(true)
-          }}
-          className="btn-primary"
-        >
-          <Plus size={15} /> Add Product
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setShowCart(true)}
+            className="btn-secondary relative"
+          >
+            <ShoppingCart size={15} /> Checkout / Sell Out
+            {cartCount > 0 && (
+              <span className="ml-1 rounded-full bg-black px-2 py-0.5 text-xs text-white">{cartCount}</span>
+            )}
+          </button>
+          <button
+            onClick={() => {
+              setEditRow(null)
+              setCreateMode('single')
+              reset({ quantity: 1, unit: 'pcs', unit_cost: 0, reorder_level: 0, product_status: 'AVAILABLE', previously_locked: false })
+              setSupplierQuery('')
+              setShowForm(true)
+            }}
+            className="btn-primary"
+          >
+            <Plus size={15} /> Add Product
+          </button>
+        </div>
       </div>
 
       <div className="flex gap-2">
@@ -760,113 +853,164 @@ export default function Inventory() {
       </Modal>
 
       <Modal
-        title={sellItem ? `Sell Product - ${sellItem.item_name}` : 'Sell Product'}
-        open={!!sellItem}
-        onClose={() => setSellItem(null)}
-        size="md"
+        title="Inventory Cart"
+        open={showCart}
+        onClose={() => setShowCart(false)}
+        size="lg"
+        bodyClassName="overflow-y-auto max-h-[70vh]"
         footer={(
           <div className="flex justify-end gap-2">
-            <button type="button" className="btn-secondary" onClick={() => setSellItem(null)}>Cancel</button>
+            <button type="button" className="btn-secondary" onClick={() => setShowCart(false)}>Close</button>
             <button
               type="submit"
-              form="sell-product-form"
+              form="inventory-checkout-form"
               className="btn-primary"
-              disabled={sellMutation.isPending}
+              disabled={checkoutMutation.isPending || cart.length === 0}
             >
-              {sellMutation.isPending ? 'Processing...' : 'Confirm Sale'}
+              {checkoutMutation.isPending ? 'Processing...' : 'Checkout / Sell Out'}
             </button>
           </div>
         )}
       >
-        {sellItem && (
-          <form
-            id="sell-product-form"
-            className="space-y-3"
-            onSubmit={handleSubmitSell((values) => {
-              if (Number(values.quantity || 0) > Number(sellItem.quantity || 0)) {
-                toast.error(`Cannot oversell. Remaining quantity is ${sellItem.quantity}`)
-                return
-              }
-              sellMutation.mutate(values)
-            })}
-          >
-            <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
-              Remaining quantity: <strong>{sellItem.quantity} {sellItem.unit || 'pcs'}</strong>
+        <form
+          id="inventory-checkout-form"
+          className="space-y-4"
+          onSubmit={handleSubmitCheckout((values) => {
+            if (!cart.length) {
+              toast.error('Cart is empty')
+              return
+            }
+            const invalid = cart.find((item) => Number(item.cart_quantity || 0) > Number(item.quantity || 0))
+            if (invalid) {
+              toast.error(`Cannot oversell ${invalid.item_name}. Remaining quantity is ${invalid.quantity}`)
+              return
+            }
+            checkoutMutation.mutate(values)
+          })}
+        >
+          {cart.length === 0 ? (
+            <div className="rounded-lg border border-dashed border-gray-300 p-6 text-center text-sm text-gray-500">
+              No items in cart
             </div>
-
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label className="form-label">Quantity</label>
-                <input
-                  type="number"
-                  min="0.01"
-                  step="0.01"
-                  className="form-input"
-                  {...registerSell('quantity', { valueAsNumber: true, min: 0.01 })}
-                />
-              </div>
-              <div>
-                <label className="form-label">Selling Price</label>
-                <input
-                  type="number"
-                  min="0.01"
-                  step="0.01"
-                  className="form-input"
-                  {...registerSell('selling_price', { valueAsNumber: true, min: 0.01 })}
-                />
-              </div>
-              <div>
-                <label className="form-label">Client Name</label>
-                <input className="form-input" {...registerSell('client_name', { required: true })} />
-              </div>
-              <div>
-                <label className="form-label">Client Phone</label>
-                <input className="form-input" {...registerSell('client_phone')} />
-              </div>
-              <div>
-                <label className="form-label">Payment Status</label>
-                <select
-                  className="form-input"
-                  {...registerSell('payment_status')}
-                  onChange={(e) => {
-                    const nextStatus = e.target.value as 'PAID' | 'PART PAYMENT' | 'UNPAID'
-                    setSellValue('payment_status', nextStatus)
-                    if (nextStatus === 'PAID') {
-                      setSellValue('paid_amount', estimatedSaleTotal)
-                    }
-                    if (nextStatus === 'UNPAID') {
-                      setSellValue('paid_amount', 0)
-                    }
-                  }}
-                >
-                  <option value="PAID">PAID</option>
-                  <option value="PART PAYMENT">PART PAYMENT</option>
-                  <option value="UNPAID">UNPAID</option>
-                </select>
-              </div>
-              <div>
-                <label className="form-label">Paid Amount</label>
-                <input
-                  type="number"
-                  min="0"
-                  step="0.01"
-                  className="form-input"
-                  {...registerSell('paid_amount', { valueAsNumber: true, min: 0 })}
-                />
-              </div>
+          ) : (
+            <div className="space-y-2">
+              {cart.map((item) => (
+                <div key={item.id} className="grid grid-cols-[1fr_7rem_8rem_2rem] items-center gap-2 rounded-lg border border-gray-200 p-3">
+                  <div className="min-w-0">
+                    <p className="truncate text-sm font-semibold text-gray-900">{item.item_name}</p>
+                    <p className="text-xs text-gray-500">Stock: {item.quantity} {item.unit || 'pcs'}</p>
+                  </div>
+                  <input
+                    type="number"
+                    min="0.01"
+                    max={Number(item.quantity || 0)}
+                    step="0.01"
+                    className="form-input"
+                    value={item.cart_quantity}
+                    onChange={(e) => updateCartQuantity(item.id, Number(e.target.value))}
+                  />
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    className="form-input"
+                    value={item.cart_unit_price}
+                    onChange={(e) => updateCartPrice(item.id, Number(e.target.value))}
+                  />
+                  <button type="button" className="text-gray-400 hover:text-red-600" onClick={() => removeFromCart(item.id)} title="Remove item">
+                    <X size={16} />
+                  </button>
+                </div>
+              ))}
             </div>
+          )}
 
+          <div className="grid grid-cols-2 gap-3">
+            <div className="relative">
+              <label className="form-label">Buyer / Client Name</label>
+              <input
+                className="form-input"
+                {...registerCheckout('buyer_name', { required: true })}
+                value={cartClientQuery}
+                onChange={(e) => {
+                  setCartClientQuery(e.target.value)
+                  setCheckoutValue('buyer_name', e.target.value)
+                  setShowCartClientDropdown(true)
+                }}
+                onFocus={() => setShowCartClientDropdown(true)}
+              />
+              {showCartClientDropdown && cartClientQuery.trim() && (cartClientSuggestions?.items ?? []).length > 0 && (
+                <div className="absolute z-20 mt-1 w-full rounded-lg border bg-white shadow-lg" style={{ borderColor: '#d4af37' }}>
+                  {(cartClientSuggestions?.items ?? []).map((client) => (
+                    <button
+                      type="button"
+                      key={client.id}
+                      className="block w-full px-3 py-2 text-left text-sm hover:bg-[#fff9e7]"
+                      onClick={() => {
+                        setCartClientQuery(client.name)
+                        setCheckoutValue('buyer_name', client.name)
+                        setCheckoutValue('buyer_phone', client.phone || '')
+                        setShowCartClientDropdown(false)
+                      }}
+                    >
+                      <div className="font-medium">{client.name}</div>
+                      <div className="text-xs text-gray-500">{client.phone || 'No phone'}</div>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
             <div>
-              <label className="form-label">Notes (optional)</label>
-              <textarea className="form-input" rows={2} {...registerSell('notes')} />
+              <label className="form-label">Buyer Phone</label>
+              <input className="form-input" {...registerCheckout('buyer_phone')} />
             </div>
+            <div>
+              <label className="form-label">Payment Method</label>
+              <select className="form-input" {...registerCheckout('payment_method')}>
+                <option value="cash">Cash</option>
+                <option value="bank">Bank</option>
+                <option value="pos">POS</option>
+                <option value="transfer">Transfer</option>
+                <option value="other">Other</option>
+              </select>
+            </div>
+            <div>
+              <label className="form-label">Assigned Staff</label>
+              <input className="form-input" {...registerCheckout('assigned_staff_name')} />
+            </div>
+            <div>
+              <label className="form-label">Discount</label>
+              <input type="number" step="0.01" min="0" className="form-input" {...registerCheckout('discount', { valueAsNumber: true })} />
+            </div>
+            <div>
+              <label className="form-label">Amount Paid</label>
+              <input type="number" step="0.01" min="0" className="form-input" {...registerCheckout('amount_paid', { valueAsNumber: true })} />
+            </div>
+            <div className="col-span-2">
+              <label className="form-label">Notes</label>
+              <textarea className="form-input" rows={2} {...registerCheckout('notes')} />
+            </div>
+          </div>
 
-            <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-700">
-              <div>Amount charged: {formatCurrency(estimatedSaleTotal, currency)}</div>
-              <div>Expected balance: {formatCurrency(Math.max(estimatedSaleTotal - Number(watchSell('paid_amount') || 0), 0), currency)}</div>
+          <div className="grid grid-cols-4 gap-2 rounded-lg border border-gray-200 bg-gray-50 p-3 text-sm">
+            <div>
+              <p className="text-gray-500">Subtotal</p>
+              <p className="font-semibold">{formatCurrency(cartSubtotal, currency)}</p>
             </div>
-          </form>
-        )}
+            <div>
+              <p className="text-gray-500">Total</p>
+              <p className="font-semibold">{formatCurrency(checkoutTotal, currency)}</p>
+            </div>
+            <div>
+              <p className="text-gray-500">Outstanding</p>
+              <p className="font-semibold text-red-600">{formatCurrency(checkoutBalance, currency)}</p>
+            </div>
+            <div>
+              <p className="text-gray-500">Status</p>
+              <p className="font-semibold">{checkoutStatus}</p>
+            </div>
+          </div>
+        </form>
       </Modal>
 
       <Modal

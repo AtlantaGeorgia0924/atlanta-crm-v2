@@ -12,9 +12,6 @@ def get_settings(_user=Depends(get_current_user)):
     result = sb.table("app_settings").select("*").execute()
     settings_map = {row["key"]: row["value"] for row in result.data}
     settings_map.setdefault("currency", "NGN")
-    settings_map.setdefault("google_sheet_id", "")
-    settings_map.setdefault("google_sheet_id_stocks", "")
-    settings_map.setdefault("google_sheet_id_services", "")
     return settings_map
 
 

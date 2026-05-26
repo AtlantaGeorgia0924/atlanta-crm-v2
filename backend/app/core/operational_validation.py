@@ -5,10 +5,6 @@ import httpx
 
 from app.core.cache import cache_hit_rate
 from app.core.config import EnvValidationIssue, settings
-from app.core.google_sheets_auth import (
-    GoogleSheetsConfigError,
-    build_google_service_account_credentials,
-)
 from app.db.supabase_client import get_supabase, get_supabase_auth
 
 logger = logging.getLogger(__name__)
@@ -87,52 +83,6 @@ def validate_redis_connectivity() -> OperationalCheck:
     return OperationalCheck("redis", False, "redis unavailable or falling back to local cache")
 
 
-def validate_google_sheets_access(timeout_seconds: float = 10.0) -> list[OperationalCheck]:
-    checks: list[OperationalCheck] = []
-    services_sheet_id = settings.GOOGLE_SHEET_ID_SERVICES or settings.GOOGLE_SHEET_ID
-    stocks_sheet_id = settings.GOOGLE_SHEET_ID_STOCKS or settings.GOOGLE_SHEET_ID
-
-    if not services_sheet_id:
-        checks.append(OperationalCheck("google_sheets:services_id", False, "services sheet ID is missing"))
-    if not stocks_sheet_id:
-        checks.append(OperationalCheck("google_sheets:stocks_id", False, "stocks sheet ID is missing"))
-    if not settings.GOOGLE_SERVICE_ACCOUNT_JSON.strip():
-        checks.append(OperationalCheck("google_sheets:service_account", False, "service account JSON is missing"))
-        return checks
-
-    try:
-        import gspread
-
-        scopes = ["https://www.googleapis.com/auth/spreadsheets"]
-        creds = build_google_service_account_credentials(scopes)
-        gc = gspread.authorize(creds)
-        checks.append(OperationalCheck("google_sheets:service_account", True, "service account credentials initialized"))
-
-        expected_tabs = {
-            "services": (services_sheet_id, ["Services", "Clients", "Expenses", "Cash Flow", "Allowance Withdrawals"]),
-            "stocks": (stocks_sheet_id, ["Inventory"]),
-        }
-        for purpose, (sheet_id, tabs) in expected_tabs.items():
-            if not sheet_id:
-                continue
-            try:
-                spreadsheet = gc.open_by_key(sheet_id)
-                titles = {ws.title for ws in spreadsheet.worksheets()}
-                missing_tabs = [tab for tab in tabs if tab not in titles]
-                if missing_tabs:
-                    checks.append(OperationalCheck(f"google_sheets:{purpose}", False, f"missing required tabs: {', '.join(missing_tabs)}"))
-                else:
-                    checks.append(OperationalCheck(f"google_sheets:{purpose}", True, "spreadsheet and required tabs are accessible"))
-            except Exception as exc:
-                checks.append(OperationalCheck(f"google_sheets:{purpose}", False, f"spreadsheet access failed: {exc.__class__.__name__}"))
-    except GoogleSheetsConfigError as exc:
-        checks.append(OperationalCheck("google_sheets:service_account", False, str(exc)))
-    except Exception as exc:
-        checks.append(OperationalCheck("google_sheets:service_account", False, f"initialization failed: {exc.__class__.__name__}"))
-
-    return checks
-
-
 def run_startup_validation() -> list[OperationalCheck]:
     production = settings.ENV == "production"
     checks = validate_required_env(production=production)
@@ -140,7 +90,6 @@ def run_startup_validation() -> list[OperationalCheck]:
     if not any(check.name.startswith("env:SUPABASE") and not check.ok for check in checks):
         checks.extend(validate_supabase_connectivity())
     checks.append(validate_redis_connectivity())
-    checks.extend(validate_google_sheets_access())
 
     for check in checks:
         log = logger.info if check.ok else logger.warning
