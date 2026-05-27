@@ -2,6 +2,15 @@ BEGIN;
 
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
+CREATE OR REPLACE FUNCTION prevent_append_only_mutation()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    RAISE EXCEPTION '% is append-only; % is not allowed', TG_TABLE_NAME, TG_OP;
+END;
+$$;
+
 ALTER TABLE IF EXISTS inventory_sales
     ADD COLUMN IF NOT EXISTS checkout_idempotency_key TEXT,
     ADD COLUMN IF NOT EXISTS transaction_reference TEXT;
@@ -20,6 +29,11 @@ ALTER TABLE IF EXISTS payments
 CREATE UNIQUE INDEX IF NOT EXISTS ux_payments_idempotency_key
 ON payments(idempotency_key)
 WHERE idempotency_key IS NOT NULL;
+
+DROP TRIGGER IF EXISTS trg_payments_append_only ON payments;
+CREATE TRIGGER trg_payments_append_only
+BEFORE UPDATE OR DELETE ON payments
+FOR EACH ROW EXECUTE FUNCTION prevent_append_only_mutation();
 
 CREATE TABLE IF NOT EXISTS inventory_movement_history (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -515,7 +529,15 @@ BEGIN
         RAISE EXCEPTION 'Duplicate cart items are not allowed';
     END IF;
 
-    FOR v_item IN SELECT value FROM jsonb_array_elements(p_items)
+    -- Lock inventory rows in deterministic order to reduce deadlock risk.
+    FOR v_item IN
+        SELECT jsonb_build_object(
+            'item_id', req.item_id,
+            'quantity', req.quantity,
+            'unit_price', req.unit_price
+        )
+        FROM jsonb_to_recordset(p_items) AS req(item_id TEXT, quantity NUMERIC, unit_price NUMERIC)
+        ORDER BY req.item_id::UUID
     LOOP
         v_item_id := NULLIF(BTRIM(COALESCE(v_item->>'item_id', '')), '')::UUID;
         v_qty := ROUND(COALESCE((v_item->>'quantity')::NUMERIC, 0), 2);
@@ -919,6 +941,35 @@ BEGIN
         v_balance,
         cardinality(v_service_ids),
         COALESCE(array_to_string(v_service_ids, ','), '');
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION cleanup_stale_idempotency_keys(
+    p_older_than INTERVAL DEFAULT INTERVAL '180 days'
+)
+RETURNS TABLE (
+    payments_cleared BIGINT,
+    checkouts_cleared BIGINT
+)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_payments BIGINT := 0;
+    v_checkouts BIGINT := 0;
+BEGIN
+    UPDATE payments
+    SET idempotency_key = NULL
+    WHERE idempotency_key IS NOT NULL
+      AND created_at < NOW() - p_older_than;
+    GET DIAGNOSTICS v_payments = ROW_COUNT;
+
+    UPDATE inventory_sales
+    SET checkout_idempotency_key = NULL
+    WHERE checkout_idempotency_key IS NOT NULL
+      AND COALESCE(sold_at, created_at, NOW()) < NOW() - p_older_than;
+    GET DIAGNOSTICS v_checkouts = ROW_COUNT;
+
+    RETURN QUERY SELECT v_payments, v_checkouts;
 END;
 $$;
 

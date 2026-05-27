@@ -27,7 +27,7 @@ WHERE migration_version = '026_transaction_safety_hardening'
 
 SELECT 'transaction_functions_present' AS check_name, COUNT(*)::BIGINT AS actual
 FROM pg_proc
-WHERE proname IN ('checkout_inventory_cart_tx', 'apply_service_payment_tx', 'reverse_service_payment_tx')
+WHERE proname IN ('checkout_inventory_cart_tx', 'apply_service_payment_tx', 'reverse_service_payment_tx', 'cleanup_stale_idempotency_keys')
 UNION ALL
 SELECT 'payments_idempotency_unique_index', COUNT(*)::BIGINT
 FROM pg_indexes
@@ -37,7 +37,14 @@ UNION ALL
 SELECT 'inventory_checkout_idempotency_unique_index', COUNT(*)::BIGINT
 FROM pg_indexes
 WHERE schemaname = 'public'
-  AND indexname = 'ux_inventory_sales_checkout_idempotency_key';
+  AND indexname = 'ux_inventory_sales_checkout_idempotency_key'
+UNION ALL
+SELECT 'payments_append_only_trigger', COUNT(*)::BIGINT
+FROM pg_trigger t
+JOIN pg_class c ON c.oid = t.tgrelid
+WHERE c.relname = 'payments'
+  AND NOT t.tgisinternal
+  AND t.tgname = 'trg_payments_append_only';
 
 SELECT column_name, data_type, numeric_precision, numeric_scale
 FROM information_schema.columns

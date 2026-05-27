@@ -3,9 +3,12 @@ BEGIN;
 DROP FUNCTION IF EXISTS checkout_inventory_cart_tx(JSONB, TEXT, TEXT, TEXT, NUMERIC, TEXT, NUMERIC, TEXT, TEXT, TEXT);
 DROP FUNCTION IF EXISTS apply_service_payment_tx(UUID, NUMERIC, TEXT, TEXT, TEXT, DATE, TEXT, TEXT, TEXT);
 DROP FUNCTION IF EXISTS reverse_service_payment_tx(UUID, NUMERIC, TEXT, TEXT, TEXT, DATE, TEXT);
+DROP FUNCTION IF EXISTS cleanup_stale_idempotency_keys(INTERVAL);
 
 DROP TABLE IF EXISTS stock_adjustment_audit;
 DROP TABLE IF EXISTS inventory_movement_history;
+
+DROP TRIGGER IF EXISTS trg_payments_append_only ON payments;
 
 DROP INDEX IF EXISTS ux_inventory_sales_checkout_idempotency_key;
 DROP INDEX IF EXISTS ux_inventory_sales_transaction_reference;

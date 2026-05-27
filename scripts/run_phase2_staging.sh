@@ -17,9 +17,11 @@ ROLLBACK_FILES=(
   "$ROOT_DIR/database/migrations/025_phase2_core_restructure.rollback.sql"
 )
 ROLLBACK_VALIDATION_FILE="$ROOT_DIR/database/validation/025_phase2_core_restructure_rollback_validation.sql"
+INTEGRITY_REVIEW_FILE="$ROOT_DIR/database/validation/026_staging_integrity_review.sql"
 STAGING_URL="${STAGING_DATABASE_URL:-}"
 VERIFY_ROLLBACK="${VERIFY_ROLLBACK:-1}"
 RUN_BASELINE="${RUN_BASELINE:-1}"
+RUN_STRESS="${RUN_STRESS:-1}"
 
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 ARTIFACT_DIR="$ROOT_DIR/backups/staging-validation/${STAMP}_phase2_core_restructure"
@@ -52,6 +54,12 @@ for validation_file in "${VALIDATION_FILES[@]}"; do
   validation_name="$(basename "$validation_file" .sql)"
   psql "$STAGING_URL" -v ON_ERROR_STOP=1 -f "$validation_file" > "$ARTIFACT_DIR/${validation_name}.txt"
 done
+
+if [[ "$RUN_STRESS" == "1" ]]; then
+  "$ROOT_DIR/scripts/run_staging_transaction_stress.sh" > "$ARTIFACT_DIR/transaction_stress.txt" 2>&1
+fi
+
+psql "$STAGING_URL" -v ON_ERROR_STOP=1 -f "$INTEGRITY_REVIEW_FILE" > "$ARTIFACT_DIR/integrity_review.txt"
 
 if [[ "$VERIFY_ROLLBACK" == "1" ]]; then
   for rollback_file in "${ROLLBACK_FILES[@]}"; do

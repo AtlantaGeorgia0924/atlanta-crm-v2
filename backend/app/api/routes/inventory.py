@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from typing import Optional
 import json
+import time
 import uuid
 from datetime import datetime
 from app.db.supabase_client import get_supabase
@@ -284,6 +285,32 @@ def _upsert_client(sb, client_name: str, client_phone: Optional[str]) -> Optiona
         or []
     )
     return str(created[0].get("id")) if created else None
+
+
+def _is_retryable_db_error(message: str) -> bool:
+    lowered = str(message or "").lower()
+    retry_tokens = (
+        "deadlock detected",
+        "could not serialize access",
+        "sqlstate 40p01",
+        "sqlstate 40001",
+    )
+    return any(token in lowered for token in retry_tokens)
+
+
+def _rpc_with_retry(sb, fn_name: str, params: dict, *, max_attempts: int = 3):
+    last_error: Exception | None = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return sb.rpc(fn_name, params).execute().data or []
+        except Exception as exc:
+            last_error = exc
+            if attempt >= max_attempts or not _is_retryable_db_error(str(exc)):
+                raise
+            time.sleep(0.08 * attempt)
+    if last_error:
+        raise last_error
+    return []
 
 
 def _log_inventory_audit(
@@ -589,25 +616,21 @@ def checkout_inventory_cart(payload: InventoryCheckoutPayload, _user=Depends(get
         )
 
     try:
-        rpc = (
-            sb.rpc(
-                "checkout_inventory_cart_tx",
-                {
-                    "p_items": items_payload,
-                    "p_client_id": client_id,
-                    "p_client_name": buyer_name,
-                    "p_client_phone": payload.buyer_phone,
-                    "p_amount_paid": max(_as_float(payload.amount_paid), 0),
-                    "p_payment_method": payload.payment_method,
-                    "p_discount": max(_as_float(payload.discount), 0),
-                    "p_notes": payload.notes,
-                    "p_sold_by": str(_user.id),
-                    "p_idempotency_key": idempotency_key,
-                },
-            )
-            .execute()
-            .data
-            or []
+        rpc = _rpc_with_retry(
+            sb,
+            "checkout_inventory_cart_tx",
+            {
+                "p_items": items_payload,
+                "p_client_id": client_id,
+                "p_client_name": buyer_name,
+                "p_client_phone": payload.buyer_phone,
+                "p_amount_paid": max(_as_float(payload.amount_paid), 0),
+                "p_payment_method": payload.payment_method,
+                "p_discount": max(_as_float(payload.discount), 0),
+                "p_notes": payload.notes,
+                "p_sold_by": str(_user.id),
+                "p_idempotency_key": idempotency_key,
+            },
         )
     except Exception as exc:
         message = str(exc)
@@ -666,25 +689,21 @@ def sell_product(item_id: str, payload: SellProductPayload, _user=Depends(get_cu
     client_id = _upsert_client(sb, client_name, payload.client_phone)
 
     try:
-        rpc = (
-            sb.rpc(
-                "sell_inventory_product",
-                {
-                    "p_inventory_item_id": item_id,
-                    "p_quantity": quantity,
-                    "p_unit_price": selling_price,
-                    "p_client_id": client_id,
-                    "p_client_name": client_name,
-                    "p_client_phone": payload.client_phone,
-                    "p_paid_amount": paid_amount,
-                    "p_payment_status": status,
-                    "p_notes": payload.notes,
-                    "p_sold_by": str(_user.id),
-                },
-            )
-            .execute()
-            .data
-            or []
+        rpc = _rpc_with_retry(
+            sb,
+            "sell_inventory_product",
+            {
+                "p_inventory_item_id": item_id,
+                "p_quantity": quantity,
+                "p_unit_price": selling_price,
+                "p_client_id": client_id,
+                "p_client_name": client_name,
+                "p_client_phone": payload.client_phone,
+                "p_paid_amount": paid_amount,
+                "p_payment_status": status,
+                "p_notes": payload.notes,
+                "p_sold_by": str(_user.id),
+            },
         )
     except Exception as exc:
         message = str(exc)
@@ -747,18 +766,14 @@ def reverse_sold_product(payload: ReverseSalePayload, _user=Depends(get_current_
         raise HTTPException(422, "sale_item_id is required")
 
     try:
-        rpc = (
-            sb.rpc(
-                "reverse_inventory_sale",
-                {
-                    "p_sale_item_id": sale_item_id,
-                    "p_reversed_by": str(_user.id),
-                    "p_reason": payload.reason,
-                },
-            )
-            .execute()
-            .data
-            or []
+        rpc = _rpc_with_retry(
+            sb,
+            "reverse_inventory_sale",
+            {
+                "p_sale_item_id": sale_item_id,
+                "p_reversed_by": str(_user.id),
+                "p_reason": payload.reason,
+            },
         )
     except Exception as exc:
         message = str(exc)

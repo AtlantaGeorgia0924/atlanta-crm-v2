@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import secrets
 import string
+import time
 from datetime import date, datetime
 from typing import Optional
 
@@ -51,6 +52,32 @@ def generate_payment_reference(sb=None, *, prefix: str = "ATL-PAY") -> str:
     return f"{prefix}-{stamp}-{_random_suffix(6)}"
 
 
+def _is_retryable_db_error(message: str) -> bool:
+    lowered = str(message or "").lower()
+    retry_tokens = (
+        "deadlock detected",
+        "could not serialize access",
+        "sqlstate 40p01",
+        "sqlstate 40001",
+    )
+    return any(token in lowered for token in retry_tokens)
+
+
+def _rpc_with_retry(sb, fn_name: str, params: dict, *, max_attempts: int = 3):
+    last_error: Exception | None = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return sb.rpc(fn_name, params).execute().data or []
+        except Exception as exc:
+            last_error = exc
+            if attempt >= max_attempts or not _is_retryable_db_error(str(exc)):
+                raise
+            time.sleep(0.08 * attempt)
+    if last_error:
+        raise last_error
+    return []
+
+
 def apply_invoice_payment(
     sb,
     *,
@@ -75,24 +102,20 @@ def apply_invoice_payment(
     resolved_idempotency = str(idempotency_key or "").strip() or None
 
     try:
-        rpc_rows = (
-            sb.rpc(
-                "apply_service_payment_tx",
-                {
-                    "p_service_job_id": service_job_id,
-                    "p_payment_amount": amount,
-                    "p_payment_method": resolved_method,
-                    "p_payment_note": resolved_note,
-                    "p_reference_no": resolved_reference,
-                    "p_payment_date": resolved_date,
-                    "p_applied_by": applied_by,
-                    "p_applied_by_name": applied_by_name,
-                    "p_idempotency_key": resolved_idempotency,
-                },
-            )
-            .execute()
-            .data
-            or []
+        rpc_rows = _rpc_with_retry(
+            sb,
+            "apply_service_payment_tx",
+            {
+                "p_service_job_id": service_job_id,
+                "p_payment_amount": amount,
+                "p_payment_method": resolved_method,
+                "p_payment_note": resolved_note,
+                "p_reference_no": resolved_reference,
+                "p_payment_date": resolved_date,
+                "p_applied_by": applied_by,
+                "p_applied_by_name": applied_by_name,
+                "p_idempotency_key": resolved_idempotency,
+            },
         )
     except Exception as exc:
         message = str(exc)
@@ -169,22 +192,18 @@ def reverse_invoice_payment(
     resolved_idempotency = str(idempotency_key or "").strip() or None
 
     try:
-        rpc_rows = (
-            sb.rpc(
-                "reverse_service_payment_tx",
-                {
-                    "p_service_job_id": service_job_id,
-                    "p_reversal_amount": amount,
-                    "p_reversal_reason": reason,
-                    "p_reversed_by": reversed_by,
-                    "p_reversed_by_name": reversed_by_name,
-                    "p_reversal_date": resolved_date,
-                    "p_idempotency_key": resolved_idempotency,
-                },
-            )
-            .execute()
-            .data
-            or []
+        rpc_rows = _rpc_with_retry(
+            sb,
+            "reverse_service_payment_tx",
+            {
+                "p_service_job_id": service_job_id,
+                "p_reversal_amount": amount,
+                "p_reversal_reason": reason,
+                "p_reversed_by": reversed_by,
+                "p_reversed_by_name": reversed_by_name,
+                "p_reversal_date": resolved_date,
+                "p_idempotency_key": resolved_idempotency,
+            },
         )
     except Exception as exc:
         message = str(exc)
