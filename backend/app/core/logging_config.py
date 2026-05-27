@@ -13,9 +13,30 @@ Usage
 """
 import json
 import logging
+import re
 import time
 from datetime import datetime, timezone
 from typing import Any
+
+
+_TOKEN_PATTERNS = (
+    re.compile(r"sb_(?:secret|publishable)_[A-Za-z0-9_-]+"),
+    re.compile(r"Bearer\s+[A-Za-z0-9._-]+", re.IGNORECASE),
+)
+
+_NOISY_LOGGERS = (
+    "httpx",
+    "httpcore",
+    "hpack",
+    "postgrest",
+)
+
+
+def _redact_sensitive_text(value: str) -> str:
+    redacted = str(value)
+    for pattern in _TOKEN_PATTERNS:
+        redacted = pattern.sub("[REDACTED]", redacted)
+    return redacted
 
 
 class JsonFormatter(logging.Formatter):
@@ -26,7 +47,7 @@ class JsonFormatter(logging.Formatter):
             "ts": datetime.now(timezone.utc).isoformat(),
             "level": record.levelname,
             "logger": record.name,
-            "msg": record.getMessage(),
+            "msg": _redact_sensitive_text(record.getMessage()),
         }
         if record.exc_info:
             payload["exc"] = self.formatException(record.exc_info)
@@ -51,6 +72,10 @@ def configure_logging(level: str = "INFO") -> None:
     root.handlers.clear()
     root.addHandler(handler)
     root.setLevel(getattr(logging, level.upper(), logging.INFO))
+
+    # Keep third-party network/client internals from dumping verbose header traces.
+    for logger_name in _NOISY_LOGGERS:
+        logging.getLogger(logger_name).setLevel(logging.WARNING)
 
 
 def get_logger(name: str) -> logging.Logger:
