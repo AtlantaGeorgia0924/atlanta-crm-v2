@@ -41,8 +41,6 @@ def _jwt_payload(value: str) -> dict | None:
 
 def _valid_supabase_key(value: str, expected_role: str | None = None) -> bool:
     value = str(value or "").strip()
-    if len(value) < 80:
-        return False
     payload = _jwt_payload(value)
     if payload is not None:
         role = str(payload.get("role") or "")
