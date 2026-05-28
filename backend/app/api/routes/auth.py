@@ -59,6 +59,10 @@ def _ensure_profile_fields(profile: dict) -> dict:
 
 def _password_error_message(error_text: str) -> tuple[str, str]:
     lowered = str(error_text or "").lower()
+    if "unregistered api key" in lowered or "api key is not registered" in lowered:
+        return "SUPABASE_KEY_MISMATCH", "Supabase API key is not registered for this project. Check SUPABASE_URL, SUPABASE_ANON_KEY, and SUPABASE_SERVICE_ROLE_KEY."
+    if "invalid api key" in lowered or "wrong api key" in lowered:
+        return "SUPABASE_KEY_INVALID", "Supabase API key is invalid. Check your backend environment variables."
     if "email not confirmed" in lowered or "not confirmed" in lowered:
         return "EMAIL_NOT_VERIFIED", "Email not verified. Please verify your email or ask an admin to resend activation."
     if "invalid login credentials" in lowered or "invalid credentials" in lowered:
@@ -263,6 +267,7 @@ def login(payload: LoginPayload, request: Request):
     except HTTPException:
         raise
     except Exception as e:
+        logger.warning("login failed email=%s error=%s", normalized_email, e)
         reason_code, reason_message = _password_error_message(str(e))
 
         if profile_by_email and reason_code == "INVALID_PASSWORD":
