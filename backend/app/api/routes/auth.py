@@ -1,5 +1,6 @@
 """Auth routes – thin wrapper; Supabase handles the heavy lifting."""
 from datetime import datetime
+import logging
 import secrets
 import string
 
@@ -9,6 +10,7 @@ from app.db.supabase_client import get_supabase, get_supabase_auth
 from app.core.rbac import require_admin
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 class LoginPayload(BaseModel):
@@ -69,16 +71,20 @@ def _password_error_message(error_text: str) -> tuple[str, str]:
 
 
 def _find_profile_by_email(sb, email: str) -> dict | None:
-    rows = (
-        sb.table("users")
-        .select("*")
-        .eq("email", email)
-        .limit(1)
-        .execute()
-        .data
-        or []
-    )
-    return rows[0] if rows else None
+    try:
+        rows = (
+            sb.table("users")
+            .select("*")
+            .eq("email", email)
+            .limit(1)
+            .execute()
+            .data
+            or []
+        )
+        return rows[0] if rows else None
+    except Exception as exc:
+        logger.warning("login profile lookup failed email=%s error=%s", email, exc.__class__.__name__)
+        return None
 
 
 def _auth_user_exists(sb, user_id: str) -> bool:
@@ -152,37 +158,48 @@ def login(payload: LoginPayload, request: Request):
             {"email": normalized_email, "password": payload.password}
         )
         user_id = str(result.user.id)
-        profile_rows = sb.table("users").select("*").eq("id", user_id).limit(1).execute().data or []
-        if not profile_rows:
-            admins_count = (
-                sb.table("users")
-                .select("id", count="exact")
-                .eq("role", "admin")
-                .eq("is_active", True)
-                .limit(1)
-                .execute()
-                .count
-                or 0
-            )
-            role = "admin" if int(admins_count) == 0 else "staff"
-            inserted = sb.table("users").insert(
-                {
-                    "id": user_id,
-                    "email": str(result.user.email or normalized_email).lower().strip(),
-                    "full_name": (result.user.email or "").split("@")[0],
-                    "role": role,
-                    "is_active": True,
-                    "account_status": "ACTIVE",
-                    "last_login_at": datetime.utcnow().isoformat(),
-                    "last_login_ip": request.client.host if request and request.client else None,
-                    "last_login_user_agent": request.headers.get("user-agent") if request else None,
-                    "last_activity_at": datetime.utcnow().isoformat(),
-                    "failed_login_attempts": 0,
-                }
-            ).execute().data or []
-            profile = inserted[0] if inserted else {"role": role, "is_active": True, "account_status": "ACTIVE"}
-        else:
-            profile = profile_rows[0]
+        profile = {
+            "role": "staff",
+            "is_active": True,
+            "account_status": "ACTIVE",
+            "full_name": (result.user.email or normalized_email).split("@")[0],
+            "email": str(result.user.email or normalized_email).lower().strip(),
+        }
+
+        try:
+            profile_rows = sb.table("users").select("*").eq("id", user_id).limit(1).execute().data or []
+            if not profile_rows:
+                admins_count = (
+                    sb.table("users")
+                    .select("id", count="exact")
+                    .eq("role", "admin")
+                    .eq("is_active", True)
+                    .limit(1)
+                    .execute()
+                    .count
+                    or 0
+                )
+                role = "admin" if int(admins_count) == 0 else "staff"
+                inserted = sb.table("users").insert(
+                    {
+                        "id": user_id,
+                        "email": str(result.user.email or normalized_email).lower().strip(),
+                        "full_name": (result.user.email or "").split("@")[0],
+                        "role": role,
+                        "is_active": True,
+                        "account_status": "ACTIVE",
+                        "last_login_at": datetime.utcnow().isoformat(),
+                        "last_login_ip": request.client.host if request and request.client else None,
+                        "last_login_user_agent": request.headers.get("user-agent") if request else None,
+                        "last_activity_at": datetime.utcnow().isoformat(),
+                        "failed_login_attempts": 0,
+                    }
+                ).execute().data or []
+                profile = inserted[0] if inserted else {"role": role, "is_active": True, "account_status": "ACTIVE"}
+            else:
+                profile = profile_rows[0]
+        except Exception as exc:
+            logger.warning("login profile sync failed user_id=%s error=%s", user_id, exc.__class__.__name__)
 
         profile = _ensure_profile_fields(profile)
 
@@ -203,27 +220,30 @@ def login(payload: LoginPayload, request: Request):
                 },
             )
 
-        sb.table("users").update(
-            {
-                "last_login_at": datetime.utcnow().isoformat(),
-                "last_login_ip": request.client.host if request and request.client else None,
-                "last_login_user_agent": request.headers.get("user-agent") if request else None,
-                "last_activity_at": datetime.utcnow().isoformat(),
-                "failed_login_attempts": 0,
-            }
-        ).eq("id", user_id).execute()
+        try:
+            sb.table("users").update(
+                {
+                    "last_login_at": datetime.utcnow().isoformat(),
+                    "last_login_ip": request.client.host if request and request.client else None,
+                    "last_login_user_agent": request.headers.get("user-agent") if request else None,
+                    "last_activity_at": datetime.utcnow().isoformat(),
+                    "failed_login_attempts": 0,
+                }
+            ).eq("id", user_id).execute()
 
-        _audit(
-            sb,
-            action="user_login",
-            entity_id=user_id,
-            performed_by=user_id,
-            detail={
-                "email": result.user.email,
-                "ip": request.client.host if request and request.client else None,
-                "user_agent": request.headers.get("user-agent") if request else None,
-            },
-        )
+            _audit(
+                sb,
+                action="user_login",
+                entity_id=user_id,
+                performed_by=user_id,
+                detail={
+                    "email": result.user.email,
+                    "ip": request.client.host if request and request.client else None,
+                    "user_agent": request.headers.get("user-agent") if request else None,
+                },
+            )
+        except Exception as exc:
+            logger.warning("login profile update skipped user_id=%s error=%s", user_id, exc.__class__.__name__)
 
         return {
             "access_token": result.session.access_token,
