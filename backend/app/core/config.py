@@ -2,6 +2,7 @@ import base64
 import json
 import re
 from dataclasses import dataclass
+from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -53,7 +54,7 @@ def _valid_supabase_key(value: str, expected_role: str | None = None) -> bool:
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(env_file=Path(__file__).resolve().parents[2] / ".env", extra="ignore")
 
     # Supabase
     SUPABASE_URL: str

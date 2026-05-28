@@ -20,13 +20,17 @@ import time
 import logging
 from typing import Optional
 
+import certifi
+
+from app.core.config import settings
+
 logger = logging.getLogger(__name__)
 
 # ── Redis connection (lazy, optional) ─────────────────────────────────────────
 _redis_client = None
 _redis_available = False
 
-REDIS_URL = os.getenv("REDIS_URL", "")
+REDIS_URL = settings.REDIS_URL
 STATEMENT_CACHE_KEY = "cashflow:statement"
 STATEMENT_TTL_SECONDS = 60
 
@@ -43,7 +47,13 @@ def _get_redis():
         return None
     try:
         import redis  # type: ignore
-        client = redis.from_url(REDIS_URL, socket_connect_timeout=2, socket_timeout=2, decode_responses=True)
+        client = redis.from_url(
+            REDIS_URL,
+            socket_connect_timeout=2,
+            socket_timeout=2,
+            decode_responses=True,
+            ssl_ca_certs=certifi.where(),
+        )
         client.ping()
         _redis_client = client
         _redis_available = True
