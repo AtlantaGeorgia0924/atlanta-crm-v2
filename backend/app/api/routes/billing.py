@@ -1113,7 +1113,7 @@ def get_client_summary(client_name: str = Query(...), limit: int = Query(5, ge=1
 
     rows = (
         sb.table("service_jobs")
-        .select("id,client_name,phone_number,service_name,description,service_date,amount_charged,paid_amount,payment_status,created_at")
+        .select("id,client_name,phone_number,service_name,description,service_date,amount_charged,paid_amount,payment_status,paid_date,last_payment_at,created_at")
         .order("service_date", desc=True)
         .order("created_at", desc=True)
         .limit(2000)
@@ -1128,7 +1128,9 @@ def get_client_summary(client_name: str = Query(...), limit: int = Query(5, ge=1
 
     phone = ""
     total_jobs = 0
+    unpaid_services = 0
     outstanding = 0.0
+    last_payment_date: str | None = None
     recent_services: list[dict] = []
 
     for row in matched:
@@ -1139,7 +1141,15 @@ def get_client_summary(client_name: str = Query(...), limit: int = Query(5, ge=1
                 phone = candidate
         amount = to_number(row.get("amount_charged"))
         paid = to_number(row.get("paid_amount"))
-        outstanding += compute_outstanding(amount, paid)
+        balance = compute_outstanding(amount, paid)
+        outstanding += balance
+        if balance > 0 and _normalize_payment_status(row.get("payment_status")) in {"UNPAID", "PART PAYMENT", "PARTIAL"}:
+            unpaid_services += 1
+
+        paid_marker = str(row.get("paid_date") or row.get("last_payment_at") or "")
+        if paid_marker and (last_payment_date is None or paid_marker > last_payment_date):
+            last_payment_date = paid_marker
+
         if len(recent_services) < limit:
             recent_services.append(
                 {
@@ -1150,10 +1160,34 @@ def get_client_summary(client_name: str = Query(...), limit: int = Query(5, ge=1
                 }
             )
 
+    whatsapp_sent_count = 0
+    last_whatsapp_sent_at = None
+    try:
+        client_row = (
+            sb.table("clients")
+            .select("whatsapp_sent_count,last_whatsapp_sent_at")
+            .ilike("name", client_name)
+            .order("updated_at", desc=True)
+            .limit(1)
+            .execute()
+            .data
+            or []
+        )
+        if client_row:
+            whatsapp_sent_count = int(client_row[0].get("whatsapp_sent_count") or 0)
+            last_whatsapp_sent_at = client_row[0].get("last_whatsapp_sent_at")
+    except Exception:
+        whatsapp_sent_count = 0
+        last_whatsapp_sent_at = None
+
     return {
         "client_name": client_name,
         "phone_number": phone,
         "total_jobs": total_jobs,
+        "unpaid_services_count": unpaid_services,
+        "last_payment_date": last_payment_date,
+        "last_whatsapp_sent_at": last_whatsapp_sent_at,
+        "whatsapp_sent_count": whatsapp_sent_count,
         "outstanding_balance": outstanding if is_admin else None,
         "recent_services": recent_services,
     }

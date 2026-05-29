@@ -16,7 +16,7 @@ from app.core.payments_engine import (
 router = APIRouter(dependencies=[Depends(require_admin)])
 
 
-def _log_payment_audit(sb, *, action: str, service_job_id: str, performed_by: str, detail: dict | None = None) -> None:
+def _log_payment_audit(sb, *, action: str, service_job_id: str, performed_by: str, detail: dict | None = None) -> bool:
     try:
         sb.table("crm_audit_log").insert(
             {
@@ -27,8 +27,40 @@ def _log_payment_audit(sb, *, action: str, service_job_id: str, performed_by: st
                 "detail": detail,
             }
         ).execute()
+        return True
     except Exception:
-        pass
+        return False
+
+
+def _normalize_status(value: Optional[str]) -> str:
+    status = str(value or "").strip().upper()
+    if status == "PARTIAL":
+        return "PART PAYMENT"
+    return status
+
+
+def _validate_payment_outcome(engine_result: dict) -> None:
+    invoice = engine_result.get("invoice") or {}
+    paid = float(invoice.get("paid_amount") or 0)
+    total = float(invoice.get("amount_charged") or 0)
+    status = _normalize_status(invoice.get("payment_status"))
+    balance = float(engine_result.get("new_balance") or 0)
+
+    if paid < 0:
+        raise HTTPException(500, "Invalid post-payment state: negative paid amount")
+    if total < 0:
+        raise HTTPException(500, "Invalid post-payment state: negative invoice total")
+    if paid - total > 1e-6:
+        raise HTTPException(500, "Invalid post-payment state: overpayment persisted")
+    if balance < -1e-6:
+        raise HTTPException(500, "Invalid post-payment state: negative balance persisted")
+
+    if paid <= 0 and status != "UNPAID":
+        raise HTTPException(500, "Invalid post-payment state: expected UNPAID")
+    if paid > 0 and paid + 1e-6 < total and status not in {"PART PAYMENT", "PARTIAL"}:
+        raise HTTPException(500, "Invalid post-payment state: expected PART PAYMENT")
+    if paid + 1e-6 >= total and status != "PAID":
+        raise HTTPException(500, "Invalid post-payment state: expected PAID")
 
 
 class PaymentCreate(BaseModel):
@@ -87,6 +119,9 @@ def preview_payment_reference(_user=Depends(get_current_user)):
 @router.post("", status_code=201)
 def apply_payment(payload: PaymentCreate, _user=Depends(get_current_user)):
     """Apply a payment transaction and update invoice state."""
+    if not str(payload.idempotency_key or "").strip():
+        raise HTTPException(422, "idempotency_key is required")
+
     sb = get_supabase()
     resolved_service_job_id = _resolve_service_job_id(payload.billing_row_id, payload.service_job_id)
     engine_result = apply_invoice_payment(
@@ -101,6 +136,7 @@ def apply_payment(payload: PaymentCreate, _user=Depends(get_current_user)):
         applied_by_name=_user.full_name or _user.email,
         idempotency_key=payload.idempotency_key,
     )
+    _validate_payment_outcome(engine_result)
 
     # Keep dashboard/cashflow cards in sync after payment updates.
     emit_financial_event(
@@ -120,7 +156,7 @@ def apply_payment(payload: PaymentCreate, _user=Depends(get_current_user)):
             "new_balance": engine_result["new_balance"],
         },
     )
-    _log_payment_audit(
+    audit_saved = _log_payment_audit(
         sb,
         action="payment_applied",
         service_job_id=resolved_service_job_id,
@@ -133,6 +169,9 @@ def apply_payment(payload: PaymentCreate, _user=Depends(get_current_user)):
             "applied_by_name": _user.full_name or _user.email,
         },
     )
+    if not audit_saved:
+        raise HTTPException(500, "Payment applied but audit log write failed")
+
     recompute_and_persist_metrics(sb, source="supabase_after_payment")
 
     return {
@@ -145,6 +184,9 @@ def apply_payment(payload: PaymentCreate, _user=Depends(get_current_user)):
 @router.post("/reverse", status_code=201)
 def reverse_payment(payload: PaymentReverse, _user=Depends(get_current_user)):
     """Reverse an applied payment amount and persist reversal transaction."""
+    if not str(payload.idempotency_key or "").strip():
+        raise HTTPException(422, "idempotency_key is required")
+
     sb = get_supabase()
     resolved_service_job_id = _resolve_service_job_id(payload.billing_row_id, payload.service_job_id)
     reversal_notes = (payload.reason or "").strip()
@@ -158,6 +200,7 @@ def reverse_payment(payload: PaymentReverse, _user=Depends(get_current_user)):
         reversal_date=payload.reversal_date,
         idempotency_key=payload.idempotency_key,
     )
+    _validate_payment_outcome(engine_result)
 
     emit_financial_event(
         sb,
@@ -174,7 +217,7 @@ def reverse_payment(payload: PaymentReverse, _user=Depends(get_current_user)):
             "reference_no": engine_result["payment"].get("reference_no"),
         },
     )
-    _log_payment_audit(
+    audit_saved = _log_payment_audit(
         sb,
         action="payment_reversed",
         service_job_id=resolved_service_job_id,
@@ -186,6 +229,9 @@ def reverse_payment(payload: PaymentReverse, _user=Depends(get_current_user)):
             "applied_by_name": _user.full_name or _user.email,
         },
     )
+    if not audit_saved:
+        raise HTTPException(500, "Payment reversal applied but audit log write failed")
+
     recompute_and_persist_metrics(sb, source="supabase_after_payment_reversal")
 
     return {

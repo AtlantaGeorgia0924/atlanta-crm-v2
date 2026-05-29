@@ -140,6 +140,10 @@ interface ClientSummary {
   client_name: string
   phone_number?: string
   total_jobs: number
+  unpaid_services_count?: number
+  last_payment_date?: string | null
+  last_whatsapp_sent_at?: string | null
+  whatsapp_sent_count?: number
   outstanding_balance?: number | null
   recent_services: Array<{
     id: string
@@ -147,6 +151,12 @@ interface ClientSummary {
     service_date?: string
     payment_status?: string
   }>
+}
+
+interface WhatsAppContactResponse {
+  phone_number?: string
+  normalized_phone_number?: string
+  requires_manual_entry?: boolean
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -229,9 +239,11 @@ export default function Billing() {
   const [applyPayReference, setApplyPayReference] = useState('')
   const [applyPayDate, setApplyPayDate] = useState('')
   const [applyPayNotes, setApplyPayNotes] = useState('')
+  const [applyPayIdempotencyKey, setApplyPayIdempotencyKey] = useState('')
   const [reversePayRow, setReversePayRow] = useState<BillingRow | null>(null)
   const [reversePayAmount, setReversePayAmount] = useState('')
   const [reversePayReason, setReversePayReason] = useState('')
+  const [reversePayIdempotencyKey, setReversePayIdempotencyKey] = useState('')
   const [loadingEdit, setLoadingEdit] = useState(false)
   const [showAdvancedFilters, setShowAdvancedFilters] = useState(false)
   const [clientQuickViewName, setClientQuickViewName] = useState<string | null>(null)
@@ -490,6 +502,8 @@ export default function Billing() {
       qc.invalidateQueries({ queryKey: ['dashboard'] })
       qc.invalidateQueries({ queryKey: ['cashflow-page-data'] })
       qc.invalidateQueries({ queryKey: ['system-status'] })
+      qc.invalidateQueries({ queryKey: ['invoice-payments'] })
+      qc.invalidateQueries({ queryKey: ['billing-client-quick-view'] })
       closeForm()
     },
     onError: (e: any) => toast.error(parseApiError(e, 'Save failed')),
@@ -512,7 +526,7 @@ export default function Billing() {
         reference_no: applyPayReference.trim() || undefined,
         payment_date: applyPayDate || undefined,
         notes: applyPayNotes.trim() || undefined,
-        idempotency_key: buildIdempotencyKey('payment-apply'),
+        idempotency_key: applyPayIdempotencyKey,
       }),
     retry: 1,
     onSuccess: () => {
@@ -522,12 +536,15 @@ export default function Billing() {
       qc.invalidateQueries({ queryKey: ['dashboard'] })
       qc.invalidateQueries({ queryKey: ['cashflow-page-data'] })
       qc.invalidateQueries({ queryKey: ['system-status'] })
+      qc.invalidateQueries({ queryKey: ['invoice-payments'] })
+      qc.invalidateQueries({ queryKey: ['billing-client-quick-view'] })
       setApplyPayRow(null)
       setApplyPayAmount('')
       setApplyPayMethod('cash')
       setApplyPayReference('')
       setApplyPayDate('')
       setApplyPayNotes('')
+      setApplyPayIdempotencyKey('')
     },
     onError: (e: any) => toast.error(parseApiError(e, 'Payment apply failed')),
   })
@@ -539,6 +556,7 @@ export default function Billing() {
     setApplyPayReference('')
     setApplyPayDate(new Date().toISOString().slice(0, 10))
     setApplyPayNotes('')
+    setApplyPayIdempotencyKey(buildIdempotencyKey('payment-apply'))
   }
 
   const reversePaymentMutation = useMutation({
@@ -547,7 +565,7 @@ export default function Billing() {
         service_job_id: id,
         amount,
         reason: reason || undefined,
-        idempotency_key: buildIdempotencyKey('payment-reverse'),
+        idempotency_key: reversePayIdempotencyKey,
       }),
     retry: 1,
     onSuccess: () => {
@@ -557,9 +575,12 @@ export default function Billing() {
       qc.invalidateQueries({ queryKey: ['dashboard'] })
       qc.invalidateQueries({ queryKey: ['cashflow-page-data'] })
       qc.invalidateQueries({ queryKey: ['system-status'] })
+      qc.invalidateQueries({ queryKey: ['invoice-payments'] })
+      qc.invalidateQueries({ queryKey: ['billing-client-quick-view'] })
       setReversePayRow(null)
       setReversePayAmount('')
       setReversePayReason('')
+      setReversePayIdempotencyKey('')
     },
     onError: (e: any) => toast.error(parseApiError(e, 'Payment reversal failed')),
   })
@@ -620,6 +641,21 @@ export default function Billing() {
   }
 
   const grouped: BillingGroup[] = useMemo(() => groupedData?.groups ?? [], [groupedData])
+
+  const handleInvoiceFormKeyDown = (e: React.KeyboardEvent<HTMLFormElement>) => {
+    if (e.key !== 'Enter' || e.shiftKey) return
+    const target = e.target as HTMLElement
+    const tag = target.tagName.toLowerCase()
+    if (tag === 'textarea' || (target as HTMLInputElement).type === 'submit') return
+    e.preventDefault()
+    const controls = Array.from(
+      e.currentTarget.querySelectorAll<HTMLElement>('input, select, textarea, button')
+    ).filter((el) => !el.hasAttribute('disabled') && el.getAttribute('type') !== 'hidden')
+    const idx = controls.indexOf(target)
+    if (idx >= 0 && idx < controls.length - 1) {
+      controls[idx + 1].focus()
+    }
+  }
 
   const { data: paymentReferencePreview } = useQuery<{ reference_no: string }>({
     queryKey: ['payment-reference-preview', applyPayRow?.id],
@@ -828,8 +864,19 @@ export default function Billing() {
       .join('\n')
 
   const openWhatsApp = async (row: BillingRow) => {
-    const fallbackRaw = row.phone_number || ''
-    const phone = normalizePhone(fallbackRaw)
+    let phoneRaw = row.phone_number || ''
+    try {
+      const contact = await api
+        .get<WhatsAppContactResponse>(`/billing/debtors/${encodeURIComponent(row.client_name)}/whatsapp-contact`)
+        .then((r) => r.data)
+      if (!contact?.requires_manual_entry && contact?.phone_number) {
+        phoneRaw = contact.phone_number
+      }
+    } catch {
+      // Fallback to row phone if contact lookup fails.
+    }
+
+    const phone = normalizePhone(phoneRaw)
     if (!phone) {
       toast.error('No client phone number found')
       return
@@ -842,6 +889,15 @@ export default function Billing() {
         const latest = payments[0]
         const latestRef = latest.reference_no || latest.id.slice(0, 8)
         billText += `\nLast Payment Ref: ${latestRef}`
+        const recentLines = payments.slice(0, 3).map((p) => {
+          const pRef = p.reference_no || p.id.slice(0, 8)
+          const pAmt = Number(p.payment_amount ?? p.amount ?? 0)
+          const pDate = String(p.payment_date || p.created_at || '').slice(0, 10)
+          return `${pDate} ${pRef} ${formatCurrency(pAmt, currency)}`
+        })
+        if (recentLines.length) {
+          billText += `\nRecent Payments:\n${recentLines.join('\n')}`
+        }
       }
     } catch {
       // Bill generation should still proceed with available invoice totals.
@@ -854,7 +910,8 @@ export default function Billing() {
       return
     }
     try {
-      await whatsappTrackMutation.mutateAsync({ clientName: row.client_name, phoneNumber: fallbackRaw })
+      await whatsappTrackMutation.mutateAsync({ clientName: row.client_name, phoneNumber: phoneRaw })
+      qc.invalidateQueries({ queryKey: ['billing-client-quick-view'] })
       toast.success('Bill opened in WhatsApp')
     } catch {
       toast.error('Bill opened, but send tracking failed')
@@ -1233,7 +1290,7 @@ export default function Billing() {
                           <div className="flex flex-wrap gap-2 pt-1">
                             <InlineBtn icon={<Pencil size={11} />} label="Edit" onClick={() => { void openEdit(row) }} />
                             {isAdmin && <InlineBtn icon={<CreditCard size={11} />} label="Apply Payment" onClick={() => openApplyPayment(row)} />}
-                            {isAdmin && Number(row.amount_paid || 0) > 0 && <InlineBtn icon={<Undo2 size={11} />} label="Reverse Payment" onClick={() => { setReversePayRow(row); setReversePayAmount(''); setReversePayReason('') }} extraClass="text-amber-700 hover:bg-amber-50" />}
+                            {isAdmin && Number(row.amount_paid || 0) > 0 && <InlineBtn icon={<Undo2 size={11} />} label="Reverse Payment" onClick={() => { setReversePayRow(row); setReversePayAmount(''); setReversePayReason(''); setReversePayIdempotencyKey(buildIdempotencyKey('payment-reverse')) }} extraClass="text-amber-700 hover:bg-amber-50" />}
                             <InlineBtn icon={<MessageCircle size={11} />} label="WhatsApp" onClick={() => openWhatsApp(row)} extraClass="text-green-700 hover:bg-green-50" />
                             <InlineBtn icon={<Copy size={11} />} label="Copy Bill" onClick={() => copyBill(row)} />
                             {row.status !== 'RETURNED' && (
@@ -1281,6 +1338,10 @@ export default function Billing() {
               <p><span className="text-gray-500">Name:</span> <strong>{clientQuickView.client_name}</strong></p>
               <p><span className="text-gray-500">Phone:</span> {clientQuickView.phone_number || '—'}</p>
               <p><span className="text-gray-500">Total Jobs:</span> {clientQuickView.total_jobs}</p>
+              <p><span className="text-gray-500">Unpaid Services:</span> {Number(clientQuickView.unpaid_services_count || 0)}</p>
+              <p><span className="text-gray-500">Last Payment:</span> {clientQuickView.last_payment_date ? String(clientQuickView.last_payment_date).slice(0, 10) : '—'}</p>
+              <p><span className="text-gray-500">Last WhatsApp:</span> {clientQuickView.last_whatsapp_sent_at ? String(clientQuickView.last_whatsapp_sent_at).slice(0, 19).replace('T', ' ') : '—'}</p>
+              <p><span className="text-gray-500">WhatsApp Sends:</span> {Number(clientQuickView.whatsapp_sent_count || 0)}</p>
               <p>
                 <span className="text-gray-500">Outstanding Balance:</span>{' '}
                 {isAdmin
@@ -1341,13 +1402,14 @@ export default function Billing() {
           </div>
         )}
       >
-        <form id="invoice-form" onSubmit={handleSubmit((v) => saveMutation.mutate(v))} className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <form id="invoice-form" onKeyDown={handleInvoiceFormKeyDown} onSubmit={handleSubmit((v) => saveMutation.mutate(v))} className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <input type="hidden" {...register('client_id')} />
           <div className="col-span-2 relative">
             <label className="form-label">Client Name</label>
             <input
               className="form-input"
               {...register('client_name', { required: 'Required' })}
+              autoFocus
               value={clientSearch}
               onChange={(e) => {
                 setClientSearch(e.target.value)
@@ -1471,6 +1533,7 @@ export default function Billing() {
           setApplyPayReference('')
           setApplyPayDate('')
           setApplyPayNotes('')
+          setApplyPayIdempotencyKey('')
         }}
         size="sm"
         footer={(
@@ -1485,6 +1548,7 @@ export default function Billing() {
                 setApplyPayReference('')
                 setApplyPayDate('')
                 setApplyPayNotes('')
+                setApplyPayIdempotencyKey('')
               }}
             >
               Cancel
@@ -1495,6 +1559,7 @@ export default function Billing() {
               disabled={applyPaymentMutation.isPending}
               onClick={() => {
                 if (!applyPayRow) return
+                if (!applyPayIdempotencyKey) { toast.error('Payment session expired. Reopen Apply Payment and try again.'); return }
                 const val = parseFloat(applyPayAmount)
                 if (!Number.isFinite(val) || val <= 0) { toast.error('Enter a valid payment amount'); return }
                 if (val > Number(applyPayRow.balance || 0)) { toast.error('Payment cannot exceed outstanding balance'); return }
@@ -1565,17 +1630,18 @@ export default function Billing() {
       <Modal
         title="Reverse Payment"
         open={!!reversePayRow}
-        onClose={() => { setReversePayRow(null); setReversePayAmount(''); setReversePayReason('') }}
+        onClose={() => { setReversePayRow(null); setReversePayAmount(''); setReversePayReason(''); setReversePayIdempotencyKey('') }}
         size="sm"
         footer={(
           <div className="flex justify-end gap-2">
-            <button type="button" className="btn-secondary" onClick={() => { setReversePayRow(null); setReversePayAmount(''); setReversePayReason('') }}>Cancel</button>
+            <button type="button" className="btn-secondary" onClick={() => { setReversePayRow(null); setReversePayAmount(''); setReversePayReason(''); setReversePayIdempotencyKey('') }}>Cancel</button>
             <button
               type="button"
               className="btn-primary"
               disabled={reversePaymentMutation.isPending}
               onClick={() => {
                 if (!reversePayRow) return
+                if (!reversePayIdempotencyKey) { toast.error('Reverse payment session expired. Reopen and try again.'); return }
                 const val = parseFloat(reversePayAmount)
                 const currentPaid = Number(reversePayRow.amount_paid || 0)
                 if (!Number.isFinite(val) || val <= 0) {
