@@ -22,6 +22,7 @@ interface BillingRow {
   client_name: string
   phone_number?: string
   service_name: string
+  device_model?: string
   imei?: string
   serial_number?: string
   condition?: string
@@ -84,6 +85,7 @@ interface FormValues {
   client_company?: string
   client_notes?: string
   service_name: string
+  device_model?: string
   imei?: string
   serial_number?: string
   condition?: string
@@ -132,6 +134,19 @@ interface BillingActivityRow {
   performed_by?: string
   detail?: Record<string, any>
   created_at?: string
+}
+
+interface ClientSummary {
+  client_name: string
+  phone_number?: string
+  total_jobs: number
+  outstanding_balance?: number | null
+  recent_services: Array<{
+    id: string
+    service_name: string
+    service_date?: string
+    payment_status?: string
+  }>
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -219,6 +234,8 @@ export default function Billing() {
   const [reversePayReason, setReversePayReason] = useState('')
   const [loadingEdit, setLoadingEdit] = useState(false)
   const [showAdvancedFilters, setShowAdvancedFilters] = useState(false)
+  const [clientQuickViewName, setClientQuickViewName] = useState<string | null>(null)
+  const [paymentQuickViewRow, setPaymentQuickViewRow] = useState<BillingRow | null>(null)
   const [visibleCount, setVisibleCount] = useState(140)
   const [revealStartIndex, setRevealStartIndex] = useState<number | null>(null)
   const [revealEndIndex, setRevealEndIndex] = useState<number | null>(null)
@@ -246,6 +263,14 @@ export default function Billing() {
   const isRangeMode = !normalizedSearch && !!rangeFrom && !!rangeTo && rangeFrom !== rangeTo
   const effectiveFrom = normalizedSearch ? undefined : (isRangeMode ? rangeFrom : selectedDate)
   const effectiveTo = normalizedSearch ? undefined : (isRangeMode ? rangeTo : selectedDate)
+  const effectiveStatusFilter = normalizedSearch ? '' : statusFilter
+  const effectiveReturned = normalizedSearch ? '' : returned
+  const effectivePaidState = normalizedSearch ? '' : paidState
+  const effectiveCreatedBy = normalizedSearch ? '' : createdBy
+  const effectiveEditedBy = normalizedSearch ? '' : editedBy
+  const effectiveAssignedStaff = normalizedSearch ? '' : assignedStaff
+  const effectiveMinAmount = normalizedSearch ? '' : minAmount
+  const effectiveMaxAmount = normalizedSearch ? '' : maxAmount
 
   const { register, handleSubmit, reset, setValue, formState: { errors } } = useForm<FormValues>()
 
@@ -288,21 +313,30 @@ export default function Billing() {
       api.get('/billing/grouped', {
         params: {
           page,
-          page_size: 200,
-          payment_status: statusFilter || undefined,
+          page_size: normalizedSearch ? 500 : 200,
+          payment_status: effectiveStatusFilter || undefined,
           search: search || undefined,
           from_date: effectiveFrom,
           to_date: effectiveTo,
-          min_amount: minAmount || undefined,
-          max_amount: maxAmount || undefined,
-          is_return: returned === '' ? undefined : returned === 'true',
-          paid_state: paidState || undefined,
-          created_by: createdBy || undefined,
-          edited_by: editedBy || undefined,
-          assigned_staff: assignedStaff || undefined,
+          min_amount: effectiveMinAmount || undefined,
+          max_amount: effectiveMaxAmount || undefined,
+          is_return: effectiveReturned === '' ? undefined : effectiveReturned === 'true',
+          paid_state: effectivePaidState || undefined,
+          created_by: effectiveCreatedBy || undefined,
+          edited_by: effectiveEditedBy || undefined,
+          assigned_staff: effectiveAssignedStaff || undefined,
         },
       }).then((r) => r.data),
     placeholderData: (prev) => prev,
+  })
+
+  const { data: clientQuickView, isLoading: clientQuickViewLoading } = useQuery<ClientSummary>({
+    queryKey: ['billing-client-quick-view', clientQuickViewName],
+    queryFn: () =>
+      api.get('/billing/client-summary/by-name', {
+        params: { client_name: clientQuickViewName, limit: 6 },
+      }).then((r) => r.data),
+    enabled: !!clientQuickViewName,
   })
 
   const { data: status } = useQuery<{ currency?: string }>({
@@ -394,6 +428,7 @@ export default function Billing() {
         ...values,
         client_name: normalizedClientName,
         service_name: normalizedServiceName,
+        device_model: values.device_model?.trim() || undefined,
         imei: values.imei?.trim() || undefined,
         serial_number: values.serial_number?.trim() || undefined,
         condition: values.condition?.trim() || undefined,
@@ -560,6 +595,7 @@ export default function Billing() {
         client_name: details?.client_name ?? row.client_name,
         client_phone: details?.phone_number ?? row.phone_number ?? '',
         service_name: details?.service_name ?? row.service_name,
+        device_model: details?.device_model ?? row.device_model ?? '',
         imei: details?.imei ?? '',
         serial_number: details?.serial_number ?? '',
         condition: details?.condition ?? '',
@@ -778,6 +814,8 @@ export default function Billing() {
       `Client: ${row.client_name}`,
       row.phone_number ? `Phone: ${row.phone_number}` : '',
       `Service: ${row.service_name}`,
+      row.device_model ? `Device: ${row.device_model}` : '',
+      row.imei ? `IMEI: ${row.imei}` : '',
       `Amount: ${formatCurrency(row.total_amount, currency)}`,
       `Paid: ${formatCurrency(row.amount_paid, currency)}`,
       `Balance: ${formatCurrency(row.balance, currency)}`,
@@ -790,18 +828,36 @@ export default function Billing() {
       .join('\n')
 
   const openWhatsApp = async (row: BillingRow) => {
-    const text = encodeURIComponent(generateBillText(row))
-    const fallbackRaw = row.phone_number || prompt('Client phone missing. Enter WhatsApp number:') || ''
+    const fallbackRaw = row.phone_number || ''
     const phone = normalizePhone(fallbackRaw)
     if (!phone) {
       toast.error('No client phone number found')
       return
     }
-    window.open(`https://wa.me/${phone}?text=${text}`, '_blank', 'noopener,noreferrer')
+
+    let billText = generateBillText(row)
+    try {
+      const payments = await api.get<PaymentHistoryRow[]>('/payments', { params: { service_job_id: row.id } }).then((r) => r.data)
+      if (payments?.length) {
+        const latest = payments[0]
+        const latestRef = latest.reference_no || latest.id.slice(0, 8)
+        billText += `\nLast Payment Ref: ${latestRef}`
+      }
+    } catch {
+      // Bill generation should still proceed with available invoice totals.
+    }
+
+    const text = encodeURIComponent(billText)
+    const popup = window.open(`https://wa.me/${phone}?text=${text}`, '_blank', 'noopener,noreferrer')
+    if (!popup) {
+      toast.error('Unable to open WhatsApp. Please allow popups and try again.')
+      return
+    }
     try {
       await whatsappTrackMutation.mutateAsync({ clientName: row.client_name, phoneNumber: fallbackRaw })
+      toast.success('Bill opened in WhatsApp')
     } catch {
-      // Sending already initiated; tracker failure should not block operator flow.
+      toast.error('Bill opened, but send tracking failed')
     }
   }
 
@@ -815,6 +871,9 @@ export default function Billing() {
   }
 
   const hasActiveFilters = !!(search || rangeFrom || rangeTo || statusFilter || paidState || minAmount || maxAmount || returned || createdBy || editedBy || assignedStaff)
+  const tableTemplate = isAdmin
+    ? '1.1fr 1fr 1fr 1.2fr 0.72fr 0.72fr 0.72fr 0.75fr 0.9fr 1.25fr'
+    : '1.3fr 1.1fr 1.1fr 1.5fr 0.85fr 0.95fr 1.35fr'
 
   const highlightMatch = (text?: string) => {
     const value = String(text || '')
@@ -853,6 +912,7 @@ export default function Billing() {
               client_name: '',
               client_phone: '',
               service_name: '',
+              device_model: '',
               description: '',
               imei: '',
               serial_number: '',
@@ -907,19 +967,10 @@ export default function Billing() {
           />
           <button type="button" className="btn-secondary text-xs" onClick={() => shiftDay(1)}>Next Day →</button>
 
-          <div className="flex rounded-lg border overflow-hidden text-xs font-medium" style={{ borderColor: '#d4af37' }}>
-            {(['today', 'week', 'month'] as const).map((type, i) => (
-              <button
-                key={type}
-                onClick={() => applyQuickRange(type)}
-                className={`px-3 py-1.5 transition-colors border-r last:border-r-0 ${
-                  activeRange === type ? 'bg-black text-white' : 'bg-white text-gray-600 hover:bg-[#fffdf5]'
-                }`}
-                style={{ borderColor: '#d4af37' }}
-              >
-                {['Today', 'This Week', 'This Month'][i]}
-              </button>
-            ))}
+          <div className="flex items-center gap-1 text-xs">
+            <button type="button" className={`btn-secondary text-xs ${!isRangeMode ? 'ring-1 ring-amber-300' : ''}`} onClick={() => applyQuickRange('today')}>Today</button>
+            <button type="button" className={`btn-secondary text-xs ${activeRange === 'week' ? 'ring-1 ring-amber-300' : ''}`} onClick={() => applyQuickRange('week')}>This Week</button>
+            <button type="button" className={`btn-secondary text-xs ${activeRange === 'month' ? 'ring-1 ring-amber-300' : ''}`} onClick={() => applyQuickRange('month')}>This Month</button>
           </div>
 
           <button
@@ -1018,16 +1069,16 @@ export default function Billing() {
             >
               <div className="max-h-[68vh] overflow-y-auto">
                 <div
-                  className="sticky top-0 z-30 grid items-center gap-2 px-4 py-2 text-xs font-medium text-gray-400 uppercase tracking-wide border-b bg-white"
-                  style={{ gridTemplateColumns: '1.15fr 1fr 1.1fr 1.2fr 0.7fr 0.7fr 0.7fr 0.8fr 0.9fr 1.2fr', borderColor: '#f7f1d8' }}
+                  className="sticky top-0 z-30 grid items-center gap-2 px-3 py-1.5 text-[11px] font-medium text-gray-400 uppercase tracking-wide border-b bg-white"
+                  style={{ gridTemplateColumns: tableTemplate, borderColor: '#f7f1d8' }}
                 >
                   <span>Client</span>
                   <span>Phone</span>
                   <span>Device</span>
                   <span>Service</span>
-                  <span>Amount</span>
-                  <span>Paid</span>
-                  <span>Balance</span>
+                  {isAdmin && <span>Amount</span>}
+                  {isAdmin && <span>Paid</span>}
+                  {isAdmin && <span>Balance</span>}
                   <span>Status</span>
                   <span>Staff</span>
                   <span>Actions</span>
@@ -1082,24 +1133,50 @@ export default function Billing() {
                       }}
                     >
                       <div
-                        className="group grid items-center gap-2 px-4 py-3 text-sm hover:bg-[#fffdf5] cursor-pointer transition-colors"
-                        style={{ gridTemplateColumns: '1.15fr 1fr 1.1fr 1.2fr 0.7fr 0.7fr 0.7fr 0.8fr 0.9fr 1.2fr' }}
+                        className="group grid items-center gap-2 px-3 py-1.5 text-xs hover:bg-[#fffdf5] cursor-pointer transition-colors"
+                        style={{ gridTemplateColumns: tableTemplate }}
                         onClick={() => toggleRow(row.id)}
                       >
-                        <span className="truncate font-medium text-gray-900" title={row.client_name}>{highlightMatch(row.client_name)}</span>
+                        <button
+                          type="button"
+                          className="truncate text-left font-semibold text-[#2b5c9a] hover:underline"
+                          title={row.client_name}
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            setClientQuickViewName(row.client_name)
+                          }}
+                        >
+                          {highlightMatch(row.client_name)}
+                        </button>
                         <span className="truncate text-gray-600" title={row.phone_number || ''}>{highlightMatch(row.phone_number)}</span>
-                        <span className="truncate text-gray-600" title={String((row as any).device_model || (row as any).imei || (row as any).serial_number || '—')}>
-                          {highlightMatch((row as any).device_model || (row as any).imei || (row as any).serial_number || '—')}
+                        <span className="truncate text-gray-600" title={String(row.device_model || row.imei || row.serial_number || '—')}>
+                          {highlightMatch(row.device_model || row.imei || row.serial_number || '—')}
                         </span>
                         <span className="truncate text-gray-600" title={row.service_name}>{highlightMatch(row.service_name)}</span>
-                        <span className="text-gray-800 tabular-nums">{formatCurrency(row.total_amount, currency)}</span>
-                        <span className="text-emerald-700 tabular-nums">{formatCurrency(row.amount_paid, currency)}</span>
-                        <span className={`tabular-nums font-medium ${balancePositive ? 'text-amber-700' : 'text-gray-300'}`}>
-                          {balancePositive ? formatCurrency(row.balance, currency) : '—'}
-                        </span>
-                        <span>
+                        {isAdmin && <span className="text-gray-800 tabular-nums">{formatCurrency(row.total_amount, currency)}</span>}
+                        {isAdmin && <span className="text-emerald-700 tabular-nums">{formatCurrency(row.amount_paid, currency)}</span>}
+                        {isAdmin && (
+                          <button
+                            type="button"
+                            className={`text-left tabular-nums font-medium ${balancePositive ? 'text-amber-700 hover:underline' : 'text-gray-300'}`}
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              setPaymentQuickViewRow(row)
+                            }}
+                          >
+                            {balancePositive ? formatCurrency(row.balance, currency) : '—'}
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          className="text-left"
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            setPaymentQuickViewRow(row)
+                          }}
+                        >
                           <span className={operationStatusClass(row.status)}>{statusLabel(row.status)}</span>
-                        </span>
+                        </button>
                         <span className="truncate text-gray-500" title={row.assigned_staff_name || row.created_by_name || 'Unassigned'}>
                           {row.assigned_staff_name || row.created_by_name || 'Unassigned'}
                         </span>
@@ -1107,10 +1184,10 @@ export default function Billing() {
                           className="flex items-center gap-1"
                           onClick={(e) => e.stopPropagation()}
                         >
-                          <button type="button" className="text-[11px] px-1.5 py-1 rounded border hover:bg-gray-50" style={{ borderColor: '#e7d89f' }} onClick={() => { void openEdit(row) }}>Edit</button>
-                          {isAdmin && <button type="button" className="text-[11px] px-1.5 py-1 rounded border hover:bg-gray-50" style={{ borderColor: '#e7d89f' }} onClick={() => openApplyPayment(row)}>Apply Payment</button>}
-                          <button type="button" className="text-[11px] px-1.5 py-1 rounded border text-green-700 hover:bg-green-50" style={{ borderColor: '#b7e2c1' }} onClick={() => openWhatsApp(row)}>Send Bill</button>
-                          <button type="button" className="text-[11px] px-1.5 py-1 rounded border hover:bg-gray-50" style={{ borderColor: '#e7d89f' }} onClick={() => toggleRow(row.id)}>{expanded ? 'Hide History' : 'View History'}</button>
+                          <button type="button" className="text-[10px] px-1.5 py-0.5 rounded border hover:bg-gray-50" style={{ borderColor: '#e7d89f' }} onClick={() => { void openEdit(row) }}>Edit</button>
+                          {isAdmin && <button type="button" className="text-[10px] px-1.5 py-0.5 rounded border hover:bg-gray-50" style={{ borderColor: '#e7d89f' }} onClick={() => openApplyPayment(row)}>Apply Payment</button>}
+                          <button type="button" className="text-[10px] px-1.5 py-0.5 rounded border text-green-700 hover:bg-green-50" style={{ borderColor: '#b7e2c1' }} onClick={() => openWhatsApp(row)}>Send Bill</button>
+                          <button type="button" className="text-[10px] px-1.5 py-0.5 rounded border hover:bg-gray-50" style={{ borderColor: '#e7d89f' }} onClick={() => toggleRow(row.id)}>{expanded ? 'Hide History' : 'View History'}</button>
                         </div>
                       </div>
 
@@ -1122,10 +1199,11 @@ export default function Billing() {
                         >
                           <div className="flex flex-wrap gap-x-6 gap-y-1 text-gray-500">
                             {row.phone_number && <span>📱 <strong className="text-gray-700">{highlightMatch(row.phone_number)}</strong></span>}
-                            {(row as any).imei && <span>IMEI: <strong className="text-gray-700">{highlightMatch((row as any).imei)}</strong></span>}
+                            {row.imei && <span>IMEI: <strong className="text-gray-700">{highlightMatch(row.imei)}</strong></span>}
+                            {row.device_model && <span>Device: <strong className="text-gray-700">{highlightMatch(row.device_model)}</strong></span>}
                             {(row.invoice_date || row.service_date) && <span>📅 {(row.invoice_date || row.service_date)!.slice(0, 10)}</span>}
                             <span>Qty: <strong className="text-gray-700">{row.quantity}</strong></span>
-                            <span>Unit price: <strong className="text-gray-700">{formatCurrency(Number(row.total_amount) / (Number(row.quantity) || 1), currency)}</strong></span>
+                            {isAdmin && <span>Unit price: <strong className="text-gray-700">{formatCurrency(Number(row.total_amount) / (Number(row.quantity) || 1), currency)}</strong></span>}
                             <span>ID: <span className="font-mono text-gray-400">{row.id.slice(0, 8)}…</span></span>
                           </div>
                           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2 text-[11px]">
@@ -1186,15 +1264,76 @@ export default function Billing() {
         </div>
       )}
 
+      {/* ── Client Quick View ── */}
+      <Modal
+        title="Client Quick View"
+        open={!!clientQuickViewName}
+        onClose={() => setClientQuickViewName(null)}
+        size="md"
+      >
+        {!clientQuickViewName || clientQuickViewLoading ? (
+          <LoadingSpinner />
+        ) : !clientQuickView ? (
+          <p className="text-sm text-gray-500">No client details found.</p>
+        ) : (
+          <div className="space-y-3 text-sm">
+            <div className="rounded-lg border bg-gray-50 px-3 py-2" style={{ borderColor: '#e7d89f' }}>
+              <p><span className="text-gray-500">Name:</span> <strong>{clientQuickView.client_name}</strong></p>
+              <p><span className="text-gray-500">Phone:</span> {clientQuickView.phone_number || '—'}</p>
+              <p><span className="text-gray-500">Total Jobs:</span> {clientQuickView.total_jobs}</p>
+              <p>
+                <span className="text-gray-500">Outstanding Balance:</span>{' '}
+                {isAdmin
+                  ? <strong className="text-amber-700">{formatCurrency(Number(clientQuickView.outstanding_balance || 0), currency)}</strong>
+                  : <span className="text-gray-400">Restricted</span>}
+              </p>
+            </div>
+            <div>
+              <p className="text-xs font-semibold text-gray-600 mb-1">Recent Services</p>
+              <div className="space-y-1">
+                {clientQuickView.recent_services.map((item) => (
+                  <div key={item.id} className="rounded border border-amber-100 bg-white px-2 py-1 text-xs">
+                    <p className="font-medium text-gray-700">{item.service_name}</p>
+                    <p className="text-gray-500">
+                      {String(item.service_date || '').slice(0, 10) || 'Unknown date'}
+                      {item.payment_status ? ` • ${item.payment_status}` : ''}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
+      </Modal>
+
+      {/* ── Payment Quick View ── */}
+      <Modal
+        title="Payment History"
+        open={!!paymentQuickViewRow}
+        onClose={() => setPaymentQuickViewRow(null)}
+        size="sm"
+      >
+        {paymentQuickViewRow && (
+          <div className="space-y-3">
+            <div className="rounded-lg border bg-gray-50 px-3 py-2 text-xs" style={{ borderColor: '#e7d89f' }}>
+              <p><span className="text-gray-500">Client:</span> <strong>{paymentQuickViewRow.client_name}</strong></p>
+              <p><span className="text-gray-500">Service:</span> {paymentQuickViewRow.service_name}</p>
+              {isAdmin && <p><span className="text-gray-500">Balance:</span> <strong className="text-amber-700">{formatCurrency(Number(paymentQuickViewRow.balance || 0), currency)}</strong></p>}
+            </div>
+            <InvoicePaymentHistory invoiceId={paymentQuickViewRow.id} currency={currency} />
+          </div>
+        )}
+      </Modal>
+
       {/* ── New / Edit Invoice Modal ── */}
       <Modal
         title={editRow ? 'Edit Invoice' : 'New Invoice'}
         open={showForm}
         onClose={closeForm}
         size="lg"
-        bodyClassName="pb-2"
+        bodyClassName="pb-2 max-h-[78vh]"
         footer={(
-          <div className="flex justify-end gap-2">
+          <div className="flex justify-end gap-2 sticky bottom-0 bg-white py-1">
             <button type="button" className="btn-secondary" onClick={closeForm}>Cancel</button>
             <button type="submit" form="invoice-form" className="btn-primary" disabled={saveMutation.isPending || loadingEdit}>
               {loadingEdit ? 'Loading...' : saveMutation.isPending ? 'Saving...' : 'Save'}
@@ -1202,7 +1341,7 @@ export default function Billing() {
           </div>
         )}
       >
-        <form id="invoice-form" onSubmit={handleSubmit((v) => saveMutation.mutate(v))} className="grid grid-cols-2 gap-4">
+        <form id="invoice-form" onSubmit={handleSubmit((v) => saveMutation.mutate(v))} className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <input type="hidden" {...register('client_id')} />
           <div className="col-span-2 relative">
             <label className="form-label">Client Name</label>
@@ -1250,6 +1389,10 @@ export default function Billing() {
           <div>
             <label className="form-label">Service Name</label>
             <input className="form-input" {...register('service_name', { required: 'Required' })} />
+          </div>
+          <div>
+            <label className="form-label">Device Model</label>
+            <input className="form-input" {...register('device_model')} />
           </div>
           <div>
             <label className="form-label">IMEI</label>
@@ -1354,6 +1497,7 @@ export default function Billing() {
                 if (!applyPayRow) return
                 const val = parseFloat(applyPayAmount)
                 if (!Number.isFinite(val) || val <= 0) { toast.error('Enter a valid payment amount'); return }
+                if (val > Number(applyPayRow.balance || 0)) { toast.error('Payment cannot exceed outstanding balance'); return }
                 applyPaymentMutation.mutate({ id: applyPayRow.id, amount: val })
               }}
             >

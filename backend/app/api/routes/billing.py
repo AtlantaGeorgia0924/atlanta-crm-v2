@@ -121,6 +121,38 @@ def _inventory_search_service_ids(sb, term: str) -> list[str]:
     return list(dict.fromkeys(result))
 
 
+def _payment_search_service_ids(sb, term: str) -> list[str]:
+    if not term:
+        return []
+    wildcard = "%" + "%".join(term.split()) + "%"
+
+    try:
+        matches = (
+            sb.table("payments")
+            .select("service_job_id,billing_row_id")
+            .or_(
+                f"reference_no.ilike.{wildcard},"
+                f"payment_note.ilike.{wildcard},"
+                f"notes.ilike.{wildcard},"
+                f"applied_by_name.ilike.{wildcard},"
+                f"reversal_reason.ilike.{wildcard}"
+            )
+            .limit(1000)
+            .execute()
+            .data
+            or []
+        )
+    except Exception:
+        return []
+
+    ids: list[str] = []
+    for row in matches:
+        service_job_id = row.get("service_job_id") or row.get("billing_row_id")
+        if service_job_id:
+            ids.append(str(service_job_id))
+    return list(dict.fromkeys(ids))
+
+
 def _apply_service_search_filters(sb, query, raw_search: Optional[str]):
     term = _normalize_search_term(raw_search)
     if not term:
@@ -137,10 +169,13 @@ def _apply_service_search_filters(sb, query, raw_search: Optional[str]):
         "notes",
         "legacy_source_id",
         "invoice_id",
+        "invoice_reference",
         "imei",
         "serial_number",
         "device_model",
         "model",
+        "condition",
+        "lock_status",
         "supplier",
         "unlock_method",
         "created_by_name",
@@ -158,6 +193,10 @@ def _apply_service_search_filters(sb, query, raw_search: Optional[str]):
     related_ids = _inventory_search_service_ids(sb, term)
     if related_ids:
         clauses.append(f"id.in.({','.join(related_ids)})")
+
+    payment_ids = _payment_search_service_ids(sb, term)
+    if payment_ids:
+        clauses.append(f"id.in.({','.join(payment_ids)})")
 
     if clauses:
         query = query.or_(",".join(clauses))
@@ -554,26 +593,27 @@ def list_billing(
         .order("service_date", desc=True)
         .range(offset, offset + page_size - 1)
     )
-    normalized_status_input = (payment_status or status or "").strip()
-    if normalized_status_input:
-        normalized = normalized_status_input.upper()
-        if normalized in {"PARTIAL", "PART PAYMENT"}:
-            query = query.in_("payment_status", ["PARTIAL", "PART PAYMENT"])
-        else:
-            query = query.eq("payment_status", normalized)
-    if client_id:
-        query = query.eq("client_id", client_id)
-    if created_by:
-        query = query.eq("created_by", created_by)
-    if edited_by:
-        query = query.eq("last_edited_by", edited_by)
-    if assigned_staff:
-        query = query.eq("assigned_staff_id", assigned_staff)
-
     if not is_admin and _staff_scope_enabled(sb):
         query = query.eq("created_by", str(_user.id))
 
     query, has_search = _apply_service_search_filters(sb, query, search)
+
+    if not has_search:
+        normalized_status_input = (payment_status or status or "").strip()
+        if normalized_status_input:
+            normalized = normalized_status_input.upper()
+            if normalized in {"PARTIAL", "PART PAYMENT"}:
+                query = query.in_("payment_status", ["PARTIAL", "PART PAYMENT"])
+            else:
+                query = query.eq("payment_status", normalized)
+        if client_id:
+            query = query.eq("client_id", client_id)
+        if created_by:
+            query = query.eq("created_by", created_by)
+        if edited_by:
+            query = query.eq("last_edited_by", edited_by)
+        if assigned_staff:
+            query = query.eq("assigned_staff_id", assigned_staff)
 
     # Search defaults to global (all dates). Date filters apply only when not searching.
     effective_from = from_date or date_from
@@ -586,16 +626,17 @@ def list_billing(
         query = query.gte("amount_charged", min_amount)
     if max_amount is not None:
         query = query.lte("amount_charged", max_amount)
-    effective_is_return = is_return if is_return is not None else returned
-    if effective_is_return is not None:
-        query = query.eq("is_return", effective_is_return)
+    if not has_search:
+        effective_is_return = is_return if is_return is not None else returned
+        if effective_is_return is not None:
+            query = query.eq("is_return", effective_is_return)
 
-    if paid_state:
-        normalized_paid = paid_state.strip().lower()
-        if normalized_paid == "paid":
-            query = query.eq("payment_status", "PAID")
-        elif normalized_paid in {"unpaid", "not_paid"}:
-            query = query.neq("payment_status", "PAID")
+        if paid_state:
+            normalized_paid = paid_state.strip().lower()
+            if normalized_paid == "paid":
+                query = query.eq("payment_status", "PAID")
+            elif normalized_paid in {"unpaid", "not_paid"}:
+                query = query.neq("payment_status", "PAID")
 
     result = query.execute()
     rows = [_serialize_billing_row(row, is_admin=is_admin) for row in (result.data or [])]
@@ -645,26 +686,27 @@ def list_billing_grouped(
         .range(offset, offset + page_size - 1)
     )
 
-    normalized_status_input = (payment_status or status or "").strip()
-    if normalized_status_input:
-        normalized = normalized_status_input.upper()
-        if normalized in {"PARTIAL", "PART PAYMENT"}:
-            query = query.in_("payment_status", ["PARTIAL", "PART PAYMENT"])
-        else:
-            query = query.eq("payment_status", normalized)
-    if client_id:
-        query = query.eq("client_id", client_id)
-    if created_by:
-        query = query.eq("created_by", created_by)
-    if edited_by:
-        query = query.eq("last_edited_by", edited_by)
-    if assigned_staff:
-        query = query.eq("assigned_staff_id", assigned_staff)
-
     if not is_admin and _staff_scope_enabled(sb):
         query = query.eq("created_by", str(_user.id))
 
     query, has_search = _apply_service_search_filters(sb, query, search)
+
+    if not has_search:
+        normalized_status_input = (payment_status or status or "").strip()
+        if normalized_status_input:
+            normalized = normalized_status_input.upper()
+            if normalized in {"PARTIAL", "PART PAYMENT"}:
+                query = query.in_("payment_status", ["PARTIAL", "PART PAYMENT"])
+            else:
+                query = query.eq("payment_status", normalized)
+        if client_id:
+            query = query.eq("client_id", client_id)
+        if created_by:
+            query = query.eq("created_by", created_by)
+        if edited_by:
+            query = query.eq("last_edited_by", edited_by)
+        if assigned_staff:
+            query = query.eq("assigned_staff_id", assigned_staff)
 
     # Search defaults to global (all dates). Date filters apply only when not searching.
     effective_from = from_date or date_from
@@ -677,15 +719,16 @@ def list_billing_grouped(
         query = query.gte("amount_charged", min_amount)
     if max_amount is not None:
         query = query.lte("amount_charged", max_amount)
-    effective_is_return = is_return if is_return is not None else returned
-    if effective_is_return is not None:
-        query = query.eq("is_return", effective_is_return)
-    if paid_state:
-        normalized_paid = paid_state.strip().lower()
-        if normalized_paid == "paid":
-            query = query.eq("payment_status", "PAID")
-        elif normalized_paid in {"unpaid", "not_paid"}:
-            query = query.neq("payment_status", "PAID")
+    if not has_search:
+        effective_is_return = is_return if is_return is not None else returned
+        if effective_is_return is not None:
+            query = query.eq("is_return", effective_is_return)
+        if paid_state:
+            normalized_paid = paid_state.strip().lower()
+            if normalized_paid == "paid":
+                query = query.eq("payment_status", "PAID")
+            elif normalized_paid in {"unpaid", "not_paid"}:
+                query = query.neq("payment_status", "PAID")
     result = query.execute()
     rows = result.data or []
 
@@ -1060,6 +1103,60 @@ def get_billing(billing_id: str, _user=Depends(get_current_user)):
     if not result.data:
         raise HTTPException(404, "Billing row not found")
     return _serialize_billing_row(result.data, is_admin=user_is_admin(_user))
+
+
+@router.get("/client-summary/by-name")
+def get_client_summary(client_name: str = Query(...), limit: int = Query(5, ge=1, le=20), _user=Depends(get_current_user)):
+    sb = get_supabase()
+    is_admin = user_is_admin(_user)
+    target = _normalize_client_key(client_name)
+
+    rows = (
+        sb.table("service_jobs")
+        .select("id,client_name,phone_number,service_name,description,service_date,amount_charged,paid_amount,payment_status,created_at")
+        .order("service_date", desc=True)
+        .order("created_at", desc=True)
+        .limit(2000)
+        .execute()
+        .data
+        or []
+    )
+
+    matched = [r for r in rows if _normalize_client_key(r.get("client_name") or "") == target]
+    if not matched:
+        raise HTTPException(404, "Client not found")
+
+    phone = ""
+    total_jobs = 0
+    outstanding = 0.0
+    recent_services: list[dict] = []
+
+    for row in matched:
+        total_jobs += 1
+        if not phone:
+            candidate = str(row.get("phone_number") or "").strip()
+            if candidate:
+                phone = candidate
+        amount = to_number(row.get("amount_charged"))
+        paid = to_number(row.get("paid_amount"))
+        outstanding += compute_outstanding(amount, paid)
+        if len(recent_services) < limit:
+            recent_services.append(
+                {
+                    "id": row.get("id"),
+                    "service_name": _best_service_name(row),
+                    "service_date": row.get("service_date"),
+                    "payment_status": _normalize_payment_status(row.get("payment_status")),
+                }
+            )
+
+    return {
+        "client_name": client_name,
+        "phone_number": phone,
+        "total_jobs": total_jobs,
+        "outstanding_balance": outstanding if is_admin else None,
+        "recent_services": recent_services,
+    }
 
 
 @router.get("/{billing_id}/activity")
