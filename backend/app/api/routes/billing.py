@@ -136,11 +136,16 @@ def _apply_service_search_filters(sb, query, raw_search: Optional[str]):
         "description",
         "notes",
         "legacy_source_id",
+        "invoice_id",
         "imei",
         "serial_number",
         "device_model",
+        "model",
         "supplier",
         "unlock_method",
+        "created_by_name",
+        "assigned_staff_name",
+        "last_edited_by_name",
     ]
     clauses = [f"{field}.ilike.{wildcard}" for field in search_fields if field in columns]
 
@@ -570,12 +575,12 @@ def list_billing(
 
     query, has_search = _apply_service_search_filters(sb, query, search)
 
-    # Search defaults to global (all dates). Date filters remain optional refinements.
+    # Search defaults to global (all dates). Date filters apply only when not searching.
     effective_from = from_date or date_from
     effective_to = to_date or date_to
-    if (effective_from and (not has_search or from_date or date_from)):
+    if effective_from and not has_search:
         query = query.gte("service_date", _iso_date_or_none(effective_from))
-    if (effective_to and (not has_search or to_date or date_to)):
+    if effective_to and not has_search:
         query = query.lte("service_date", _iso_date_or_none(effective_to))
     if min_amount is not None:
         query = query.gte("amount_charged", min_amount)
@@ -661,11 +666,12 @@ def list_billing_grouped(
 
     query, has_search = _apply_service_search_filters(sb, query, search)
 
+    # Search defaults to global (all dates). Date filters apply only when not searching.
     effective_from = from_date or date_from
     effective_to = to_date or date_to
-    if (effective_from and (not has_search or from_date or date_from)):
+    if effective_from and not has_search:
         query = query.gte("service_date", _iso_date_or_none(effective_from))
-    if (effective_to and (not has_search or to_date or date_to)):
+    if effective_to and not has_search:
         query = query.lte("service_date", _iso_date_or_none(effective_to))
     if min_amount is not None:
         query = query.gte("amount_charged", min_amount)

@@ -3,7 +3,6 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useForm } from 'react-hook-form'
 import { useSearchParams } from 'react-router-dom'
 import {
-  Calendar, ChevronLeft, ChevronRight,
   Copy, CreditCard, MessageCircle, Pencil, Plus,
   RotateCcw, Search, Trash2, Undo2, X,
 } from 'lucide-react'
@@ -13,7 +12,7 @@ import api from '@/lib/api'
 import { buildIdempotencyKey } from '@/lib/idempotency'
 import LoadingSpinner from '@/components/LoadingSpinner'
 import Modal from '@/components/Modal'
-import { formatCurrency, statusBadgeClass, statusLabel } from '@/lib/utils'
+import { formatCurrency, statusLabel } from '@/lib/utils'
 import { useAuthStore } from '@/store/authStore'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -137,29 +136,6 @@ interface BillingActivityRow {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-function getDefaultMonth(): string {
-  const d = new Date()
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
-}
-
-function monthBounds(month: string): { from: string; to: string } {
-  const [year, m] = month.split('-').map(Number)
-  const start = new Date(year, m - 1, 1)
-  const end = new Date(year, m, 0)
-  return {
-    from: start.toISOString().slice(0, 10),
-    to: end.toISOString().slice(0, 10),
-  }
-}
-
-function formatMonthLabel(monthStr: string): string {
-  const [year, m] = monthStr.split('-').map(Number)
-  return new Date(year, m - 1, 1).toLocaleDateString(undefined, {
-    month: 'long',
-    year: 'numeric',
-  })
-}
-
 function labelForDate(dateStr: string): string {
   if (!dateStr || dateStr === 'Unknown') return 'Unknown Date'
   const d = new Date(`${dateStr}T00:00:00`)
@@ -188,6 +164,15 @@ function normalizePhone(raw?: string): string {
   if (digits.startsWith('234')) return digits
   if (digits.startsWith('0') && digits.length === 11) return '234' + digits.slice(1)
   return digits
+}
+
+function operationStatusClass(status: string): string {
+  const s = String(status || '').toUpperCase()
+  if (s === 'PAID') return 'inline-flex items-center rounded-full px-2 py-0.5 text-xs font-semibold bg-emerald-100 text-emerald-700'
+  if (s === 'PART PAYMENT' || s === 'PARTIAL') return 'inline-flex items-center rounded-full px-2 py-0.5 text-xs font-semibold bg-amber-100 text-amber-700'
+  if (s === 'UNPAID') return 'inline-flex items-center rounded-full px-2 py-0.5 text-xs font-semibold bg-red-100 text-red-700'
+  if (s === 'RETURNED') return 'inline-flex items-center rounded-full px-2 py-0.5 text-xs font-semibold bg-blue-100 text-blue-700'
+  return 'inline-flex items-center rounded-full px-2 py-0.5 text-xs font-semibold bg-gray-100 text-gray-700'
 }
 
 function parseApiError(error: any, fallback: string): string {
@@ -233,6 +218,7 @@ export default function Billing() {
   const [reversePayAmount, setReversePayAmount] = useState('')
   const [reversePayReason, setReversePayReason] = useState('')
   const [loadingEdit, setLoadingEdit] = useState(false)
+  const [showAdvancedFilters, setShowAdvancedFilters] = useState(false)
   const [visibleCount, setVisibleCount] = useState(140)
   const [revealStartIndex, setRevealStartIndex] = useState<number | null>(null)
   const [revealEndIndex, setRevealEndIndex] = useState<number | null>(null)
@@ -240,12 +226,13 @@ export default function Billing() {
   const loadMoreRef = useRef<HTMLDivElement | null>(null)
   const motionTimerRef = useRef<number | null>(null)
 
+  const todayISO = new Date().toISOString().slice(0, 10)
   const page = Number(searchParams.get('page') || '1')
   const statusFilter = searchParams.get('payment_status') || ''
   const search = searchParams.get('search') || ''
-  const dateFrom = searchParams.get('from_date') || ''
-  const dateTo = searchParams.get('to_date') || ''
-  const month = searchParams.get('month') || getDefaultMonth()
+  const selectedDate = searchParams.get('date') || todayISO
+  const rangeFrom = searchParams.get('from_date') || ''
+  const rangeTo = searchParams.get('to_date') || ''
   const minAmount = searchParams.get('min_amount') || ''
   const maxAmount = searchParams.get('max_amount') || ''
   const returned = searchParams.get('is_return') || ''
@@ -255,21 +242,29 @@ export default function Billing() {
   const assignedStaff = searchParams.get('assigned_staff') || ''
 
   const [searchInput, setSearchInput] = useState(search)
+  const normalizedSearch = search.trim()
+  const isRangeMode = !normalizedSearch && !!rangeFrom && !!rangeTo && rangeFrom !== rangeTo
+  const effectiveFrom = normalizedSearch ? undefined : (isRangeMode ? rangeFrom : selectedDate)
+  const effectiveTo = normalizedSearch ? undefined : (isRangeMode ? rangeTo : selectedDate)
 
   const { register, handleSubmit, reset, setValue, formState: { errors } } = useForm<FormValues>()
 
   useEffect(() => { setSearchInput(search) }, [search])
 
   useEffect(() => {
+    if (searchParams.get('date')) return
+    const next = new URLSearchParams(searchParams)
+    next.set('date', todayISO)
+    next.set('page', '1')
+    setSearchParams(next, { replace: true })
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
     const id = setTimeout(() => {
       const next = new URLSearchParams(searchParams)
       const trimmed = searchInput.trim()
       if (trimmed) {
-        // Global search spans all services regardless of date window.
         next.set('search', trimmed)
-        next.delete('from_date')
-        next.delete('to_date')
-        next.delete('month')
       } else {
         next.delete('search')
       }
@@ -287,7 +282,7 @@ export default function Billing() {
     setSearchParams(next, { replace: true })
   }
 
-  const { data: groupedData, isLoading, isFetching } = useQuery<GroupedResponse>({
+  const { data: groupedData, isLoading } = useQuery<GroupedResponse>({
     queryKey: ['billing-grouped', Object.fromEntries(searchParams.entries())],
     queryFn: () =>
       api.get('/billing/grouped', {
@@ -296,8 +291,8 @@ export default function Billing() {
           page_size: 200,
           payment_status: statusFilter || undefined,
           search: search || undefined,
-          from_date: dateFrom || undefined,
-          to_date: dateTo || undefined,
+          from_date: effectiveFrom,
+          to_date: effectiveTo,
           min_amount: minAmount || undefined,
           max_amount: maxAmount || undefined,
           is_return: returned === '' ? undefined : returned === 'true',
@@ -605,20 +600,23 @@ export default function Billing() {
 
   const flatRows: FlatBillingEntry[] = useMemo(() => {
     const entries: FlatBillingEntry[] = []
-    for (const group of grouped) {
-      entries.push({ kind: 'separator', key: `sep-${group.service_date}`, group })
+    const groupsToRender = isRangeMode ? grouped : grouped.slice(0, 1)
+    for (const group of groupsToRender) {
+      if (isRangeMode) {
+        entries.push({ kind: 'separator', key: `sep-${group.service_date}`, group })
+      }
       for (const row of group.items) {
         entries.push({ kind: 'item', key: `row-${row.id}`, group, row })
       }
     }
     return entries
-  }, [grouped])
+  }, [grouped, isRangeMode])
 
   useEffect(() => {
     setVisibleCount(140)
     setRevealStartIndex(null)
     setRevealEndIndex(null)
-  }, [groupedData?.page, groupedData?.total, search, dateFrom, dateTo, statusFilter, paidState, minAmount, maxAmount, returned])
+  }, [groupedData?.page, groupedData?.total, search, selectedDate, rangeFrom, rangeTo, statusFilter, paidState, minAmount, maxAmount, returned])
 
   useEffect(() => {
     if (!loadMoreRef.current) return
@@ -683,40 +681,27 @@ export default function Billing() {
   }, [grouped])
 
   const activeRange = useMemo(() => {
+    if (!isRangeMode) return null
     const today = new Date().toISOString().slice(0, 10)
     const d = new Date()
     d.setDate(d.getDate() - d.getDay())
     const weekStart = d.toISOString().slice(0, 10)
     const monthStart = new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString().slice(0, 10)
-    if (dateFrom === today && dateTo === today) return 'today'
-    if (dateFrom === weekStart && dateTo === today) return 'week'
-    if (dateFrom === monthStart && dateTo === today) return 'month'
+    if (rangeFrom === today && rangeTo === today) return 'today'
+    if (rangeFrom === weekStart && rangeTo === today) return 'week'
+    if (rangeFrom === monthStart && rangeTo === today) return 'month'
     return null
-  }, [dateFrom, dateTo])
-
-  const shiftMonth = (delta: number) => {
-    triggerTableMotion(delta > 0 ? 'left' : 'right')
-    const [y, m] = month.split('-').map(Number)
-    const d = new Date(y, m - 1 + delta, 1)
-    const nextMonth = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
-    const bounds = monthBounds(nextMonth)
-    const next = new URLSearchParams(searchParams)
-    next.set('month', nextMonth)
-    next.set('from_date', bounds.from)
-    next.set('to_date', bounds.to)
-    next.set('page', '1')
-    setSearchParams(next, { replace: true })
-  }
+  }, [isRangeMode, rangeFrom, rangeTo])
 
   const shiftDay = (delta: number) => {
     triggerTableMotion(delta > 0 ? 'left' : 'right')
-    const base = dateFrom || new Date().toISOString().slice(0, 10)
-    const d = new Date(`${base}T00:00:00`)
+    const d = new Date(`${selectedDate}T00:00:00`)
     d.setDate(d.getDate() + delta)
-    const day = d.toISOString().slice(0, 10)
+    const nextDate = d.toISOString().slice(0, 10)
     const next = new URLSearchParams(searchParams)
-    next.set('from_date', day)
-    next.set('to_date', day)
+    next.set('date', nextDate)
+    next.delete('from_date')
+    next.delete('to_date')
     next.set('page', '1')
     setSearchParams(next, { replace: true })
   }
@@ -725,8 +710,9 @@ export default function Billing() {
     if (!day) return
     triggerTableMotion('fade')
     const next = new URLSearchParams(searchParams)
-    next.set('from_date', day)
-    next.set('to_date', day)
+    next.set('date', day)
+    next.delete('from_date')
+    next.delete('to_date')
     next.set('page', '1')
     setSearchParams(next, { replace: true })
   }
@@ -738,19 +724,21 @@ export default function Billing() {
     const to = now.toISOString().slice(0, 10)
 
     if (type === 'today') {
-      from = to
-    } else if (type === 'week') {
+      applySingleDay(to)
+      return
+    }
+
+    if (type === 'week') {
       const start = new Date(now)
       start.setDate(now.getDate() - now.getDay())
       from = start.toISOString().slice(0, 10)
     } else {
       const start = new Date(now.getFullYear(), now.getMonth(), 1)
       from = start.toISOString().slice(0, 10)
-      const monthValue = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`
-      setParam('month', monthValue)
     }
 
     const next = new URLSearchParams(searchParams)
+    next.set('date', to)
     next.set('from_date', from)
     next.set('to_date', to)
     next.set('page', '1')
@@ -759,7 +747,8 @@ export default function Billing() {
 
   const clearFilters = () => {
     const next = new URLSearchParams(searchParams)
-    ;['search', 'from_date', 'to_date', 'payment_status', 'paid_state', 'min_amount', 'max_amount', 'is_return', 'month', 'created_by', 'edited_by', 'assigned_staff'].forEach((k) => next.delete(k))
+    ;['search', 'from_date', 'to_date', 'payment_status', 'paid_state', 'min_amount', 'max_amount', 'is_return', 'created_by', 'edited_by', 'assigned_staff'].forEach((k) => next.delete(k))
+    next.set('date', todayISO)
     next.set('page', '1')
     setSearchInput('')
     setSearchParams(next, { replace: true })
@@ -825,8 +814,7 @@ export default function Billing() {
     }
   }
 
-  const hasActiveFilters = !!(search || dateFrom || dateTo || statusFilter || paidState || minAmount || maxAmount || returned || createdBy || editedBy || assignedStaff)
-  const normalizedSearch = search.trim()
+  const hasActiveFilters = !!(search || rangeFrom || rangeTo || statusFilter || paidState || minAmount || maxAmount || returned || createdBy || editedBy || assignedStaff)
 
   const highlightMatch = (text?: string) => {
     const value = String(text || '')
@@ -887,74 +875,14 @@ export default function Billing() {
         </button>
       </div>
 
-      {/* ── Date Nav + Quick Ranges ── */}
-      <div className="rounded-xl border bg-white px-4 py-3 flex items-center justify-between gap-3 flex-wrap" style={{ borderColor: '#e7d89f' }}>
-        <div className="flex items-center gap-1">
-          <button
-            className="rounded-lg border p-1.5 hover:bg-gray-50 transition-colors"
-            style={{ borderColor: '#d4af37' }}
-            onClick={() => shiftMonth(-1)}
-            title="Previous month"
-          >
-            <ChevronLeft size={15} />
-          </button>
-          <button
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-sm font-semibold hover:bg-[#fffdf5] transition-colors"
-            style={{ borderColor: '#d4af37' }}
-            onClick={() => {
-              const val = prompt('Go to month (YYYY-MM):', month)
-              if (!val) return
-              triggerTableMotion('fade')
-              const bounds = monthBounds(val)
-              const next = new URLSearchParams(searchParams)
-              next.set('month', val)
-              next.set('from_date', bounds.from)
-              next.set('to_date', bounds.to)
-              next.set('page', '1')
-              setSearchParams(next, { replace: true })
-            }}
-            title="Click to jump to a specific month"
-          >
-            <Calendar size={13} className="text-[#D4AF37]" />
-            {formatMonthLabel(month)}
-          </button>
-          <button
-            className="rounded-lg border p-1.5 hover:bg-gray-50 transition-colors"
-            style={{ borderColor: '#d4af37' }}
-            onClick={() => shiftMonth(1)}
-            title="Next month"
-          >
-            <ChevronRight size={15} />
-          </button>
-        </div>
-
-        <div className="flex rounded-lg border overflow-hidden text-xs font-medium" style={{ borderColor: '#d4af37' }}>
-          {(['today', 'week', 'month'] as const).map((type, i) => (
-            <button
-              key={type}
-              onClick={() => applyQuickRange(type)}
-              className={`px-3 py-1.5 transition-colors border-r last:border-r-0 ${
-                activeRange === type
-                  ? 'bg-black text-white'
-                  : 'bg-white text-gray-600 hover:bg-[#fffdf5]'
-              }`}
-              style={{ borderColor: '#d4af37' }}
-            >
-              {['Today', 'This Week', 'This Month'][i]}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {/* ── Compact Filters (2 rows) ── */}
-      <div className="rounded-xl border bg-white px-4 py-3 space-y-2" style={{ borderColor: '#e7d89f' }}>
-        {/* Row 1: Search + status filters */}
-        <div className="flex gap-2 flex-wrap items-center">
-          <div className="relative flex-1 min-w-48" style={{ maxWidth: '65%' }}>
+      {/* ── Operational Header / Filters ── */}
+      <div className="rounded-xl border bg-white px-4 py-3 space-y-3" style={{ borderColor: '#e7d89f' }}>
+        <div className="flex items-center gap-2 flex-wrap">
+          <div className="relative flex-1 min-w-80">
             <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
             <input
               className="form-input pl-9 py-2 text-sm w-full"
-              placeholder="Search clients, phone, service, notes, ID…"
+              placeholder="Search client, phone, IMEI, serial, invoice, service, notes, model, created by, assigned staff..."
               value={searchInput}
               onChange={(e) => setSearchInput(e.target.value)}
             />
@@ -969,98 +897,98 @@ export default function Billing() {
               </button>
             )}
           </div>
-          {isFetching && <span className="text-xs text-amber-700">Searching...</span>}
-          <select className="form-input py-2 text-sm" style={{ minWidth: '9rem' }} value={statusFilter} onChange={(e) => setParam('payment_status', e.target.value)}>
-            <option value="">All statuses</option>
-            <option value="PAID">Paid</option>
-            <option value="PART PAYMENT">Part Payment</option>
-            <option value="UNPAID">Unpaid</option>
-            <option value="RETURNED">Returned</option>
-          </select>
-          {isAdmin && (
-            <select className="form-input py-2 text-sm" style={{ minWidth: '8.5rem' }} value={paidState} onChange={(e) => setParam('paid_state', e.target.value)}>
-              <option value="">All paid states</option>
-              <option value="paid">Paid only</option>
-              <option value="unpaid">Unpaid / partial</option>
-            </select>
-          )}
-          <select className="form-input py-2 text-sm" style={{ minWidth: '8rem' }} value={returned} onChange={(e) => setParam('is_return', e.target.value)}>
-            <option value="">All returns</option>
-            <option value="false">Not returned</option>
-            <option value="true">Returned</option>
-          </select>
-          {isAdmin && (
-            <select className="form-input py-2 text-sm" style={{ minWidth: '11rem' }} value={createdBy} onChange={(e) => setParam('created_by', e.target.value)}>
-              <option value="">Created by (all)</option>
-              {userOptions.map((u) => <option key={u.id} value={u.id}>{u.label}</option>)}
-            </select>
-          )}
-          {isAdmin && (
-            <select className="form-input py-2 text-sm" style={{ minWidth: '11rem' }} value={editedBy} onChange={(e) => setParam('edited_by', e.target.value)}>
-              <option value="">Edited by (all)</option>
-              {userOptions.map((u) => <option key={u.id} value={u.id}>{u.label}</option>)}
-            </select>
-          )}
-          {isAdmin && (
-            <select className="form-input py-2 text-sm" style={{ minWidth: '11rem' }} value={assignedStaff} onChange={(e) => setParam('assigned_staff', e.target.value)}>
-              <option value="">Assigned staff (all)</option>
-              {userOptions.map((u) => <option key={u.id} value={u.id}>{u.label}</option>)}
-            </select>
-          )}
-        </div>
 
-        {/* Row 2: Date + amount range */}
-        <div className="flex gap-2 flex-wrap items-center">
-          <div className="flex items-center gap-1">
-            <span className="text-xs text-gray-400 whitespace-nowrap">From</span>
-            <input type="date" className="form-input py-1.5 text-xs" value={dateFrom} onChange={(e) => setParam('from_date', e.target.value)} />
-          </div>
-          <div className="flex items-center gap-1">
-            <span className="text-xs text-gray-400 whitespace-nowrap">To</span>
-            <input type="date" className="form-input py-1.5 text-xs" value={dateTo} onChange={(e) => setParam('to_date', e.target.value)} />
-          </div>
-          {isAdmin && <input type="number" min="0" className="form-input py-1.5 text-xs" style={{ width: '7rem' }} placeholder="Min amount" value={minAmount} onChange={(e) => setParam('min_amount', e.target.value)} />}
-          {isAdmin && <input type="number" min="0" className="form-input py-1.5 text-xs" style={{ width: '7rem' }} placeholder="Max amount" value={maxAmount} onChange={(e) => setParam('max_amount', e.target.value)} />}
-          <button type="button" className="btn-secondary text-xs" onClick={() => shiftDay(-1)}>Prev Day</button>
-          <input type="date" className="form-input py-1.5 text-xs" value={dateFrom || ''} onChange={(e) => applySingleDay(e.target.value)} />
-          <button type="button" className="btn-secondary text-xs" onClick={() => shiftDay(1)}>Next Day</button>
-          {hasActiveFilters && (
-            <button type="button" className="flex items-center gap-1 text-xs text-gray-500 hover:text-red-600 border rounded-lg px-2 py-1.5 hover:border-red-300 transition-colors ml-auto" style={{ borderColor: '#e5e7eb' }} onClick={clearFilters}>
-              <X size={12} /> Clear filters
-            </button>
-          )}
-        </div>
-
-        {/* Active filter badges */}
-        {hasActiveFilters && (
-          <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
-            {search && <FilterBadge label={`"${search}"`} onRemove={() => { setSearchInput(''); setParam('search') }} />}
-            {dateFrom && <FilterBadge label={`From ${dateFrom}`} onRemove={() => setParam('from_date')} />}
-            {dateTo && <FilterBadge label={`To ${dateTo}`} onRemove={() => setParam('to_date')} />}
-            {statusFilter && <FilterBadge label={statusFilter} onRemove={() => setParam('payment_status')} />}
-            {isAdmin && paidState && <FilterBadge label={`Paid: ${paidState}`} onRemove={() => setParam('paid_state')} />}
-            {isAdmin && minAmount && <FilterBadge label={`Min ${minAmount}`} onRemove={() => setParam('min_amount')} />}
-            {isAdmin && maxAmount && <FilterBadge label={`Max ${maxAmount}`} onRemove={() => setParam('max_amount')} />}
-            {returned && <FilterBadge label={returned === 'true' ? 'Returned' : 'Not returned'} onRemove={() => setParam('is_return')} />}
-            {isAdmin && createdBy && <FilterBadge label={`Created by: ${(userOptions.find((u) => u.id === createdBy)?.label || createdBy)}`} onRemove={() => setParam('created_by')} />}
-            {isAdmin && editedBy && <FilterBadge label={`Edited by: ${(userOptions.find((u) => u.id === editedBy)?.label || editedBy)}`} onRemove={() => setParam('edited_by')} />}
-            {isAdmin && assignedStaff && <FilterBadge label={`Assigned: ${(userOptions.find((u) => u.id === assignedStaff)?.label || assignedStaff)}`} onRemove={() => setParam('assigned_staff')} />}
-          </div>
-        )}
-      </div>
-
-      {/* ── Summary Cards ── */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-        <SummaryCard label="Jobs" value={String(totalSummary.jobs)} />
-        {isAdmin && <SummaryCard label="Total Amount" value={formatCurrency(totalSummary.totalAmount, currency)} />}
-        {isAdmin && <SummaryCard label="Paid" value={formatCurrency(totalSummary.totalPaid, currency)} valueClass="text-emerald-700" />}
-        {isAdmin && (
-          <SummaryCard
-            label="Outstanding"
-            value={formatCurrency(totalSummary.totalOutstanding, currency)}
-            prominent
-            valueClass={totalSummary.totalOutstanding > 0 ? 'text-amber-700' : 'text-emerald-600'}
+          <button type="button" className="btn-secondary text-xs" onClick={() => shiftDay(-1)}>← Previous Day</button>
+          <input
+            type="date"
+            className="form-input py-1.5 text-xs"
+            value={selectedDate}
+            onChange={(e) => applySingleDay(e.target.value)}
           />
+          <button type="button" className="btn-secondary text-xs" onClick={() => shiftDay(1)}>Next Day →</button>
+
+          <div className="flex rounded-lg border overflow-hidden text-xs font-medium" style={{ borderColor: '#d4af37' }}>
+            {(['today', 'week', 'month'] as const).map((type, i) => (
+              <button
+                key={type}
+                onClick={() => applyQuickRange(type)}
+                className={`px-3 py-1.5 transition-colors border-r last:border-r-0 ${
+                  activeRange === type ? 'bg-black text-white' : 'bg-white text-gray-600 hover:bg-[#fffdf5]'
+                }`}
+                style={{ borderColor: '#d4af37' }}
+              >
+                {['Today', 'This Week', 'This Month'][i]}
+              </button>
+            ))}
+          </div>
+
+          <button
+            type="button"
+            className="btn-secondary text-xs"
+            onClick={() => setShowAdvancedFilters((prev) => !prev)}
+          >
+            Advanced Filters {showAdvancedFilters ? '▲' : '▼'}
+          </button>
+
+          {hasActiveFilters && (
+            <button type="button" className="btn-secondary text-xs" onClick={clearFilters}>Clear</button>
+          )}
+        </div>
+
+        <div className="flex items-center justify-between text-xs text-gray-500">
+          <span>
+            {isRangeMode
+              ? `Range mode: ${rangeFrom} to ${rangeTo}`
+              : `Selected date: ${labelForDate(selectedDate)} (${selectedDate})`}
+          </span>
+          <span className="font-medium text-gray-700">Jobs Count: {totalSummary.jobs}</span>
+        </div>
+
+        {showAdvancedFilters && (
+          <div className="border-t pt-3" style={{ borderColor: '#f1e7bf' }}>
+            <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-2">
+              <input type="date" className="form-input py-1.5 text-xs" value={rangeFrom} onChange={(e) => setParam('from_date', e.target.value)} placeholder="From date" />
+              <input type="date" className="form-input py-1.5 text-xs" value={rangeTo} onChange={(e) => setParam('to_date', e.target.value)} placeholder="To date" />
+
+              <select className="form-input py-2 text-xs" value={statusFilter} onChange={(e) => setParam('payment_status', e.target.value)}>
+                <option value="">Payment status</option>
+                <option value="PAID">PAID</option>
+                <option value="PART PAYMENT">PART PAYMENT</option>
+                <option value="UNPAID">UNPAID</option>
+                <option value="RETURNED">RETURNED</option>
+              </select>
+
+              <select className="form-input py-2 text-xs" value={returned} onChange={(e) => setParam('is_return', e.target.value)}>
+                <option value="">Return status</option>
+                <option value="false">Not returned</option>
+                <option value="true">Returned</option>
+              </select>
+
+              {isAdmin && (
+                <select className="form-input py-2 text-xs" value={createdBy} onChange={(e) => setParam('created_by', e.target.value)}>
+                  <option value="">Created by</option>
+                  {userOptions.map((u) => <option key={u.id} value={u.id}>{u.label}</option>)}
+                </select>
+              )}
+
+              {isAdmin && (
+                <select className="form-input py-2 text-xs" value={editedBy} onChange={(e) => setParam('edited_by', e.target.value)}>
+                  <option value="">Edited by</option>
+                  {userOptions.map((u) => <option key={u.id} value={u.id}>{u.label}</option>)}
+                </select>
+              )}
+
+              {isAdmin && (
+                <select className="form-input py-2 text-xs" value={assignedStaff} onChange={(e) => setParam('assigned_staff', e.target.value)}>
+                  <option value="">Assigned staff</option>
+                  {userOptions.map((u) => <option key={u.id} value={u.id}>{u.label}</option>)}
+                </select>
+              )}
+
+              {isAdmin && <input type="number" min="0" className="form-input py-1.5 text-xs" placeholder="Min amount" value={minAmount} onChange={(e) => setParam('min_amount', e.target.value)} />}
+              {isAdmin && <input type="number" min="0" className="form-input py-1.5 text-xs" placeholder="Max amount" value={maxAmount} onChange={(e) => setParam('max_amount', e.target.value)} />}
+            </div>
+          </div>
         )}
       </div>
 
@@ -1091,16 +1019,18 @@ export default function Billing() {
               <div className="max-h-[68vh] overflow-y-auto">
                 <div
                   className="sticky top-0 z-30 grid items-center gap-2 px-4 py-2 text-xs font-medium text-gray-400 uppercase tracking-wide border-b bg-white"
-                  style={{ gridTemplateColumns: '1.5fr 1.7fr 1.2fr 1fr 1fr 1fr 1fr 6rem', borderColor: '#f7f1d8' }}
+                  style={{ gridTemplateColumns: '1.15fr 1fr 1.1fr 1.2fr 0.7fr 0.7fr 0.7fr 0.8fr 0.9fr 1.2fr', borderColor: '#f7f1d8' }}
                 >
                   <span>Client</span>
+                  <span>Phone</span>
+                  <span>Device</span>
                   <span>Service</span>
-                  <span>Created By</span>
-                  <span>Total</span>
+                  <span>Amount</span>
                   <span>Paid</span>
                   <span>Balance</span>
                   <span>Status</span>
-                  <span />
+                  <span>Staff</span>
+                  <span>Actions</span>
                 </div>
 
                 {flatRows.slice(0, visibleCount).map((entry, idx) => {
@@ -1153,33 +1083,34 @@ export default function Billing() {
                     >
                       <div
                         className="group grid items-center gap-2 px-4 py-3 text-sm hover:bg-[#fffdf5] cursor-pointer transition-colors"
-                        style={{ gridTemplateColumns: '1.5fr 1.7fr 1.2fr 1fr 1fr 1fr 1fr 6rem' }}
+                        style={{ gridTemplateColumns: '1.15fr 1fr 1.1fr 1.2fr 0.7fr 0.7fr 0.7fr 0.8fr 0.9fr 1.2fr' }}
                         onClick={() => toggleRow(row.id)}
                       >
                         <span className="truncate font-medium text-gray-900" title={row.client_name}>{highlightMatch(row.client_name)}</span>
-                        <span className="truncate text-gray-600" title={row.service_name}>{highlightMatch(row.service_name)}</span>
-                        <span className="truncate text-gray-500" title={row.created_by_name || row.assigned_staff_name || 'Unattributed'}>
-                          {row.created_by_name || row.assigned_staff_name || 'Unattributed'}
+                        <span className="truncate text-gray-600" title={row.phone_number || ''}>{highlightMatch(row.phone_number)}</span>
+                        <span className="truncate text-gray-600" title={String((row as any).device_model || (row as any).imei || (row as any).serial_number || '—')}>
+                          {highlightMatch((row as any).device_model || (row as any).imei || (row as any).serial_number || '—')}
                         </span>
+                        <span className="truncate text-gray-600" title={row.service_name}>{highlightMatch(row.service_name)}</span>
                         <span className="text-gray-800 tabular-nums">{formatCurrency(row.total_amount, currency)}</span>
                         <span className="text-emerald-700 tabular-nums">{formatCurrency(row.amount_paid, currency)}</span>
                         <span className={`tabular-nums font-medium ${balancePositive ? 'text-amber-700' : 'text-gray-300'}`}>
                           {balancePositive ? formatCurrency(row.balance, currency) : '—'}
                         </span>
                         <span>
-                          <span className={statusBadgeClass(row.status)}>{statusLabel(row.status)}</span>
+                          <span className={operationStatusClass(row.status)}>{statusLabel(row.status)}</span>
+                        </span>
+                        <span className="truncate text-gray-500" title={row.assigned_staff_name || row.created_by_name || 'Unassigned'}>
+                          {row.assigned_staff_name || row.created_by_name || 'Unassigned'}
                         </span>
                         <div
-                          className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity"
+                          className="flex items-center gap-1"
                           onClick={(e) => e.stopPropagation()}
                         >
-                          <ActionBtn title="Edit" icon={<Pencil size={13} />} onClick={() => { void openEdit(row) }} />
-                          {isAdmin && <ActionBtn title="Apply Payment" icon={<CreditCard size={13} />} onClick={() => openApplyPayment(row)} />}
-                          {isAdmin && Number(row.amount_paid || 0) > 0 && <ActionBtn title="Reverse Payment" icon={<Undo2 size={13} />} onClick={() => { setReversePayRow(row); setReversePayAmount(''); setReversePayReason('') }} colorClass="hover:text-amber-700" />}
-                          <ActionBtn title="WhatsApp Bill" icon={<MessageCircle size={13} />} onClick={() => openWhatsApp(row)} colorClass="hover:text-green-600" />
-                          <ActionBtn title="Copy Bill" icon={<Copy size={13} />} onClick={() => copyBill(row)} />
-                          <ActionBtn title="Mark Returned" icon={<RotateCcw size={13} />} onClick={() => { if (confirm('Mark as returned?')) markReturnedMutation.mutate(row.id) }} />
-                          <ActionBtn title="Delete" icon={<Trash2 size={13} />} onClick={() => { if (confirm('Delete invoice?')) deleteMutation.mutate(row.id) }} colorClass="hover:text-red-600" />
+                          <button type="button" className="text-[11px] px-1.5 py-1 rounded border hover:bg-gray-50" style={{ borderColor: '#e7d89f' }} onClick={() => { void openEdit(row) }}>Edit</button>
+                          {isAdmin && <button type="button" className="text-[11px] px-1.5 py-1 rounded border hover:bg-gray-50" style={{ borderColor: '#e7d89f' }} onClick={() => openApplyPayment(row)}>Apply Payment</button>}
+                          <button type="button" className="text-[11px] px-1.5 py-1 rounded border text-green-700 hover:bg-green-50" style={{ borderColor: '#b7e2c1' }} onClick={() => openWhatsApp(row)}>Send Bill</button>
+                          <button type="button" className="text-[11px] px-1.5 py-1 rounded border hover:bg-gray-50" style={{ borderColor: '#e7d89f' }} onClick={() => toggleRow(row.id)}>{expanded ? 'Hide History' : 'View History'}</button>
                         </div>
                       </div>
 
@@ -1637,62 +1568,6 @@ function BillingActivityTimeline({ invoiceId }: { invoiceId: string }) {
         </div>
       )}
     </div>
-  )
-}
-
-function FilterBadge({ label, onRemove }: { label: string; onRemove: () => void }) {
-  return (
-    <span className="inline-flex items-center gap-1 text-xs rounded-full border bg-white px-2 py-0.5" style={{ borderColor: '#d4af37' }}>
-      {label}
-      <button type="button" onClick={onRemove} className="text-gray-400 hover:text-gray-700 ml-0.5 leading-none">
-        <X size={10} />
-      </button>
-    </span>
-  )
-}
-
-function SummaryCard({
-  label,
-  value,
-  prominent = false,
-  valueClass = '',
-}: {
-  label: string
-  value: string
-  prominent?: boolean
-  valueClass?: string
-}) {
-  return (
-    <div
-      className={`rounded-xl border px-4 py-3 bg-white ${prominent ? 'ring-1 ring-amber-200' : ''}`}
-      style={{ borderColor: prominent ? '#d4af37' : '#e7d89f' }}
-    >
-      <p className={`text-xs text-gray-500 mb-0.5 ${prominent ? 'font-medium uppercase tracking-wide' : ''}`}>{label}</p>
-      <p className={`font-bold ${prominent ? 'text-2xl' : 'text-lg'} ${valueClass}`}>{value}</p>
-    </div>
-  )
-}
-
-function ActionBtn({
-  title,
-  icon,
-  onClick,
-  colorClass = 'hover:text-[#D4AF37]',
-}: {
-  title: string
-  icon: React.ReactNode
-  onClick: () => void
-  colorClass?: string
-}) {
-  return (
-    <button
-      title={title}
-      type="button"
-      className={`p-1 rounded text-gray-400 transition-colors ${colorClass}`}
-      onClick={onClick}
-    >
-      {icon}
-    </button>
   )
 }
 
