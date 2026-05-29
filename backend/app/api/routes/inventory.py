@@ -33,12 +33,24 @@ def _inventory_item_columns(sb) -> set[str]:
         _INVENTORY_COLUMNS_CACHE = {str(r.get("column_name")) for r in rows if r.get("column_name")}
     except Exception:
         _INVENTORY_COLUMNS_CACHE = set()
+
+    if not _INVENTORY_COLUMNS_CACHE:
+        # Fallback for environments where information_schema is restricted.
+        try:
+            probe_rows = sb.table("inventory_items").select("*").limit(1).execute().data or []
+            if probe_rows and isinstance(probe_rows[0], dict):
+                _INVENTORY_COLUMNS_CACHE = {str(k) for k in probe_rows[0].keys()}
+        except Exception:
+            pass
+
     return _INVENTORY_COLUMNS_CACHE
 
 
 def _apply_active_inventory_filter(sb, query):
     if "deleted_at" in _inventory_item_columns(sb):
         return query.is_("deleted_at", "null")
+    if "payment_status" in _inventory_item_columns(sb):
+        return query.or_("payment_status.is.null,payment_status.neq.DELETED")
     return query
 
 
@@ -1135,8 +1147,15 @@ def delete_item(item_id: str, _user=Depends(get_current_user)):
                 "deleted_by": str(_user.id),
             }
         ).eq("id", item_id).execute()
+    elif "payment_status" in item_columns:
+        # Legacy-schema fallback: mark as deleted without hard-deleting referenced rows.
+        sb.table("inventory_items").update(
+            {
+                "payment_status": "DELETED",
+            }
+        ).eq("id", item_id).execute()
     else:
-        sb.table("inventory_items").delete().eq("id", item_id).execute()
+        raise HTTPException(500, "Inventory delete is unavailable: soft-delete columns are missing")
     emit_financial_event(
         sb,
         "inventory_item_deleted",

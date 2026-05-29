@@ -1245,6 +1245,24 @@ export default function Billing() {
                           <button type="button" className="text-[10px] px-1.5 py-0.5 rounded border hover:bg-gray-50" style={{ borderColor: '#e7d89f' }} onClick={() => { void openEdit(row) }}>Edit</button>
                           {isAdmin && <button type="button" className="text-[10px] px-1.5 py-0.5 rounded border hover:bg-gray-50" style={{ borderColor: '#e7d89f' }} onClick={() => openApplyPayment(row)}>Apply Payment</button>}
                           <button type="button" className="text-[10px] px-1.5 py-0.5 rounded border text-green-700 hover:bg-green-50" style={{ borderColor: '#b7e2c1' }} onClick={() => openWhatsApp(row)}>Send Bill</button>
+                          {row.status !== 'RETURNED' && (
+                            <button
+                              type="button"
+                              className="text-[10px] px-1.5 py-0.5 rounded border text-amber-700 hover:bg-amber-50"
+                              style={{ borderColor: '#f3d6a6' }}
+                              onClick={() => { if (confirm('Mark as returned?')) markReturnedMutation.mutate(row.id) }}
+                            >
+                              Mark Returned
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            className="text-[10px] px-1.5 py-0.5 rounded border text-red-600 hover:bg-red-50"
+                            style={{ borderColor: '#f4c8c8' }}
+                            onClick={() => { if (confirm('Delete invoice?')) deleteMutation.mutate(row.id) }}
+                          >
+                            Delete
+                          </button>
                           <button type="button" className="text-[10px] px-1.5 py-0.5 rounded border hover:bg-gray-50" style={{ borderColor: '#e7d89f' }} onClick={() => toggleRow(row.id)}>{expanded ? 'Hide History' : 'View History'}</button>
                         </div>
                       </div>
