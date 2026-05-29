@@ -3,8 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useForm } from 'react-hook-form'
 import { useSearchParams } from 'react-router-dom'
 import {
-  Copy, CreditCard, MessageCircle, Pencil, Plus,
-  RotateCcw, Search, Trash2, Undo2, X,
+  MoreVertical, Plus, Search, X,
 } from 'lucide-react'
 import toast from 'react-hot-toast'
 
@@ -248,6 +247,7 @@ export default function Billing() {
   const [reversePayIdempotencyKey, setReversePayIdempotencyKey] = useState('')
   const [loadingEdit, setLoadingEdit] = useState(false)
   const [showAdvancedFilters, setShowAdvancedFilters] = useState(false)
+  const [actionMenuRowId, setActionMenuRowId] = useState<string | null>(null)
   const [clientQuickViewName, setClientQuickViewName] = useState<string | null>(null)
   const [paymentQuickViewRow, setPaymentQuickViewRow] = useState<BillingRow | null>(null)
   const [visibleCount, setVisibleCount] = useState(140)
@@ -921,19 +921,10 @@ export default function Billing() {
     }
   }
 
-  const copyBill = async (row: BillingRow) => {
-    try {
-      await navigator.clipboard.writeText(generateBillText(row))
-      toast.success('Bill copied to clipboard')
-    } catch {
-      toast.error('Copy failed')
-    }
-  }
-
   const hasActiveFilters = !!(search || rangeFrom || rangeTo || statusFilter || paidState || minAmount || maxAmount || returned || createdBy || editedBy || assignedStaff)
   const tableTemplate = isAdmin
-    ? '1.1fr 1fr 1fr 1.2fr 0.72fr 0.72fr 0.72fr 0.75fr 0.9fr 1.25fr'
-    : '1.3fr 1.1fr 1.1fr 1.5fr 0.85fr 0.95fr 1.35fr'
+    ? '1.05fr 1.85fr 1fr 0.82fr 0.92fr 0.84fr'
+    : '1.2fr 2.15fr 0.95fr 0.95fr 0.9fr'
 
   const highlightMatch = (text?: string) => {
     const value = String(text || '')
@@ -953,6 +944,14 @@ export default function Billing() {
       </>
     )
   }
+
+  const financialStack = (row: BillingRow) => (
+    <div className="leading-tight">
+      <div className="text-[11px] text-gray-500">Total: <span className="font-semibold text-gray-800 tabular-nums">{formatCurrency(Number(row.total_amount || 0), currency)}</span></div>
+      <div className="text-[11px] text-gray-500">Paid: <span className="font-semibold text-emerald-700 tabular-nums">{formatCurrency(Number(row.amount_paid || 0), currency)}</span></div>
+      <div className="text-[11px] text-gray-500">Bal: <span className={`font-semibold tabular-nums ${Number(row.balance || 0) > 0 ? 'text-amber-700' : 'text-gray-500'}`}>{formatCurrency(Number(row.balance || 0), currency)}</span></div>
+    </div>
+  )
 
   // ─── Render ─────────────────────────────────────────────────────────────────
 
@@ -996,13 +995,13 @@ export default function Billing() {
       </div>
 
       {/* ── Operational Header / Filters ── */}
-      <div className="rounded-xl border bg-white px-4 py-3 space-y-3" style={{ borderColor: '#e7d89f' }}>
+      <div className="rounded-xl border bg-white px-4 py-2 space-y-2" style={{ borderColor: '#e7d89f' }}>
         <div className="flex items-center gap-2 flex-wrap">
           <div className="relative flex-1 min-w-80">
             <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
             <input
               className="form-input pl-9 py-2 text-sm w-full"
-              placeholder="Search client, phone, IMEI, serial, invoice, service, notes, model, created by, assigned staff..."
+              placeholder="Search client, phone, IMEI, invoice, service, notes..."
               value={searchInput}
               onChange={(e) => setSearchInput(e.target.value)}
             />
@@ -1017,6 +1016,8 @@ export default function Billing() {
               </button>
             )}
           </div>
+
+          <span className="text-xs font-semibold text-gray-700 whitespace-nowrap">Jobs Count: {totalSummary.jobs}</span>
 
           <button type="button" className="btn-secondary text-xs" onClick={() => shiftDay(-1)}>← Previous Day</button>
           <input
@@ -1046,17 +1047,16 @@ export default function Billing() {
           )}
         </div>
 
-        <div className="flex items-center justify-between text-xs text-gray-500">
+        <div className="text-xs text-gray-500">
           <span>
             {isRangeMode
               ? `Range mode: ${rangeFrom} to ${rangeTo}`
               : `Selected date: ${labelForDate(selectedDate)} (${selectedDate})`}
           </span>
-          <span className="font-medium text-gray-700">Jobs Count: {totalSummary.jobs}</span>
         </div>
 
         {showAdvancedFilters && (
-          <div className="border-t pt-3" style={{ borderColor: '#f1e7bf' }}>
+          <div className="border-t pt-2" style={{ borderColor: '#f1e7bf' }}>
             <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-2">
               <input type="date" className="form-input py-1.5 text-xs" value={rangeFrom} onChange={(e) => setParam('from_date', e.target.value)} placeholder="From date" />
               <input type="date" className="form-input py-1.5 text-xs" value={rangeTo} onChange={(e) => setParam('to_date', e.target.value)} placeholder="To date" />
@@ -1107,7 +1107,7 @@ export default function Billing() {
       {isLoading ? (
         <LoadingSpinner />
       ) : (
-        <div className="space-y-3">
+        <div className="space-y-2">
           {flatRows.length === 0 && (
             <div className="rounded-xl border p-8 text-sm text-gray-400 text-center" style={{ borderColor: '#e7d89f' }}>
               No jobs found for the current filters.
@@ -1127,21 +1127,17 @@ export default function Billing() {
               }`}
               style={{ borderColor: '#e7d89f' }}
             >
-              <div className="max-h-[68vh] overflow-y-auto">
+              <div className="hidden md:block max-h-[72vh] overflow-y-auto">
                 <div
                   className="sticky top-0 z-30 grid items-center gap-2 px-3 py-1.5 text-[11px] font-medium text-gray-400 uppercase tracking-wide border-b bg-white"
                   style={{ gridTemplateColumns: tableTemplate, borderColor: '#f7f1d8' }}
                 >
                   <span>Client</span>
-                  <span>Phone</span>
-                  <span>Device</span>
-                  <span>Service</span>
-                  {isAdmin && <span>Amount</span>}
-                  {isAdmin && <span>Paid</span>}
-                  {isAdmin && <span>Balance</span>}
-                  <span>Status</span>
+                  <span>Service / Device</span>
+                  {isAdmin && <span>Financials</span>}
+                  <span className="text-center">Status</span>
                   <span>Staff</span>
-                  <span>Actions</span>
+                  <span className="text-center">Actions</span>
                 </div>
 
                 {flatRows.slice(0, visibleCount).map((entry, idx) => {
@@ -1178,7 +1174,6 @@ export default function Billing() {
 
                   const row = entry.row
                   const expanded = expandedRows.has(row.id)
-                  const balancePositive = Number(row.balance) > 0
                   const showBottomBorder = idx < Math.min(visibleCount, flatRows.length) - 1
                   const isRevealedRow = revealStartIndex != null && revealEndIndex != null && idx >= revealStartIndex && idx < revealEndIndex
                   const revealDelay = revealStartIndex == null ? 0 : Math.min((idx - revealStartIndex) * 14, 180)
@@ -1193,132 +1188,87 @@ export default function Billing() {
                       }}
                     >
                       <div
-                        className="group grid items-center gap-2 px-3 py-1.5 text-xs hover:bg-[#fffdf5] cursor-pointer transition-colors"
+                        className="group grid items-center gap-2 px-3 py-1 text-xs hover:bg-[#fffdf5] cursor-pointer transition-colors"
                         style={{ gridTemplateColumns: tableTemplate }}
                         onClick={() => toggleRow(row.id)}
                       >
-                        <button
-                          type="button"
-                          className="truncate text-left font-semibold text-[#2b5c9a] hover:underline"
-                          title={row.client_name}
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            setClientQuickViewName(row.client_name)
-                          }}
-                        >
-                          {highlightMatch(row.client_name)}
-                        </button>
-                        <span className="truncate text-gray-600" title={row.phone_number || ''}>{highlightMatch(row.phone_number)}</span>
-                        <span className="truncate text-gray-600" title={String(row.device_model || row.imei || row.serial_number || '—')}>
-                          {highlightMatch(row.device_model || row.imei || row.serial_number || '—')}
-                        </span>
-                        <span className="truncate text-gray-600" title={row.service_name}>{highlightMatch(row.service_name)}</span>
-                        {isAdmin && <span className="text-gray-800 tabular-nums">{formatCurrency(row.total_amount, currency)}</span>}
-                        {isAdmin && <span className="text-emerald-700 tabular-nums">{formatCurrency(row.amount_paid, currency)}</span>}
-                        {isAdmin && (
+                        <div className="min-w-0">
                           <button
                             type="button"
-                            className={`text-left tabular-nums font-medium ${balancePositive ? 'text-amber-700 hover:underline' : 'text-gray-300'}`}
+                            className="truncate text-left font-semibold text-[#2b5c9a] hover:underline"
+                            title={row.client_name}
                             onClick={(e) => {
                               e.stopPropagation()
-                              setPaymentQuickViewRow(row)
+                              setClientQuickViewName(row.client_name)
                             }}
                           >
-                            {balancePositive ? formatCurrency(row.balance, currency) : '—'}
+                            {highlightMatch(row.client_name)}
                           </button>
-                        )}
-                        <button
-                          type="button"
-                          className="text-left"
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            setPaymentQuickViewRow(row)
-                          }}
-                        >
+                          <div className="truncate text-[11px] text-gray-500">{highlightMatch(row.phone_number)}</div>
+                        </div>
+                        <div className="min-w-0 leading-tight">
+                          <div className="truncate text-[12px] font-semibold text-gray-800" title={String(row.device_model || '—')}>
+                            {highlightMatch(row.device_model || '—')}
+                          </div>
+                          <div className="truncate text-[11px] text-gray-500" title={String(row.service_name || '—')}>
+                            {highlightMatch(row.service_name || '—')}
+                          </div>
+                          <div className="truncate text-[11px] text-gray-400" title={String(row.imei || '—')}>
+                            IMEI: {highlightMatch(row.imei || '—')}
+                          </div>
+                        </div>
+                        {isAdmin && financialStack(row)}
+                        <div className="text-center">
                           <span className={operationStatusClass(row.status)}>{statusLabel(row.status)}</span>
-                        </button>
+                        </div>
                         <span className="truncate text-gray-500" title={row.assigned_staff_name || row.created_by_name || 'Unassigned'}>
                           {row.assigned_staff_name || row.created_by_name || 'Unassigned'}
                         </span>
-                        <div
-                          className="flex items-center gap-1"
-                          onClick={(e) => e.stopPropagation()}
-                        >
-                          <button type="button" className="text-[10px] px-1.5 py-0.5 rounded border hover:bg-gray-50" style={{ borderColor: '#e7d89f' }} onClick={() => { void openEdit(row) }}>Edit</button>
-                          {isAdmin && <button type="button" className="text-[10px] px-1.5 py-0.5 rounded border hover:bg-gray-50" style={{ borderColor: '#e7d89f' }} onClick={() => openApplyPayment(row)}>Apply Payment</button>}
-                          <button type="button" className="text-[10px] px-1.5 py-0.5 rounded border text-green-700 hover:bg-green-50" style={{ borderColor: '#b7e2c1' }} onClick={() => openWhatsApp(row)}>Send Bill</button>
-                          {row.status !== 'RETURNED' && (
-                            <button
-                              type="button"
-                              className="text-[10px] px-1.5 py-0.5 rounded border text-amber-700 hover:bg-amber-50"
-                              style={{ borderColor: '#f3d6a6' }}
-                              onClick={() => { if (confirm('Mark as returned?')) markReturnedMutation.mutate(row.id) }}
-                            >
-                              Mark Returned
-                            </button>
-                          )}
+                        <div className="relative flex justify-center" onClick={(e) => e.stopPropagation()}>
                           <button
                             type="button"
-                            className="text-[10px] px-1.5 py-0.5 rounded border text-red-600 hover:bg-red-50"
-                            style={{ borderColor: '#f4c8c8' }}
-                            onClick={() => { if (confirm('Delete invoice?')) deleteMutation.mutate(row.id) }}
+                            className="inline-flex items-center gap-1 rounded border px-2 py-1 text-[11px] text-gray-700 hover:bg-gray-50"
+                            style={{ borderColor: '#e7d89f' }}
+                            onClick={() => setActionMenuRowId((prev) => (prev === row.id ? null : row.id))}
                           >
-                            Delete
+                            <MoreVertical size={14} /> Actions
                           </button>
-                          <button type="button" className="text-[10px] px-1.5 py-0.5 rounded border hover:bg-gray-50" style={{ borderColor: '#e7d89f' }} onClick={() => toggleRow(row.id)}>{expanded ? 'Hide History' : 'View History'}</button>
+                          {actionMenuRowId === row.id && (
+                            <div className="absolute right-0 top-[calc(100%+4px)] z-40 w-40 rounded-md border bg-white shadow-lg" style={{ borderColor: '#e7d89f' }}>
+                              <button type="button" className="w-full px-3 py-1.5 text-left text-[11px] hover:bg-gray-50" onClick={() => { setActionMenuRowId(null); void openEdit(row) }}>Edit</button>
+                              {isAdmin && <button type="button" className="w-full px-3 py-1.5 text-left text-[11px] hover:bg-gray-50" onClick={() => { setActionMenuRowId(null); openApplyPayment(row) }}>Apply Payment</button>}
+                              <button type="button" className="w-full px-3 py-1.5 text-left text-[11px] hover:bg-gray-50" onClick={() => { setActionMenuRowId(null); void openWhatsApp(row) }}>Send Bill</button>
+                              <button type="button" className="w-full px-3 py-1.5 text-left text-[11px] hover:bg-gray-50" onClick={() => { setActionMenuRowId(null); toggleRow(row.id) }}>View History</button>
+                              {row.status !== 'RETURNED' && <button type="button" className="w-full px-3 py-1.5 text-left text-[11px] text-amber-700 hover:bg-amber-50" onClick={() => { setActionMenuRowId(null); if (confirm('Mark as returned?')) markReturnedMutation.mutate(row.id) }}>Mark Returned</button>}
+                              {isAdmin && <button type="button" className="w-full px-3 py-1.5 text-left text-[11px] text-red-600 hover:bg-red-50" onClick={() => { setActionMenuRowId(null); if (confirm('Delete invoice?')) deleteMutation.mutate(row.id) }}>Delete</button>}
+                            </div>
+                          )}
                         </div>
                       </div>
 
                       {expanded && (
                         <div
-                          className="px-6 pb-3 pt-2 bg-[#fffdf5] border-t text-xs text-gray-600 space-y-2"
+                          className="px-5 pb-3 pt-2 bg-[#fffdf5] border-t text-xs text-gray-600 space-y-2"
                           style={{ borderColor: '#f7f1d8' }}
                           onClick={(e) => e.stopPropagation()}
                         >
-                          <div className="flex flex-wrap gap-x-6 gap-y-1 text-gray-500">
-                            {row.phone_number && <span>📱 <strong className="text-gray-700">{highlightMatch(row.phone_number)}</strong></span>}
-                            {row.imei && <span>IMEI: <strong className="text-gray-700">{highlightMatch(row.imei)}</strong></span>}
-                            {row.device_model && <span>Device: <strong className="text-gray-700">{highlightMatch(row.device_model)}</strong></span>}
-                            {(row.invoice_date || row.service_date) && <span>📅 {(row.invoice_date || row.service_date)!.slice(0, 10)}</span>}
-                            <span>Qty: <strong className="text-gray-700">{row.quantity}</strong></span>
-                            {isAdmin && <span>Unit price: <strong className="text-gray-700">{formatCurrency(Number(row.total_amount) / (Number(row.quantity) || 1), currency)}</strong></span>}
-                            <span>ID: <span className="font-mono text-gray-400">{row.id.slice(0, 8)}…</span></span>
-                          </div>
-                          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2 text-[11px]">
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-2 text-[11px]">
                             <div className="rounded border border-amber-100 bg-white px-2 py-1">
-                              <p className="text-gray-400">Created by</p>
-                              <p className="font-medium text-gray-700">{row.created_by_name || 'Unknown'}</p>
+                              <p className="text-gray-400">Phone Number</p>
+                              <p className="font-medium text-gray-700">{row.phone_number || '—'}</p>
                             </div>
                             <div className="rounded border border-amber-100 bg-white px-2 py-1">
-                              <p className="text-gray-400">Last edited</p>
-                              <p className="font-medium text-gray-700">{row.last_edited_by_name || '—'}</p>
-                              {row.last_edited_at && <p className="text-gray-400">{String(row.last_edited_at).slice(0, 19).replace('T', ' ')}</p>}
-                            </div>
-                            <div className="rounded border border-amber-100 bg-white px-2 py-1">
-                              <p className="text-gray-400">Last payment</p>
-                              <p className="font-medium text-gray-700">{row.last_payment_by_name || '—'}</p>
-                              {row.last_payment_at && <p className="text-gray-400">{String(row.last_payment_at).slice(0, 19).replace('T', ' ')}</p>}
-                            </div>
-                            <div className="rounded border border-amber-100 bg-white px-2 py-1">
-                              <p className="text-gray-400">Returned by</p>
-                              <p className="font-medium text-gray-700">{row.returned_by_name || '—'}</p>
-                              {row.returned_at && <p className="text-gray-400">{String(row.returned_at).slice(0, 19).replace('T', ' ')}</p>}
+                              <p className="text-gray-400">IMEI</p>
+                              <p className="font-medium text-gray-700">{row.imei || '—'}</p>
                             </div>
                           </div>
-                          {row.notes && <p className="italic text-gray-400">📝 {row.notes}</p>}
+                          <div className="rounded border border-amber-100 bg-white px-2 py-1">
+                            <p className="text-gray-400">Notes</p>
+                            <p className="font-medium text-gray-700">{row.notes || '—'}</p>
+                          </div>
                           {isAdmin && <InvoicePaymentHistory invoiceId={row.id} currency={currency} />}
-                          <BillingActivityTimeline invoiceId={row.id} />
-                          <div className="flex flex-wrap gap-2 pt-1">
-                            <InlineBtn icon={<Pencil size={11} />} label="Edit" onClick={() => { void openEdit(row) }} />
-                            {isAdmin && <InlineBtn icon={<CreditCard size={11} />} label="Apply Payment" onClick={() => openApplyPayment(row)} />}
-                            {isAdmin && Number(row.amount_paid || 0) > 0 && <InlineBtn icon={<Undo2 size={11} />} label="Reverse Payment" onClick={() => { setReversePayRow(row); setReversePayAmount(''); setReversePayReason(''); setReversePayIdempotencyKey(buildIdempotencyKey('payment-reverse')) }} extraClass="text-amber-700 hover:bg-amber-50" />}
-                            <InlineBtn icon={<MessageCircle size={11} />} label="WhatsApp" onClick={() => openWhatsApp(row)} extraClass="text-green-700 hover:bg-green-50" />
-                            <InlineBtn icon={<Copy size={11} />} label="Copy Bill" onClick={() => copyBill(row)} />
-                            {row.status !== 'RETURNED' && (
-                              <InlineBtn icon={<RotateCcw size={11} />} label="Mark Returned" onClick={() => { if (confirm('Mark as returned?')) markReturnedMutation.mutate(row.id) }} />
-                            )}
-                            <InlineBtn icon={<Trash2 size={11} />} label="Delete" onClick={() => { if (confirm('Delete invoice?')) deleteMutation.mutate(row.id) }} extraClass="text-red-600 hover:bg-red-50" />
-                          </div>
+                          <BillingWhatsAppHistory invoiceId={row.id} />
+                          <BillingReturnHistory invoiceId={row.id} />
                         </div>
                       )}
                     </div>
@@ -1329,6 +1279,77 @@ export default function Billing() {
                   <div ref={loadMoreRef} className="px-4 py-3 text-center text-xs text-gray-400">
                     Loading more rows...
                   </div>
+                )}
+              </div>
+
+              <div className="md:hidden max-h-[76vh] overflow-y-auto space-y-2 p-2">
+                {flatRows.slice(0, visibleCount).map((entry) => {
+                  if (entry.kind === 'separator') {
+                    return (
+                      <div key={entry.key} className="sticky top-0 z-20 rounded border bg-[#fffdf5] px-3 py-1 text-xs font-medium text-gray-600" style={{ borderColor: '#f1e7bf' }}>
+                        {labelForDate(entry.group.service_date)}
+                      </div>
+                    )
+                  }
+                  const row = entry.row
+                  const expanded = expandedRows.has(row.id)
+                  return (
+                    <div key={entry.key} className="rounded-lg border bg-white" style={{ borderColor: '#f1e7bf' }}>
+                      <div className="p-3 space-y-2" onClick={() => toggleRow(row.id)}>
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="min-w-0">
+                            <p className="truncate text-sm font-semibold text-[#2b5c9a]">{row.client_name}</p>
+                            <p className="truncate text-xs text-gray-500">{row.phone_number || 'No phone'}</p>
+                          </div>
+                          <span className={operationStatusClass(row.status)}>{statusLabel(row.status)}</span>
+                        </div>
+                        <div className="text-xs leading-tight">
+                          <p className="truncate font-medium text-gray-800">{row.device_model || '—'}</p>
+                          <p className="truncate text-gray-500">{row.service_name || '—'}</p>
+                          <p className="truncate text-gray-400">IMEI: {row.imei || '—'}</p>
+                        </div>
+                        {isAdmin && financialStack(row)}
+                        <div className="flex items-center justify-between">
+                          <p className="text-xs text-gray-500">{row.assigned_staff_name || row.created_by_name || 'Unassigned'}</p>
+                          <div className="relative" onClick={(e) => e.stopPropagation()}>
+                            <button
+                              type="button"
+                              className="inline-flex items-center gap-1 rounded border px-2 py-1 text-[11px] text-gray-700"
+                              style={{ borderColor: '#e7d89f' }}
+                              onClick={() => setActionMenuRowId((prev) => (prev === row.id ? null : row.id))}
+                            >
+                              <MoreVertical size={14} /> Actions
+                            </button>
+                            {actionMenuRowId === row.id && (
+                              <div className="absolute right-0 top-[calc(100%+4px)] z-40 w-40 rounded-md border bg-white shadow-lg" style={{ borderColor: '#e7d89f' }}>
+                                <button type="button" className="w-full px-3 py-1.5 text-left text-[11px] hover:bg-gray-50" onClick={() => { setActionMenuRowId(null); void openEdit(row) }}>Edit</button>
+                                {isAdmin && <button type="button" className="w-full px-3 py-1.5 text-left text-[11px] hover:bg-gray-50" onClick={() => { setActionMenuRowId(null); openApplyPayment(row) }}>Apply Payment</button>}
+                                <button type="button" className="w-full px-3 py-1.5 text-left text-[11px] hover:bg-gray-50" onClick={() => { setActionMenuRowId(null); void openWhatsApp(row) }}>Send Bill</button>
+                                <button type="button" className="w-full px-3 py-1.5 text-left text-[11px] hover:bg-gray-50" onClick={() => { setActionMenuRowId(null); toggleRow(row.id) }}>View History</button>
+                                {row.status !== 'RETURNED' && <button type="button" className="w-full px-3 py-1.5 text-left text-[11px] text-amber-700 hover:bg-amber-50" onClick={() => { setActionMenuRowId(null); if (confirm('Mark as returned?')) markReturnedMutation.mutate(row.id) }}>Mark Returned</button>}
+                                {isAdmin && <button type="button" className="w-full px-3 py-1.5 text-left text-[11px] text-red-600 hover:bg-red-50" onClick={() => { setActionMenuRowId(null); if (confirm('Delete invoice?')) deleteMutation.mutate(row.id) }}>Delete</button>}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                      {expanded && (
+                        <div className="border-t bg-[#fffdf5] p-3 space-y-2 text-xs" style={{ borderColor: '#f1e7bf' }}>
+                          <div className="grid grid-cols-1 gap-2">
+                            <div className="rounded border border-amber-100 bg-white px-2 py-1"><p className="text-gray-400">Phone Number</p><p className="font-medium text-gray-700">{row.phone_number || '—'}</p></div>
+                            <div className="rounded border border-amber-100 bg-white px-2 py-1"><p className="text-gray-400">IMEI</p><p className="font-medium text-gray-700">{row.imei || '—'}</p></div>
+                            <div className="rounded border border-amber-100 bg-white px-2 py-1"><p className="text-gray-400">Notes</p><p className="font-medium text-gray-700">{row.notes || '—'}</p></div>
+                          </div>
+                          {isAdmin && <InvoicePaymentHistory invoiceId={row.id} currency={currency} />}
+                          <BillingWhatsAppHistory invoiceId={row.id} />
+                          <BillingReturnHistory invoiceId={row.id} />
+                        </div>
+                      )}
+                    </div>
+                  )
+                })}
+                {visibleCount < flatRows.length && (
+                  <div ref={loadMoreRef} className="px-4 py-2 text-center text-xs text-gray-400">Loading more rows...</div>
                 )}
               </div>
             </section>
@@ -1765,21 +1786,25 @@ function InvoicePaymentHistory({ invoiceId, currency }: { invoiceId: string; cur
   )
 }
 
-function BillingActivityTimeline({ invoiceId }: { invoiceId: string }) {
+function BillingWhatsAppHistory({ invoiceId }: { invoiceId: string }) {
   const { data, isLoading } = useQuery<{ items: BillingActivityRow[] }>({
-    queryKey: ['billing-activity', invoiceId],
+    queryKey: ['billing-whatsapp-history', invoiceId],
     queryFn: () => api.get(`/billing/${invoiceId}/activity`, { params: { limit: 20 } }).then((r) => r.data),
     enabled: !!invoiceId,
   })
 
-  const items = data?.items ?? []
+  const items = (data?.items ?? []).filter((item) => {
+    const action = String(item.action || '').toLowerCase()
+    return action.includes('whatsapp') || action.includes('bill_sent') || action.includes('send_bill')
+  })
+
   return (
     <div className="rounded-md border border-amber-100 bg-white px-3 py-2">
-      <p className="text-[11px] font-semibold text-gray-700 mb-1">Activity Timeline</p>
+      <p className="text-[11px] font-semibold text-gray-700 mb-1">WhatsApp History</p>
       {isLoading ? (
-        <p className="text-[11px] text-gray-400">Loading activity...</p>
+        <p className="text-[11px] text-gray-400">Loading WhatsApp history...</p>
       ) : items.length === 0 ? (
-        <p className="text-[11px] text-gray-400">No activity recorded yet.</p>
+        <p className="text-[11px] text-gray-400">No WhatsApp activity recorded yet.</p>
       ) : (
         <div className="space-y-1.5">
           {items.map((item) => {
@@ -1802,25 +1827,43 @@ function BillingActivityTimeline({ invoiceId }: { invoiceId: string }) {
   )
 }
 
-function InlineBtn({
-  icon,
-  label,
-  onClick,
-  extraClass = '',
-}: {
-  icon: React.ReactNode
-  label: string
-  onClick: () => void
-  extraClass?: string
-}) {
+function BillingReturnHistory({ invoiceId }: { invoiceId: string }) {
+  const { data, isLoading } = useQuery<{ items: BillingActivityRow[] }>({
+    queryKey: ['billing-return-history', invoiceId],
+    queryFn: () => api.get(`/billing/${invoiceId}/activity`, { params: { limit: 20 } }).then((r) => r.data),
+    enabled: !!invoiceId,
+  })
+
+  const items = (data?.items ?? []).filter((item) => {
+    const action = String(item.action || '').toLowerCase()
+    return action.includes('return') || action.includes('reversal')
+  })
+
   return (
-    <button
-      type="button"
-      className={`inline-flex items-center gap-1 text-xs border rounded px-2 py-1 hover:bg-white transition-colors text-gray-600 ${extraClass}`}
-      style={{ borderColor: '#d4af37' }}
-      onClick={onClick}
-    >
-      {icon} {label}
-    </button>
+    <div className="rounded-md border border-amber-100 bg-white px-3 py-2">
+      <p className="text-[11px] font-semibold text-gray-700 mb-1">Return History</p>
+      {isLoading ? (
+        <p className="text-[11px] text-gray-400">Loading return history...</p>
+      ) : items.length === 0 ? (
+        <p className="text-[11px] text-gray-400">No return activity recorded yet.</p>
+      ) : (
+        <div className="space-y-1.5">
+          {items.map((item) => {
+            const label = String(item.action || '').replace(/_/g, ' ').toUpperCase() || 'EVENT'
+            const when = String(item.created_at || '').slice(0, 19).replace('T', ' ')
+            const detail = item.detail || {}
+            const actor = detail.edited_by_name || detail.applied_by_name || detail.created_by_name || item.performed_by || ''
+            return (
+              <div key={item.id} className="flex items-start justify-between gap-4 text-[11px]">
+                <div>
+                  <p className="font-medium text-gray-700">{label}</p>
+                  <p className="text-gray-500">{when}{actor ? ` • ${actor}` : ''}</p>
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      )}
+    </div>
   )
 }
