@@ -10,7 +10,6 @@ import { buildIdempotencyKey } from '@/lib/idempotency'
 import { Plus, Pencil, Trash2, ShoppingCart, History, RotateCcw, X, DollarSign } from 'lucide-react'
 import toast from 'react-hot-toast'
 
-const CONDITION_OPTIONS = ['Brand New', 'Open Box', 'Used - Clean', 'Used - Average', 'Used - Faulty', 'For Parts']
 const LOCK_STATUS_OPTIONS = ['Factory Unlocked', 'Carrier Locked', 'iCloud Locked', 'MDM Locked', 'Unknown']
 const UNLOCK_METHOD_OPTIONS = ['RSIM', 'Official Unlock', 'Bypass', 'MDM Removal', 'Other']
 
@@ -933,10 +932,7 @@ export default function Inventory() {
                 </div>
                 <div>
                   <label className="form-label">Condition</label>
-                  <select className="form-input" {...register('condition')}>
-                    <option value="">— Select —</option>
-                    {CONDITION_OPTIONS.map((o) => <option key={o} value={o}>{o}</option>)}
-                  </select>
+                  <input type="text" className="form-input" placeholder="e.g. Open Box" {...register('condition')} />
                 </div>
                 <div>
                   <label className="form-label">Lock Status</label>
