@@ -45,6 +45,11 @@ _EXPENSE_FIELDS = "id,amount,description,expense_date,is_reversed,reversed_at"
 _WITHDRAWAL_FIELDS = "id,week_key,amount,withdrawn_at,status"
 
 
+def _cache_invalidate(_sb) -> None:
+    """Legacy shim: cache invalidation is handled by emit_financial_event."""
+    return None
+
+
 # ── Statement helpers ─────────────────────────────────────────────────────────
 
 def _read_statement_from_settings(sb):
