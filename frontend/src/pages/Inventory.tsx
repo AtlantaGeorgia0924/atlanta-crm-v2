@@ -33,6 +33,7 @@ interface StockItem {
   reorder_level: number
   supplier: string
   supplier_phone?: string
+  supplier_contact?: string
   payment_status?: string
   product_status?: string
   sold_out?: boolean
@@ -53,6 +54,7 @@ interface FormValues {
   reorder_level: number
   supplier?: string
   supplier_phone?: string
+  supplier_contact?: string
   location?: string
   product_status?: string
   condition?: string
@@ -284,6 +286,7 @@ export default function Inventory() {
         reorder_level: Number(values.reorder_level ?? 0),
         supplier: values.supplier?.trim() || undefined,
         supplier_phone: values.supplier_phone?.trim() ? normalizeNigeriaPhone(values.supplier_phone.trim()) : undefined,
+        supplier_contact: values.supplier_contact?.trim() || undefined,
         location: values.location?.trim() || undefined,
         payment_status: values.product_status?.trim() || undefined,
         condition: values.condition || undefined,
@@ -583,7 +586,17 @@ export default function Inventory() {
     },
     { key: 'unit_price',   header: 'Price',  render: (r: StockItem) => formatCurrency(r.unit_price ?? 0, currency) },
     { key: 'reorder_level', header: 'Reorder' },
-    { key: 'supplier',     header: 'Supplier' },
+    {
+      key: 'supplier_details',
+      header: 'Supplier Details',
+      render: (r: StockItem) => (
+        <div className="text-xs leading-5">
+          <div className="font-medium text-gray-800">{r.supplier || '—'}</div>
+          {r.supplier_phone && <div className="text-gray-600">Phone: {r.supplier_phone}</div>}
+          {r.supplier_contact && <div className="text-gray-600">Contact: {r.supplier_contact}</div>}
+        </div>
+      ),
+    },
     {
       key: 'product_status',
       header: 'Status',
@@ -834,7 +847,7 @@ export default function Inventory() {
             {/* Supplier / Contact */}
             <div className="space-y-2">
               <p className="text-xs font-semibold uppercase tracking-wide text-gray-500 mt-2">Supplier / Contact</p>
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-3 gap-4">
                 <div ref={supplierRef} className="relative">
                   <label className="form-label">Supplier / Contact</label>
                   <input
@@ -876,6 +889,15 @@ export default function Inventory() {
                     className="form-input"
                     placeholder="080…  or  2348…"
                     {...register('supplier_phone')}
+                  />
+                </div>
+                <div>
+                  <label className="form-label">Supplier Contact</label>
+                  <input
+                    type="text"
+                    className="form-input"
+                    placeholder="Contact person"
+                    {...register('supplier_contact')}
                   />
                 </div>
               </div>

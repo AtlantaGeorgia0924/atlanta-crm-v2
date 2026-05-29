@@ -63,6 +63,73 @@ def _extract_supplier(description: Optional[str]) -> Optional[str]:
     return part.split("|", 1)[0].strip() if part else None
 
 
+def _extract_supplier_details(description: Optional[str]) -> dict:
+    text = str(description or "")
+
+    def _extract_segment(labels: list[str]) -> Optional[str]:
+        for label in labels:
+            match = re.search(rf"(?i)(?:^|\|)\s*{label}\s*:\s*([^|]+)", text)
+            if match:
+                value = str(match.group(1) or "").strip()
+                if value:
+                    return value
+        return None
+
+    supplier_name = _extract_segment(["supplier", "vendor", "seller"])
+    supplier_contact = _extract_segment(["supplier\s*contact", "contact\s*person"])
+    supplier_phone_raw = _extract_segment(["supplier\s*phone", "contact\s*phone", "phone"])
+    supplier_phone = _normalize_phone(supplier_phone_raw) if supplier_phone_raw else None
+    if supplier_phone == "":
+        supplier_phone = None
+
+    if supplier_contact and supplier_phone and _normalize_phone(supplier_contact) == supplier_phone:
+        supplier_contact = None
+
+    return {
+        "supplier": supplier_name,
+        "supplier_phone": supplier_phone,
+        "supplier_contact": supplier_contact,
+    }
+
+
+def _merge_supplier_details_into_description(
+    description: Optional[str],
+    supplier_name: Optional[str],
+    supplier_phone: Optional[str],
+    supplier_contact: Optional[str],
+) -> str:
+    base_parts = [part.strip() for part in str(description or "").split("|") if str(part).strip()]
+    filtered_parts = []
+    for part in base_parts:
+        lower = part.lower()
+        if lower.startswith("supplier:"):
+            continue
+        if lower.startswith("supplier phone:"):
+            continue
+        if lower.startswith("supplier contact:"):
+            continue
+        if lower.startswith("contact person:"):
+            continue
+        if lower.startswith("vendor:"):
+            continue
+        if lower.startswith("seller:"):
+            continue
+        filtered_parts.append(part)
+
+    name = str(supplier_name or "").strip()
+    phone = _normalize_phone(supplier_phone) if supplier_phone else ""
+    contact = str(supplier_contact or "").strip()
+
+    if name:
+        filtered_parts.append(f"Supplier: {name}")
+    if phone:
+        filtered_parts.append(f"Supplier Phone: {phone}")
+    if contact:
+        filtered_parts.append(f"Supplier Contact: {contact}")
+
+    return " | ".join(filtered_parts)
+
+
 def _as_float(value: object) -> float:
     try:
         return float(value or 0)
@@ -110,13 +177,15 @@ def _is_sold_out(row: dict) -> bool:
 
 def _serialize_item(row: dict) -> dict:
     product_status = _product_status(row)
+    extracted = _extract_supplier_details(row.get("description"))
     return {
         **row,
         "unit_cost": row.get("cost_price", 0),
         "unit_price": row.get("selling_price"),
         "reorder_level": row.get("reorder_level", 0),
-        "supplier": row.get("supplier") or _extract_supplier(row.get("description")),
-        "supplier_phone": row.get("supplier_phone"),
+        "supplier": row.get("supplier") or extracted.get("supplier") or _extract_supplier(row.get("description")),
+        "supplier_phone": row.get("supplier_phone") or extracted.get("supplier_phone"),
+        "supplier_contact": row.get("supplier_contact") or extracted.get("supplier_contact"),
         "location": row.get("location"),
         "product_status": product_status,
         "is_active": True,
@@ -195,6 +264,7 @@ class StockCreate(BaseModel):
     reorder_level: float = 0
     supplier: Optional[str] = None
     supplier_phone: Optional[str] = None
+    supplier_contact: Optional[str] = None
     location: Optional[str] = None
     source: Optional[str] = "manual"
     payment_status: Optional[str] = None
@@ -220,6 +290,7 @@ class StockUpdate(BaseModel):
     reorder_level: Optional[float] = None
     supplier: Optional[str] = None
     supplier_phone: Optional[str] = None
+    supplier_contact: Optional[str] = None
     location: Optional[str] = None
     is_active: Optional[bool] = None
     payment_status: Optional[str] = None
@@ -456,6 +527,7 @@ def create_item(payload: StockCreate, _user=Depends(get_current_user)):
     # Upsert supplier as a client if phone supplied
     raw_supplier_phone = data.get("supplier_phone")
     supplier_name = str(data.get("supplier") or "").strip()
+    supplier_contact = str(data.get("supplier_contact") or "").strip()
     if supplier_name or raw_supplier_phone:
         _upsert_client(sb, supplier_name, raw_supplier_phone)
     mapped = {
@@ -470,6 +542,7 @@ def create_item(payload: StockCreate, _user=Depends(get_current_user)):
         "reorder_level": data.get("reorder_level", 0),
         "supplier": supplier_name or None,
         "supplier_phone": _normalize_phone(raw_supplier_phone) or None,
+        "supplier_contact": supplier_contact or None,
         "location": data.get("location"),
         "payment_status": (data.get("payment_status") or "").upper() or None,
         "item_expense_amount": data.get("item_expense_amount", 0),
@@ -482,6 +555,20 @@ def create_item(payload: StockCreate, _user=Depends(get_current_user)):
     }
     mapped = {k: v for k, v in mapped.items() if v is not None}
     item_columns = _inventory_item_columns(sb)
+
+    if item_columns and (
+        "supplier" not in item_columns
+        or "supplier_phone" not in item_columns
+        or "supplier_contact" not in item_columns
+    ):
+        if supplier_name or raw_supplier_phone or supplier_contact:
+            mapped["description"] = _merge_supplier_details_into_description(
+                mapped.get("description") or data.get("description") or data.get("item_name"),
+                supplier_name,
+                _normalize_phone(raw_supplier_phone),
+                supplier_contact,
+            )
+
     if item_columns:
         mapped = {k: v for k, v in mapped.items() if k in item_columns}
     if mapped.get("payment_status") == "PAID":
@@ -1025,20 +1112,45 @@ def update_item(item_id: str, payload: StockUpdate, _user=Depends(get_current_us
         data["cost_price"] = data.pop("unit_cost")
     if "unit_price" in data:
         data["selling_price"] = data.pop("unit_price")
-    # Allowed passthrough fields (now including new device fields + supplier)
-    ALLOWED_DIRECT = {"reorder_level", "supplier", "location", "is_active",
-                      "condition", "lock_status", "previously_locked", "unlock_method"}
     # supplier_phone needs phone normalization
     if "supplier_phone" in data:
         normalized_phone = _normalize_phone(data.pop("supplier_phone"))
         data["supplier_phone"] = normalized_phone or None
         if data["supplier_phone"] is None:
             data.pop("supplier_phone")
+    if "supplier_contact" in data:
+        data["supplier_contact"] = str(data.get("supplier_contact") or "").strip() or None
+        if data["supplier_contact"] is None:
+            data.pop("supplier_contact")
+
+    item_columns = _inventory_item_columns(sb)
+    existing_supplier_details = _extract_supplier_details(existing.get("description"))
+    existing_supplier_name = existing.get("supplier") or existing_supplier_details.get("supplier")
+    existing_supplier_phone = existing.get("supplier_phone") or existing_supplier_details.get("supplier_phone")
+    existing_supplier_contact = existing.get("supplier_contact") or existing_supplier_details.get("supplier_contact")
+
+    supplier_in_payload = any(k in data for k in ("supplier", "supplier_phone", "supplier_contact"))
+    if supplier_in_payload and item_columns and (
+        "supplier" not in item_columns
+        or "supplier_phone" not in item_columns
+        or "supplier_contact" not in item_columns
+    ):
+        data["description"] = _merge_supplier_details_into_description(
+            data.get("description", existing.get("description")),
+            data.get("supplier", existing_supplier_name),
+            data.get("supplier_phone", existing_supplier_phone),
+            data.get("supplier_contact", existing_supplier_contact),
+        )
+
+    if item_columns:
+        data = {k: v for k, v in data.items() if k in item_columns}
+
     # Upsert supplier as client when contact info changes
-    new_supplier = data.get("supplier") or existing.get("supplier")
-    new_phone = data.get("supplier_phone") or existing.get("supplier_phone")
+    new_supplier = data.get("supplier") or existing_supplier_name
+    new_phone = data.get("supplier_phone") or existing_supplier_phone
     if (data.get("supplier") or data.get("supplier_phone")) and new_supplier:
         _upsert_client(sb, str(new_supplier), new_phone)
+
     data.pop("is_active", None)  # do not pass is_active as-is; handle separately if needed
     if "payment_status" in data and data.get("payment_status") is not None:
         data["payment_status"] = str(data["payment_status"]).upper()
@@ -1046,6 +1158,10 @@ def update_item(item_id: str, payload: StockUpdate, _user=Depends(get_current_us
             data.setdefault("paid_at", datetime.utcnow().isoformat())
     if "category" in data:
         data["category"] = _normalize_group_name(data.get("category"))
+
+    if not data:
+        raise HTTPException(400, "No valid fields to update")
+
     result = sb.table("inventory_items").update(data).eq("id", item_id).execute()
     updated = result.data[0]
 
