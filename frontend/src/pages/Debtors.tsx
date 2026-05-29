@@ -1,25 +1,25 @@
 import { useMemo, useState, useDeferredValue, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useForm } from 'react-hook-form'
-import { useNavigate } from 'react-router-dom'
 import api from '@/lib/api'
 import { buildIdempotencyKey } from '@/lib/idempotency'
-import Table from '@/components/Table'
 import Modal from '@/components/Modal'
 import LoadingSpinner from '@/components/LoadingSpinner'
 import { formatCurrency } from '@/lib/utils'
 import { generateBillingText, encodeWhatsAppText } from '@/lib/billingGenerator'
-import { DollarSign, Eye, FileText, Copy, Send, RefreshCw } from 'lucide-react'
+import { DollarSign, FileText, Copy, Send, RefreshCw } from 'lucide-react'
 import toast from 'react-hot-toast'
 
 interface Debtor {
+  debtor_key?: string
   client_name: string
   phone_number?: string
-  total_outstanding?: number
-  balance?: number
-  row_count?: number
-  unpaid_jobs?: number
-  last_activity?: string
+  total_outstanding: number
+  unpaid_jobs: number
+  last_activity_date?: string
+  last_payment_date?: string
+  last_whatsapp_sent_at?: string
+  whatsapp_sent_count?: number
 }
 
 interface LedgerItem {
@@ -47,6 +47,8 @@ interface LedgerPayment {
   payment_note?: string
   notes?: string
   applied_by_name?: string
+  balance_before?: number
+  balance_after?: number
   new_status?: string
   is_reversed?: boolean
   created_at?: string
@@ -58,6 +60,14 @@ interface DebtorLedger {
   item_count: number
   total_outstanding: number
   payment_history: LedgerPayment[]
+}
+
+interface DebtorServicesResponse {
+  items: LedgerItem[]
+  total: number
+  page: number
+  page_size: number
+  total_pages: number
 }
 
 interface WhatsAppContact {
@@ -84,9 +94,9 @@ const PAYMENT_DETAILS = {
 }
 
 export default function Debtors() {
-  const navigate = useNavigate()
   const qc = useQueryClient()
   const [selectedRow, setSelectedRow] = useState<Debtor | null>(null)
+  const [expandedRow, setExpandedRow] = useState<Debtor | null>(null)
   const [searchInput, setSearchInput] = useState('')
   const [showBillModal, setShowBillModal] = useState(false)
   const [showPhoneModal, setShowPhoneModal] = useState(false)
@@ -94,6 +104,8 @@ export default function Debtors() {
   const [billText, setBillText] = useState('')
   const [allocationMode, setAllocationMode] = useState<'auto' | 'manual'>('auto')
   const [manualAllocations, setManualAllocations] = useState<Record<string, number>>({})
+  const [serviceSearch, setServiceSearch] = useState('')
+  const [serviceStatus, setServiceStatus] = useState('')
   const deferredSearch = useDeferredValue(searchInput)
 
   const { data: debtors, isLoading, refetch } = useQuery<Debtor[]>({
@@ -104,8 +116,34 @@ export default function Debtors() {
   const { data: ledger, isLoading: detailsLoading } = useQuery<DebtorLedger>({
     queryKey: ['debtor-ledger', selectedRow?.client_name],
     queryFn: () =>
-      api.get(`/billing/debtors/${encodeURIComponent(selectedRow!.client_name)}/ledger`).then((r) => r.data),
+      api.get(`/billing/debtors/${encodeURIComponent(selectedRow!.client_name)}/ledger`, {
+        params: { phone_number: selectedRow?.phone_number || undefined },
+      }).then((r) => r.data),
     enabled: !!selectedRow,
+  })
+
+  const { data: expandedLedger, isLoading: expandedLoading } = useQuery<DebtorLedger>({
+    queryKey: ['debtor-ledger-expanded', expandedRow?.client_name, expandedRow?.phone_number],
+    queryFn: () =>
+      api.get(`/billing/debtors/${encodeURIComponent(expandedRow!.client_name)}/ledger`, {
+        params: { phone_number: expandedRow?.phone_number || undefined },
+      }).then((r) => r.data),
+    enabled: !!expandedRow,
+  })
+
+  const { data: debtorServices, isLoading: debtorServicesLoading } = useQuery<DebtorServicesResponse>({
+    queryKey: ['debtor-services', expandedRow?.client_name, expandedRow?.phone_number, serviceSearch, serviceStatus],
+    queryFn: () =>
+      api.get(`/billing/debtors/${encodeURIComponent(expandedRow!.client_name)}/services`, {
+        params: {
+          phone_number: expandedRow?.phone_number || undefined,
+          search: serviceSearch.trim() || undefined,
+          payment_status: serviceStatus || undefined,
+          page: 1,
+          page_size: 120,
+        },
+      }).then((r) => r.data),
+    enabled: !!expandedRow,
   })
 
   const { data: status } = useQuery<{ currency?: string }>({
@@ -156,6 +194,7 @@ export default function Debtors() {
         ...values,
         mode: allocationMode,
         idempotency_key: buildIdempotencyKey('debtor-payment-apply'),
+          debtor_phone_number: selectedRow?.phone_number || undefined,
       }
       if (allocationMode === 'manual') {
         payload.allocations = Object.entries(manualAllocations)
@@ -173,6 +212,7 @@ export default function Debtors() {
       qc.invalidateQueries({ queryKey: ['dashboard'] })
       qc.invalidateQueries({ queryKey: ['cashflow-page-data'] })
       qc.invalidateQueries({ queryKey: ['system-status'] })
+      qc.invalidateQueries({ queryKey: ['debtor-services'] })
       setSelectedRow(null)
       setAllocationMode('auto')
       setManualAllocations({})
@@ -199,11 +239,7 @@ export default function Debtors() {
     },
   })
 
-  const totalOutstanding = debtors?.reduce((s, r) => s + Number(r.total_outstanding ?? r.balance ?? 0), 0) ?? 0
-
-  const handleViewDetails = (debtor: Debtor) => {
-    navigate(`/debtors/${encodeURIComponent(debtor.client_name)}`, { state: { debtor } })
-  }
+  const totalOutstanding = debtors?.reduce((s, r) => s + Number(r.total_outstanding || 0), 0) ?? 0
 
   const handleGenerateBill = async () => {
     if (!selectedRow || !ledger) return
@@ -215,7 +251,7 @@ export default function Debtors() {
     const generated = generateBillingText(
       selectedRow.client_name,
       billItems,
-      Number(ledger.total_outstanding || selectedRow.total_outstanding || selectedRow.balance || 0),
+        Number(ledger.total_outstanding || selectedRow.total_outstanding || 0),
       PAYMENT_DETAILS,
       currency
     )
@@ -302,48 +338,26 @@ export default function Debtors() {
     applyMutation.mutate(values)
   }
 
-  const columns = [
-    { key: 'client_name', header: 'Client', render: (r: Debtor) => <span className="font-medium">{r.client_name}</span> },
-    { key: 'phone_number', header: 'Phone', render: (r: Debtor) => r.phone_number || '-' },
-    {
-      key: 'total_outstanding',
-      header: 'Outstanding',
-      render: (r: Debtor) => <span className="font-semibold text-red-600">{formatCurrency(Number(r.total_outstanding ?? r.balance ?? 0), currency)}</span>,
-    },
-    { key: 'unpaid_jobs', header: 'Unpaid Jobs', render: (r: Debtor) => Number(r.row_count ?? r.unpaid_jobs ?? 0) },
-    { key: 'last_activity', header: 'Last Activity', render: (r: Debtor) => (r.last_activity ? String(r.last_activity).slice(0, 10) : '-') },
-    {
-      key: 'actions',
-      header: 'Actions',
-      render: (r: Debtor) => (
-        <div className="flex gap-1">
-          <button
-            title="View Details"
-            onClick={() => handleViewDetails(r)}
-            className="btn-secondary py-1 px-2 text-xs"
-          >
-            <Eye size={13} />
-          </button>
-          <button
-            title="Apply Payment"
-            onClick={() => {
-              setSelectedRow(r)
-              setAllocationMode('auto')
-              setManualAllocations({})
-              reset({
-                payment_date: new Date().toISOString().slice(0, 10),
-                amount: Number(r.total_outstanding ?? r.balance ?? 0),
-                reference_no: paymentReferencePreview?.reference_no || '',
-              })
-            }}
-            className="btn-primary py-1 px-2 text-xs"
-          >
-            <DollarSign size={13} />
-          </button>
-        </div>
-      ),
-    },
-  ]
+    const openApplyPaymentModal = (r: Debtor) => {
+      setSelectedRow(r)
+      setAllocationMode('auto')
+      setManualAllocations({})
+      reset({
+        payment_date: new Date().toISOString().slice(0, 10),
+        amount: Number(r.total_outstanding || 0),
+        reference_no: paymentReferencePreview?.reference_no || '',
+      })
+    }
+
+    const toggleExpand = (r: Debtor) => {
+      if (expandedRow?.debtor_key && expandedRow.debtor_key === r.debtor_key) {
+        setExpandedRow(null)
+        return
+      }
+      setExpandedRow(r)
+      setServiceSearch('')
+      setServiceStatus('')
+    }
 
   return (
     <div className="p-8 space-y-5">
@@ -379,7 +393,211 @@ export default function Debtors() {
         )}
       </div>
 
-      {isLoading ? <LoadingSpinner /> : <Table columns={columns as any} data={(debtors ?? []) as any} />}
+        {isLoading ? <LoadingSpinner /> : (
+          <div className="overflow-x-auto rounded-xl border" style={{ borderColor: '#d4af37' }}>
+            <table className="min-w-full text-sm">
+              <thead style={{ background: '#000000' }}>
+                <tr>
+                  <th className="px-4 py-3 text-left font-semibold text-white whitespace-nowrap">Client Name</th>
+                  <th className="px-4 py-3 text-left font-semibold text-white whitespace-nowrap">Phone Number</th>
+                  <th className="px-4 py-3 text-left font-semibold text-white whitespace-nowrap">Total Outstanding</th>
+                  <th className="px-4 py-3 text-left font-semibold text-white whitespace-nowrap">Unpaid Jobs</th>
+                  <th className="px-4 py-3 text-left font-semibold text-white whitespace-nowrap">Last Activity Date</th>
+                  <th className="px-4 py-3 text-left font-semibold text-white whitespace-nowrap">Last Payment Date</th>
+                  <th className="px-4 py-3 text-left font-semibold text-white whitespace-nowrap">Last WhatsApp Sent</th>
+                  <th className="px-4 py-3 text-left font-semibold text-white whitespace-nowrap">WhatsApp Send Count</th>
+                  <th className="px-4 py-3 text-left font-semibold text-white whitespace-nowrap">Actions</th>
+                </tr>
+              </thead>
+              <tbody className="bg-white">
+                {(debtors ?? []).length === 0 ? (
+                  <tr>
+                    <td colSpan={9} className="px-4 py-8 text-center text-gray-500">No records found</td>
+                  </tr>
+                ) : (debtors ?? []).map((r) => {
+                  const isExpanded = !!expandedRow?.debtor_key && expandedRow.debtor_key === r.debtor_key
+                  return (
+                    <>
+                      <tr key={r.debtor_key || `${r.client_name}-${r.phone_number || ''}`} className="group transition-colors hover:bg-[#fff9e7]" style={{ borderTop: '1px solid #f1e7bf' }}>
+                        <td className="px-4 py-3 whitespace-nowrap font-medium">{r.client_name}</td>
+                        <td className="px-4 py-3 whitespace-nowrap">{r.phone_number || '-'}</td>
+                        <td className="px-4 py-3 whitespace-nowrap font-semibold text-red-600">{formatCurrency(Number(r.total_outstanding || 0), currency)}</td>
+                        <td className="px-4 py-3 whitespace-nowrap">{Number(r.unpaid_jobs || 0)}</td>
+                        <td className="px-4 py-3 whitespace-nowrap">{r.last_activity_date ? String(r.last_activity_date).slice(0, 10) : '-'}</td>
+                        <td className="px-4 py-3 whitespace-nowrap">{r.last_payment_date ? String(r.last_payment_date).slice(0, 10) : '-'}</td>
+                        <td className="px-4 py-3 whitespace-nowrap">{r.last_whatsapp_sent_at ? String(r.last_whatsapp_sent_at).slice(0, 19).replace('T', ' ') : '-'}</td>
+                        <td className="px-4 py-3 whitespace-nowrap">{Number(r.whatsapp_sent_count || 0)}</td>
+                        <td className="px-4 py-3 whitespace-nowrap">
+                          <div className="flex gap-1">
+                            <button type="button" onClick={() => toggleExpand(r)} className="btn-secondary py-1 px-2 text-xs">View Services</button>
+                            <button type="button" title="Apply Payment" onClick={() => openApplyPaymentModal(r)} className="btn-primary py-1 px-2 text-xs">
+                              <DollarSign size={13} />
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                      {isExpanded && (
+                        <tr style={{ borderTop: '1px solid #f1e7bf' }}>
+                          <td colSpan={9} className="px-4 py-4 bg-[#fffdf8]">
+                            {expandedLoading ? (
+                              <LoadingSpinner />
+                            ) : (
+                              <div className="space-y-4">
+                                <div className="rounded-lg border border-gray-200 bg-white p-3 text-sm grid grid-cols-1 md:grid-cols-3 gap-3">
+                                  <div>
+                                    <p className="text-gray-500">Outstanding Total</p>
+                                    <p className="font-semibold text-red-600">{formatCurrency(Number(expandedLedger?.total_outstanding || r.total_outstanding || 0), currency)}</p>
+                                  </div>
+                                  <div>
+                                    <p className="text-gray-500">Recent WhatsApp Activity</p>
+                                    <p>{r.last_whatsapp_sent_at ? String(r.last_whatsapp_sent_at).slice(0, 19).replace('T', ' ') : '-'}</p>
+                                  </div>
+                                  <div>
+                                    <p className="text-gray-500">WhatsApp Send Count</p>
+                                    <p>{Number(r.whatsapp_sent_count || 0)}</p>
+                                  </div>
+                                </div>
+
+                                <div className="flex flex-wrap gap-2">
+                                  <button type="button" onClick={() => openApplyPaymentModal(r)} className="btn-primary py-1.5 px-3 text-xs">Apply Payment</button>
+                                  <button
+                                    type="button"
+                                    onClick={async () => {
+                                      setSelectedRow(r)
+                                      const ledgerData = expandedLedger
+                                      const billItems = (ledgerData?.items || []).map((item) => ({
+                                        ...item,
+                                        service_date: item.service_date || '',
+                                        outstanding: Number(item.balance || item.outstanding || 0),
+                                      }))
+                                      const generated = generateBillingText(
+                                        r.client_name,
+                                        billItems,
+                                        Number(ledgerData?.total_outstanding || r.total_outstanding || 0),
+                                        PAYMENT_DETAILS,
+                                        currency
+                                      )
+                                      setBillText(generated)
+                                      setShowBillModal(true)
+                                    }}
+                                    className="btn-secondary py-1.5 px-3 text-xs flex items-center gap-1"
+                                  >
+                                    <FileText size={13} /> Send Bill
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={async () => {
+                                      const ledgerData = expandedLedger
+                                      const billItems = (ledgerData?.items || []).map((item) => ({
+                                        ...item,
+                                        service_date: item.service_date || '',
+                                        outstanding: Number(item.balance || item.outstanding || 0),
+                                      }))
+                                      const generated = generateBillingText(
+                                        r.client_name,
+                                        billItems,
+                                        Number(ledgerData?.total_outstanding || r.total_outstanding || 0),
+                                        PAYMENT_DETAILS,
+                                        currency
+                                      )
+                                      await navigator.clipboard.writeText(generated)
+                                      toast.success('Bill copied to clipboard')
+                                    }}
+                                    className="btn-secondary py-1.5 px-3 text-xs flex items-center gap-1"
+                                  >
+                                    <Copy size={13} /> Copy Bill
+                                  </button>
+                                </div>
+
+                                <div className="rounded-lg border border-gray-200 bg-white p-3 space-y-2">
+                                  <p className="font-medium text-sm">View Services</p>
+                                  <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+                                    <input
+                                      value={serviceSearch}
+                                      onChange={(e) => setServiceSearch(e.target.value)}
+                                      placeholder="Search service, invoice id, IMEI, serial"
+                                      className="form-input"
+                                    />
+                                    <select className="form-input" value={serviceStatus} onChange={(e) => setServiceStatus(e.target.value)}>
+                                      <option value="">All statuses</option>
+                                      <option value="PAID">PAID</option>
+                                      <option value="UNPAID">UNPAID</option>
+                                      <option value="PART PAYMENT">PART PAYMENT</option>
+                                      <option value="RETURNED">RETURNED</option>
+                                    </select>
+                                    <div className="text-xs text-gray-500 flex items-center">{debtorServices?.total ?? 0} service(s)</div>
+                                  </div>
+                                  <div className="max-h-56 overflow-y-auto border border-gray-100 rounded">
+                                    {debtorServicesLoading ? (
+                                      <div className="p-3 text-sm text-gray-500">Loading services...</div>
+                                    ) : !(debtorServices?.items?.length) ? (
+                                      <div className="p-3 text-sm text-gray-500">No services found.</div>
+                                    ) : (
+                                      <table className="min-w-full text-xs">
+                                        <thead className="bg-gray-50 border-b">
+                                          <tr>
+                                            <th className="px-2 py-2 text-left">Date</th>
+                                            <th className="px-2 py-2 text-left">Service</th>
+                                            <th className="px-2 py-2 text-left">Status</th>
+                                            <th className="px-2 py-2 text-right">Amount</th>
+                                            <th className="px-2 py-2 text-right">Paid</th>
+                                            <th className="px-2 py-2 text-right">Balance</th>
+                                          </tr>
+                                        </thead>
+                                        <tbody>
+                                          {debtorServices.items.map((item) => (
+                                            <tr key={item.id} className="border-b">
+                                              <td className="px-2 py-2">{String(item.service_date || '').slice(0, 10)}</td>
+                                              <td className="px-2 py-2">{item.service_name}</td>
+                                              <td className="px-2 py-2">{item.payment_status}</td>
+                                              <td className="px-2 py-2 text-right">{formatCurrency(Number(item.amount_charged || 0), currency)}</td>
+                                              <td className="px-2 py-2 text-right">{formatCurrency(Number(item.paid_amount || 0), currency)}</td>
+                                              <td className="px-2 py-2 text-right">{formatCurrency(Number(item.balance || item.outstanding || 0), currency)}</td>
+                                            </tr>
+                                          ))}
+                                        </tbody>
+                                      </table>
+                                    )}
+                                  </div>
+                                </div>
+
+                                <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+                                  <div className="rounded-lg border border-gray-200 bg-white p-3">
+                                    <p className="font-medium text-sm mb-2">Outstanding Services</p>
+                                    <div className="max-h-44 overflow-y-auto space-y-1 text-xs">
+                                      {(expandedLedger?.items || []).map((item) => (
+                                        <div key={item.id} className="flex justify-between border-b border-gray-100 pb-1">
+                                          <span>{item.service_name}</span>
+                                          <span className="font-medium text-red-600">{formatCurrency(Number(item.balance || item.outstanding || 0), currency)}</span>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  </div>
+                                  <div className="rounded-lg border border-gray-200 bg-white p-3">
+                                    <p className="font-medium text-sm mb-2">Recent Payment History</p>
+                                    <div className="max-h-44 overflow-y-auto space-y-1 text-xs">
+                                      {(expandedLedger?.payment_history || []).slice(0, 20).map((p) => (
+                                        <div key={p.id} className="border-b border-gray-100 pb-1">
+                                          <p className="font-medium text-gray-700">{p.reference_no || p.id.slice(0, 8)} • {formatCurrency(Number(p.payment_amount ?? p.amount ?? 0), currency)}</p>
+                                          <p className="text-gray-500">{String(p.payment_date || p.created_at || '').slice(0, 19).replace('T', ' ')} • {p.applied_by_name || '-'}</p>
+                                          <p className="text-gray-500">Note: {p.payment_note || p.notes || '-'} • Before: {formatCurrency(Number(p.balance_before || 0), currency)} • After: {formatCurrency(Number(p.balance_after || 0), currency)}</p>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  </div>
+                                </div>
+                              </div>
+                            )}
+                          </td>
+                        </tr>
+                      )}
+                    </>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
 
       {selectedRow && !showBillModal && (
         <Modal
@@ -394,10 +612,10 @@ export default function Debtors() {
         >
           <div className="mb-4 p-3 bg-gray-50 rounded-lg text-sm space-y-2">
             <p><span className="font-medium">Client:</span> {selectedRow.client_name}</p>
-            <p><span className="font-medium">Outstanding Jobs:</span> {ledger?.item_count ?? selectedRow.row_count ?? 0}</p>
+              <p><span className="font-medium">Outstanding Jobs:</span> {ledger?.item_count ?? selectedRow.unpaid_jobs ?? 0}</p>
             <p>
               <span className="font-medium">Outstanding Balance:</span>{' '}
-              <span className="text-red-600 font-semibold">{formatCurrency(Number(ledger?.total_outstanding ?? selectedRow.total_outstanding ?? selectedRow.balance ?? 0), currency)}</span>
+                <span className="text-red-600 font-semibold">{formatCurrency(Number(ledger?.total_outstanding ?? selectedRow.total_outstanding ?? 0), currency)}</span>
             </p>
           </div>
 
@@ -543,7 +761,7 @@ export default function Debtors() {
                       <div>
                         <p className="font-medium text-gray-700">{p.reference_no || p.id.slice(0, 8)}</p>
                         <p className="text-gray-500">{String(p.payment_date || p.created_at || '').slice(0, 19).replace('T', ' ')} • {p.payment_method || 'payment'}{p.applied_by_name ? ` • ${p.applied_by_name}` : ''}</p>
-                        {(p.payment_note || p.notes) && <p className="text-gray-500">{p.payment_note || p.notes}</p>}
+                          <p className="text-gray-500">{p.payment_note || p.notes || '-'} • Before: {formatCurrency(Number(p.balance_before || 0), currency)} • After: {formatCurrency(Number(p.balance_after || 0), currency)}</p>
                       </div>
                       <span className={`font-medium ${Number(p.payment_amount ?? p.amount ?? 0) < 0 ? 'text-amber-700' : 'text-emerald-700'}`}>
                         {formatCurrency(Number(p.payment_amount ?? p.amount ?? 0), currency)}

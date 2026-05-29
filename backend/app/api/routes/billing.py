@@ -42,16 +42,30 @@ def _service_job_columns(sb) -> set[str]:
     global _SERVICE_JOB_COLUMNS_CACHE
     if _SERVICE_JOB_COLUMNS_CACHE is not None:
         return _SERVICE_JOB_COLUMNS_CACHE
-    rows = (
-        sb.table("information_schema.columns")
-        .select("column_name")
-        .eq("table_schema", "public")
-        .eq("table_name", "service_jobs")
-        .execute()
-        .data
-        or []
-    )
-    _SERVICE_JOB_COLUMNS_CACHE = {str(r.get("column_name")) for r in rows if r.get("column_name")}
+    rows = []
+    try:
+        rows = (
+            sb.table("information_schema.columns")
+            .select("column_name")
+            .eq("table_schema", "public")
+            .eq("table_name", "service_jobs")
+            .execute()
+            .data
+            or []
+        )
+    except Exception:
+        rows = []
+
+    columns = {str(r.get("column_name")) for r in rows if r.get("column_name")}
+    if not columns:
+        try:
+            sample_rows = sb.table("service_jobs").select("*").limit(1).execute().data or []
+            if sample_rows:
+                columns = {str(k) for k in sample_rows[0].keys()}
+        except Exception:
+            columns = set()
+
+    _SERVICE_JOB_COLUMNS_CACHE = columns
     return _SERVICE_JOB_COLUMNS_CACHE
 
 
@@ -780,42 +794,61 @@ def list_debtors(search: Optional[str] = Query(None), _user=Depends(get_current_
     sb = get_supabase()
     debtors = compute_debtors_from_supabase(sb)
     grouped_rows = debtors["grouped_clients"]
-    for row in grouped_rows:
-        row["service_name"] = row.get("service_name") or "Outstanding invoices"
 
     if search:
         term = _normalize_search_term(search)
         tokens = term.split()
 
         def matches(row: dict) -> bool:
-            haystack = " ".join(
-                [
-                    str(row.get("client_name") or ""),
-                    str(row.get("phone_number") or ""),
-                    str(row.get("service_name") or ""),
-                    str(row.get("last_activity") or ""),
-                ]
-            ).lower()
+            haystack = " ".join([
+                str(row.get("search_blob") or ""),
+                str(row.get("client_name") or ""),
+                str(row.get("phone_number") or ""),
+                str(row.get("last_activity") or ""),
+            ]).lower()
             normalized_haystack = re.sub(r"\s+", " ", haystack)
             return all(token in normalized_haystack for token in tokens)
 
         grouped_rows = [row for row in grouped_rows if matches(row)]
 
-    return grouped_rows
+    return [
+        {
+            "debtor_key": row.get("debtor_key"),
+            "client_name": row.get("client_name"),
+            "phone_number": row.get("phone_number"),
+            "total_outstanding": to_number(row.get("total_outstanding") or row.get("balance")),
+            "unpaid_jobs": int(row.get("unpaid_jobs") or row.get("row_count") or 0),
+            "last_activity_date": row.get("last_activity_date") or row.get("last_activity"),
+            "last_payment_date": row.get("last_payment_date"),
+            "last_whatsapp_sent_at": row.get("last_whatsapp_sent_at"),
+            "whatsapp_sent_count": int(row.get("whatsapp_sent_count") or 0),
+        }
+        for row in grouped_rows
+    ]
 
 
 def _normalize_client_key(value: str) -> str:
     return str(value or "").strip().upper()
 
 
-def _open_client_invoices(sb, client_name: str) -> list[dict]:
+def _debtor_match(row: dict, *, target_name: str, target_phone: str) -> bool:
+    row_name = _normalize_client_key(row.get("client_name") or "")
+    row_phone = _normalize_phone_number(row.get("phone_number") or row.get("phone") or "")
+    if target_phone:
+        if row_phone:
+            return row_phone == target_phone
+        return row_name == target_name
+    return row_name == target_name
+
+
+def _open_client_invoices(sb, client_name: str, phone_number: Optional[str] = None) -> list[dict]:
     target = _normalize_client_key(client_name)
+    target_phone = _normalize_phone_number(phone_number or "")
     try:
         rows = (
             sb.table("service_jobs")
             .select("id,client_name,service_name,description,service_date,due_date,amount_charged,paid_amount,payment_status,is_return,notes,phone_number,created_at")
             .in_("payment_status", ["UNPAID", "PART PAYMENT", "PARTIAL"])
-            .eq("is_return", False)
             .order("service_date")
             .order("created_at")
             .limit(1000)
@@ -828,7 +861,6 @@ def _open_client_invoices(sb, client_name: str) -> list[dict]:
             sb.table("service_jobs")
             .select("id,client_name,service_name,description,service_date,due_date,amount_charged,paid_amount,payment_status,is_return,notes,created_at")
             .in_("payment_status", ["UNPAID", "PART PAYMENT", "PARTIAL"])
-            .eq("is_return", False)
             .order("service_date")
             .order("created_at")
             .limit(1000)
@@ -839,11 +871,13 @@ def _open_client_invoices(sb, client_name: str) -> list[dict]:
 
     result: list[dict] = []
     for row in rows:
-        if _normalize_client_key(row.get("client_name") or "") != target:
+        if not _debtor_match(row, target_name=target, target_phone=target_phone):
             continue
         total = to_number(row.get("amount_charged"))
         paid = to_number(row.get("paid_amount"))
         balance = compute_outstanding(total, paid)
+        if bool(row.get("is_return")):
+            continue
         if balance <= 0:
             continue
         result.append(
@@ -858,18 +892,74 @@ def _open_client_invoices(sb, client_name: str) -> list[dict]:
                 "outstanding": balance,
                 "payment_status": compute_payment_status(total, paid),
                 "notes": row.get("notes"),
-                "phone_number": row.get("phone_number"),
+                "phone_number": row.get("phone_number") or row.get("phone"),
+                "invoice_id": row.get("invoice_id"),
+                "imei": row.get("imei"),
+                "serial_number": row.get("serial_number"),
             }
         )
     return result
 
 
+def _all_client_services(sb, client_name: str, phone_number: Optional[str] = None) -> list[dict]:
+    target = _normalize_client_key(client_name)
+    target_phone = _normalize_phone_number(phone_number or "")
+    try:
+        rows = (
+            sb.table("service_jobs")
+            .select("id,client_name,phone_number,service_name,description,service_date,created_at,amount_charged,paid_amount,payment_status,is_return,notes,invoice_id,imei,serial_number")
+            .order("service_date", desc=True)
+            .order("created_at", desc=True)
+            .limit(2000)
+            .execute()
+            .data
+            or []
+        )
+    except Exception:
+        rows = (
+            sb.table("service_jobs")
+            .select("*")
+            .order("service_date", desc=True)
+            .order("created_at", desc=True)
+            .limit(2000)
+            .execute()
+            .data
+            or []
+        )
+
+    services: list[dict] = []
+    for row in rows:
+        if not _debtor_match(row, target_name=target, target_phone=target_phone):
+            continue
+        total = to_number(row.get("amount_charged"))
+        paid = to_number(row.get("paid_amount"))
+        services.append(
+            {
+                "id": row.get("id"),
+                "service_name": _best_service_name(row),
+                "description": row.get("description"),
+                "service_date": row.get("service_date") or row.get("created_at"),
+                "amount_charged": total,
+                "paid_amount": paid,
+                "balance": compute_outstanding(total, paid),
+                "payment_status": _normalize_payment_status(row.get("payment_status")),
+                "is_return": bool(row.get("is_return")),
+                "invoice_id": row.get("invoice_id"),
+                "imei": row.get("imei"),
+                "serial_number": row.get("serial_number"),
+                "phone_number": row.get("phone_number"),
+                "notes": row.get("notes"),
+            }
+        )
+    return services
+
+
 @router.get("/debtors/{client_name}/ledger")
-def debtor_ledger(client_name: str, _user=Depends(get_current_user)):
+def debtor_ledger(client_name: str, phone_number: Optional[str] = Query(None), _user=Depends(get_current_user)):
     if not user_is_admin(_user):
         raise HTTPException(status_code=403, detail="Forbidden")
     sb = get_supabase()
-    invoices = _open_client_invoices(sb, client_name)
+    invoices = _open_client_invoices(sb, client_name, phone_number)
     invoice_ids = [str(i.get("id")) for i in invoices if i.get("id")]
 
     payment_history = []
@@ -880,7 +970,7 @@ def debtor_ledger(client_name: str, _user=Depends(get_current_user)):
                 .select(
                     "id,service_job_id,billing_row_id,payment_amount,amount,payment_method,reference_no,"
                     "payment_date,payment_note,notes,created_at,applied_by_name,new_balance,new_status,"
-                    "is_reversed,reversal_reason"
+                      "previous_balance,is_reversed,reversal_reason"
                 )
                 .in_("service_job_id", invoice_ids)
                 .order("created_at", desc=True)
@@ -906,6 +996,8 @@ def debtor_ledger(client_name: str, _user=Depends(get_current_user)):
                 "service_job_id": row.get("service_job_id") or row.get("billing_row_id"),
                 "payment_amount": to_number(row.get("payment_amount") or row.get("amount")),
                 "payment_note": row.get("payment_note") or row.get("notes"),
+                  "balance_before": to_number(row.get("previous_balance")),
+                  "balance_after": to_number(row.get("new_balance")),
             }
             for row in history_rows
         ]
@@ -915,10 +1007,59 @@ def debtor_ledger(client_name: str, _user=Depends(get_current_user)):
 
     return {
         "client_name": client_name,
+        "phone_number": phone_number,
         "items": invoices,
         "item_count": unpaid_jobs,
         "total_outstanding": total_outstanding,
         "payment_history": payment_history,
+    }
+
+
+@router.get("/debtors/{client_name}/services")
+def list_debtor_services(
+    client_name: str,
+    phone_number: Optional[str] = Query(None),
+    search: Optional[str] = Query(None),
+    payment_status: Optional[str] = Query(None),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=300),
+    _user=Depends(get_current_user),
+):
+    if not user_is_admin(_user):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    services = _all_client_services(get_supabase(), client_name, phone_number)
+
+    if payment_status:
+        normalized = _normalize_payment_status(payment_status)
+        services = [row for row in services if _normalize_payment_status(row.get("payment_status")) == normalized]
+
+    if search:
+        tokens = _normalize_search_term(search).split()
+
+        def _matches(row: dict) -> bool:
+            haystack = " ".join(
+                [
+                    str(row.get("service_name") or ""),
+                    str(row.get("description") or ""),
+                    str(row.get("invoice_id") or ""),
+                    str(row.get("imei") or ""),
+                    str(row.get("serial_number") or ""),
+                    str(row.get("id") or ""),
+                ]
+            ).lower()
+            return all(token in haystack for token in tokens)
+
+        services = [row for row in services if _matches(row)]
+
+    total = len(services)
+    offset = (page - 1) * page_size
+    page_items = services[offset: offset + page_size]
+    return {
+        "items": page_items,
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "total_pages": max(1, (total + page_size - 1) // page_size),
     }
 
 
@@ -936,6 +1077,7 @@ class DebtorPaymentApplyPayload(BaseModel):
     mode: Optional[str] = "auto"  # auto | manual
     allocations: Optional[list[DebtorPaymentAllocation]] = None
     idempotency_key: Optional[str] = None
+    debtor_phone_number: Optional[str] = None
 
 
 @router.post("/debtors/{client_name}/apply-payment")
@@ -948,7 +1090,7 @@ def apply_debtor_payment(client_name: str, payload: DebtorPaymentApplyPayload, _
     if total_payment <= 0:
         raise HTTPException(status_code=422, detail="Payment amount must be greater than zero")
 
-    open_rows = _open_client_invoices(sb, client_name)
+    open_rows = _open_client_invoices(sb, client_name, payload.debtor_phone_number)
     if not open_rows:
         raise HTTPException(status_code=400, detail="No unpaid invoices found for this debtor")
 
@@ -1266,6 +1408,18 @@ def create_billing(payload: BillingCreate, _user=Depends(get_current_user)):
         "assigned_staff_id": str(_user.id),
         "assigned_staff_name": actor_name,
     }
+
+    client_name = str(data.get("client_name") or "").strip()
+    client_phone = str(data.get("phone_number") or data.get("client_phone") or "").strip()
+    if client_name:
+        try:
+            client_row = _upsert_client_phone(sb, client_name, client_phone)
+            if "client_id" in service_columns and not mapped.get("client_id"):
+                mapped["client_id"] = client_row.get("id")
+        except Exception:
+            # Do not fail invoice creation when clients table write is unavailable.
+            pass
+
     mapped = {k: v for k, v in mapped.items() if k in service_columns and v is not None}
     result = sb.table("service_jobs").insert(mapped).execute()
     created = result.data[0]
@@ -1479,12 +1633,12 @@ def delete_billing(billing_id: str, _user=Depends(get_current_user)):
 
 
 @router.get("/debtors/{client_name}/items")
-def get_debtor_items(client_name: str, _user=Depends(get_current_user)):
+def get_debtor_items(client_name: str, phone_number: Optional[str] = Query(None), _user=Depends(get_current_user)):
     """Get all outstanding items for a specific client (used in Debtor Details page)."""
     if not user_is_admin(_user):
         raise HTTPException(status_code=403, detail="Forbidden")
     sb = get_supabase()
-    client_items = _open_client_invoices(sb, client_name)
+    client_items = _open_client_invoices(sb, client_name, phone_number)
     total_outstanding = sum(to_number(item.get("balance")) for item in client_items)
     invoice_ids = [str(i.get("id")) for i in client_items if i.get("id")]
 
