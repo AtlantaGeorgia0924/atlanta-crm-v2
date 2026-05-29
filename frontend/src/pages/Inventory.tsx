@@ -52,6 +52,7 @@ interface FormValues {
   quantity: number
   unit?: string
   unit_cost: number
+  unit_price?: number
   reorder_level: number
   supplier?: string
   supplier_phone?: string
@@ -277,6 +278,7 @@ export default function Inventory() {
 
   const saveMutation = useMutation({
     mutationFn: (values: FormValues) => {
+      const proposedSellingPrice = Number(values.unit_price)
       const payload = {
         item_name: values.item_name?.trim(),
         sku: values.sku?.trim() || undefined,
@@ -285,6 +287,7 @@ export default function Inventory() {
         quantity: Number(values.quantity ?? 0),
         unit: values.unit?.trim() || 'pcs',
         unit_cost: Number(values.unit_cost ?? 0),
+        unit_price: Number.isFinite(proposedSellingPrice) ? proposedSellingPrice : undefined,
         reorder_level: Number(values.reorder_level ?? 0),
         supplier: values.supplier?.trim() || undefined,
         supplier_phone: values.supplier_phone?.trim() ? normalizeNigeriaPhone(values.supplier_phone.trim()) : undefined,
@@ -588,7 +591,7 @@ export default function Inventory() {
         </span>
       )
     },
-    { key: 'unit_price',   header: 'Price',  render: (r: StockItem) => formatCurrency(r.unit_price ?? 0, currency) },
+    { key: 'unit_price',   header: 'Proposed Price',  render: (r: StockItem) => formatCurrency(r.unit_price ?? 0, currency) },
     { key: 'reorder_level', header: 'Reorder' },
     {
       key: 'supplier_details',
@@ -841,6 +844,10 @@ export default function Inventory() {
               <div>
                 <label className="form-label">Unit Cost</label>
                 <input type="number" step="0.01" className="form-input" {...register('unit_cost', { valueAsNumber: true })} />
+              </div>
+              <div>
+                <label className="form-label">Proposed Selling Price</label>
+                <input type="number" step="0.01" className="form-input" {...register('unit_price', { valueAsNumber: true })} />
               </div>
               <div>
                 <label className="form-label">Reorder Level</label>
