@@ -7,7 +7,7 @@ import Modal from '@/components/Modal'
 import LoadingSpinner from '@/components/LoadingSpinner'
 import { formatCurrency } from '@/lib/utils'
 import { buildIdempotencyKey } from '@/lib/idempotency'
-import { Plus, Pencil, Trash2, ShoppingCart, History, RotateCcw, X, DollarSign } from 'lucide-react'
+import { Plus, ShoppingCart, RotateCcw, X, RefreshCw, ChevronDown } from 'lucide-react'
 import toast from 'react-hot-toast'
 
 const LOCK_STATUS_OPTIONS = ['Factory Unlocked', 'Carrier Locked', 'iCloud Locked', 'MDM Locked', 'Unknown']
@@ -119,7 +119,6 @@ interface SellFormValues {
   selling_price: number
   client_name: string
   client_phone?: string
-  payment_status: string
   paid_amount: number
   notes?: string
 }
@@ -171,6 +170,10 @@ export default function Inventory() {
   const [showCartClientDropdown, setShowCartClientDropdown] = useState(false)
   const [sellClientQuery, setSellClientQuery] = useState('')
   const [showSellClientDropdown, setShowSellClientDropdown] = useState(false)
+  const [groupByModel, setGroupByModel] = useState(false)
+  const [expandedModelGroups, setExpandedModelGroups] = useState<Set<string>>(new Set())
+  const [actionMenuItemId, setActionMenuItemId] = useState<string | null>(null)
+  const [isRefreshing, setIsRefreshing] = useState(false)
   const [cart, setCart] = useState<CartItem[]>(() => {
     try {
       const parsed = JSON.parse(localStorage.getItem(CART_STORAGE_KEY) || '[]')
@@ -223,12 +226,12 @@ export default function Inventory() {
     defaultValues: {
       quantity: 1,
       selling_price: 0,
-      payment_status: 'UNPAID',
       paid_amount: 0,
     },
   })
 
   const groups: GroupRow[] = groupsData?.groups ?? []
+  const inventoryItems = useMemo<StockItem[]>(() => data?.items ?? data?.data ?? [], [data])
   const cartCount = useMemo(() => cart.reduce((sum, item) => sum + Number(item.cart_quantity || 0), 0), [cart])
   const cartSubtotal = useMemo(() => cart.reduce((sum, item) => sum + Number(item.cart_quantity || 0) * Number(item.cart_unit_price || 0), 0), [cart])
   const checkoutDiscount = Math.min(Math.max(Number(watchCheckout('discount') || 0), 0), cartSubtotal)
@@ -378,17 +381,6 @@ export default function Inventory() {
     onError: (e: any) => toast.error(e?.response?.data?.detail ?? 'Edit group failed'),
   })
 
-  const assignGroupMutation = useMutation({
-    mutationFn: ({ itemId, groupName }: { itemId: string; groupName: string }) =>
-      api.post('/inventory/assign-group', { item_ids: [itemId], group_name: groupName }),
-    onSuccess: () => {
-      toast.success('Product assigned')
-      qc.invalidateQueries({ queryKey: ['inventory'] })
-      qc.invalidateQueries({ queryKey: ['inventory-groups'] })
-    },
-    onError: (e: any) => toast.error(e?.response?.data?.detail ?? 'Assign group failed'),
-  })
-
   const checkoutMutation = useMutation({
     mutationFn: (values: CheckoutFormValues) => {
       if (!cart.length) throw new Error('Cart is empty')
@@ -466,7 +458,6 @@ export default function Inventory() {
       selling_price: defaultPrice,
       client_name: '',
       client_phone: '',
-      payment_status: 'UNPAID',
       paid_amount: 0,
       notes: '',
     })
@@ -543,7 +534,6 @@ export default function Inventory() {
         selling_price: Number(values.selling_price || 0),
         client_name: values.client_name?.trim(),
         client_phone: values.client_phone?.trim() ? normalizeNigeriaPhone(values.client_phone.trim()) : undefined,
-        payment_status: values.payment_status,
         paid_amount: Number(values.paid_amount || 0),
         notes: values.notes?.trim() || undefined,
       })
@@ -604,93 +594,138 @@ export default function Inventory() {
     setPage(1)
   }
 
+  const refreshInventoryViews = async () => {
+    setIsRefreshing(true)
+    try {
+      await Promise.all([
+        qc.invalidateQueries({ queryKey: ['inventory'] }),
+        qc.invalidateQueries({ queryKey: ['inventory-groups'] }),
+        qc.invalidateQueries({ queryKey: ['dashboard'] }),
+        qc.invalidateQueries({ queryKey: ['system-status'] }),
+      ])
+    } finally {
+      setIsRefreshing(false)
+    }
+  }
+
+  const deriveModelName = (row: StockItem): string => {
+    const raw = String(row.item_name || '').trim()
+    if (!raw) return 'Unknown Model'
+    const withoutStorageTail = raw.replace(/\s+\d{2,4}\s*GB.*$/i, '').trim()
+    return withoutStorageTail || raw
+  }
+
+  const variationLabel = (row: StockItem): string => {
+    const storage = String(row.storage || '').trim() || 'N/A'
+    const color = String(row.color || '').trim() || 'N/A'
+    return `${storage} ${color}`
+  }
+
+  const groupedInventory = useMemo(() => {
+    const grouped = new Map<string, {
+      model: string
+      totalQty: number
+      imeiCount: number
+      availableCount: number
+      variations: Array<{ key: string; label: string; qty: number; imeiCount: number; availableCount: number; rows: StockItem[] }>
+    }>()
+
+    for (const row of inventoryItems) {
+      const model = deriveModelName(row)
+      const variation = variationLabel(row)
+      const qty = Number(row.quantity || 0)
+      const available = qty > 0 ? 1 : 0
+      const imeiCount = row.imei ? 1 : 0
+      const variationKey = `${model}::${variation}`
+      if (!grouped.has(model)) {
+        grouped.set(model, { model, totalQty: 0, imeiCount: 0, availableCount: 0, variations: [] })
+      }
+      const group = grouped.get(model)!
+      group.totalQty += qty
+      group.imeiCount += imeiCount
+      group.availableCount += available
+      let v = group.variations.find((entry) => entry.key === variationKey)
+      if (!v) {
+        v = { key: variationKey, label: variation, qty: 0, imeiCount: 0, availableCount: 0, rows: [] }
+        group.variations.push(v)
+      }
+      v.qty += qty
+      v.imeiCount += imeiCount
+      v.availableCount += available
+      v.rows.push(row)
+    }
+    return Array.from(grouped.values()).sort((a, b) => a.model.localeCompare(b.model))
+  }, [inventoryItems])
+
+  const toggleModelGroup = (model: string) => {
+    setExpandedModelGroups((prev) => {
+      const next = new Set(prev)
+      if (next.has(model)) next.delete(model)
+      else next.add(model)
+      return next
+    })
+  }
+
   const buildClientContactText = (client: ClientSuggestion): string => {
     const details = [client.phone, client.email, client.company].filter(Boolean)
     return details.length ? details.join(' • ') : 'No contact info'
   }
 
   const columns = [
-    { key: 'item_name',    header: 'Item' },
-    { key: 'imei',         header: 'IMEI' },
-    { key: 'sku',          header: 'SKU' },
-    { key: 'category',     header: 'Category' },
-    { key: 'storage',      header: 'Storage' },
-    { key: 'color',        header: 'Color' },
-    { key: 'quantity',     header: 'Qty',
+    { key: 'sn', header: 'S/N', render: (r: StockItem & { sn: number }) => String(r.sn) },
+    {
+      key: 'item',
+      header: 'Item',
+      render: (r: StockItem) => (
+        <div className="leading-tight">
+          <div className="font-medium text-gray-900">{r.item_name || '—'}</div>
+          <div className="text-xs text-gray-500">IMEI: {r.imei || '—'}</div>
+        </div>
+      ),
+    },
+    { key: 'category', header: 'Category', render: (r: StockItem) => r.category || '—' },
+    { key: 'supplier', header: 'Supplier', render: (r: StockItem) => r.supplier || '—' },
+    {
+      key: 'quantity',
+      header: 'Quantity',
       render: (r: StockItem) => (
         <span className={Number(r.quantity) <= Number(r.reorder_level) ? 'text-red-600 font-semibold' : ''}>
           {r.quantity} {r.unit}
         </span>
-      )
-    },
-    { key: 'unit_price',   header: 'Proposed Price',  render: (r: StockItem) => formatCurrency(r.unit_price ?? 0, currency) },
-    { key: 'reorder_level', header: 'Reorder' },
-    {
-      key: 'supplier_details',
-      header: 'Supplier Details',
-      render: (r: StockItem) => (
-        <div className="text-xs leading-5">
-          <div className="font-medium text-gray-800">{r.supplier || '—'}</div>
-          {r.supplier_phone && <div className="text-gray-600">Phone: {r.supplier_phone}</div>}
-          {r.supplier_contact && <div className="text-gray-600">Contact: {r.supplier_contact}</div>}
-        </div>
       ),
     },
     {
-      key: 'product_status',
-      header: 'Status',
-      render: (r: StockItem) => <span className="badge-partial">{r.product_status || 'AVAILABLE'}</span>,
-    },
-    {
-      key: 'group',
-      header: 'Group',
+      key: 'attributes',
+      header: 'Attributes',
       render: (r: StockItem) => (
-        <select
-          className="form-input py-1 px-2 text-xs min-w-36"
-          value={r.category || ''}
-          onChange={(e) => {
-            const groupName = e.target.value
-            if (!groupName) return
-            assignGroupMutation.mutate({ itemId: r.id, groupName })
-          }}
-        >
-          <option value="">Unassigned</option>
-          {groups.map((g) => (
-            <option key={g.name} value={g.name}>{g.name}</option>
-          ))}
-        </select>
+        <span className="text-xs text-gray-600">
+          {r.storage || 'N/A'}, {r.condition || 'N/A'}, {r.color || 'N/A'}
+        </span>
       ),
     },
     {
-      key: 'actions', header: '',
+      key: 'actions',
+      header: 'Actions',
       render: (r: StockItem) => (
-        <div className="flex gap-2">
+        <div className="relative" onClick={(e) => e.stopPropagation()}>
           <button
-            onClick={() => openSell(r)}
-            disabled={Number(r.quantity) <= 0}
-            className="inline-flex items-center gap-1 text-xs text-gray-600 hover:text-emerald-700 disabled:opacity-40"
-            title="Sell Item"
+            type="button"
+            className="inline-flex items-center gap-1 rounded border px-2 py-1 text-xs hover:bg-gray-50"
+            style={{ borderColor: '#d4af37' }}
+            onClick={() => setActionMenuItemId((prev) => (prev === r.id ? null : r.id))}
           >
-            <DollarSign size={14} /> Sell
+            Actions <ChevronDown size={13} />
           </button>
-          <button
-            onClick={() => addToCart(r)}
-            disabled={Number(r.quantity) <= 0}
-            className="inline-flex items-center gap-1 text-xs text-gray-600 hover:text-emerald-700 disabled:opacity-40"
-            title="Add to Cart"
-          >
-            <ShoppingCart size={14} /> Add to Cart
-          </button>
-          <button
-            onClick={() => openSalesHistory(r)}
-            className="inline-flex items-center gap-1 text-xs text-gray-600 hover:text-indigo-700"
-            title="Sales History"
-          >
-            <History size={14} /> Sales History
-          </button>
-          <button onClick={() => openHistory(r)} className="text-gray-400 hover:text-blue-600" title="Transaction History"><History size={14} /></button>
-          <button onClick={() => openEdit(r)} className="text-gray-400 hover:text-primary-600"><Pencil size={14} /></button>
-          <button onClick={() => { if (confirm('Remove item?')) deleteMutation.mutate(r.id) }} className="text-gray-400 hover:text-red-600"><Trash2 size={14} /></button>
+          {actionMenuItemId === r.id && (
+            <div className="absolute right-0 z-30 mt-1 w-44 rounded-lg border bg-white shadow-lg" style={{ borderColor: '#d4af37' }}>
+              <button type="button" className="block w-full px-3 py-2 text-left text-xs hover:bg-[#fff9e7]" onClick={() => { setActionMenuItemId(null); openSell(r) }}>Sell</button>
+              <button type="button" className="block w-full px-3 py-2 text-left text-xs hover:bg-[#fff9e7]" onClick={() => { setActionMenuItemId(null); addToCart(r) }}>Add To Cart</button>
+              <button type="button" className="block w-full px-3 py-2 text-left text-xs hover:bg-[#fff9e7]" onClick={() => { setActionMenuItemId(null); openSalesHistory(r) }}>Sales History</button>
+              <button type="button" className="block w-full px-3 py-2 text-left text-xs hover:bg-[#fff9e7]" onClick={() => { setActionMenuItemId(null); openHistory(r) }}>Transaction History</button>
+              <button type="button" className="block w-full px-3 py-2 text-left text-xs hover:bg-[#fff9e7]" onClick={() => { setActionMenuItemId(null); openEdit(r) }}>Edit</button>
+              <button type="button" className="block w-full px-3 py-2 text-left text-xs text-red-600 hover:bg-red-50" onClick={() => { setActionMenuItemId(null); if (confirm('Remove item?')) deleteMutation.mutate(r.id) }}>Delete</button>
+            </div>
+          )}
         </div>
       ),
     },
@@ -701,6 +736,9 @@ export default function Inventory() {
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-bold">Inventory</h1>
         <div className="flex items-center gap-2">
+          <button onClick={refreshInventoryViews} className="btn-secondary" disabled={isRefreshing}>
+            <RefreshCw size={14} className={isRefreshing ? 'animate-spin' : ''} /> {isRefreshing ? 'Refreshing...' : 'Refresh'}
+          </button>
           <button
             onClick={() => setShowCart(true)}
             className="btn-secondary relative"
@@ -754,12 +792,59 @@ export default function Inventory() {
             <input type="checkbox" checked={lowStock} onChange={(e) => setLowStock(e.target.checked)} className="rounded" />
             Low stock only
           </label>
+          {view === 'products' && (
+            <label className="flex items-center gap-2 text-sm text-gray-600 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={groupByModel}
+                onChange={(e) => setGroupByModel(e.target.checked)}
+                className="rounded"
+              />
+              Group By Model
+            </label>
+          )}
         </div>
       )}
 
       {view !== 'groups' && (isLoading ? <LoadingSpinner /> : (
         <>
-          <Table columns={columns as any} data={data?.items ?? data?.data ?? []} />
+          {groupByModel && view === 'products' ? (
+            <div className="space-y-3">
+              {groupedInventory.map((group) => {
+                const isOpen = expandedModelGroups.has(group.model)
+                return (
+                  <div key={group.model} className="rounded-xl border bg-white" style={{ borderColor: '#d4af37' }}>
+                    <button
+                      type="button"
+                      className="w-full flex items-center justify-between px-4 py-3 text-left hover:bg-[#fff9e7]"
+                      onClick={() => toggleModelGroup(group.model)}
+                    >
+                      <div>
+                        <div className="font-semibold text-gray-900">{group.model}</div>
+                        <div className="text-xs text-gray-500">({group.totalQty} Units)</div>
+                      </div>
+                      <div className="text-right text-xs text-gray-600">
+                        <div>IMEI Count: {group.imeiCount}</div>
+                        <div>Available: {group.availableCount}</div>
+                      </div>
+                    </button>
+                    {isOpen && (
+                      <div className="border-t px-4 py-3 space-y-2" style={{ borderColor: '#f1e7bf' }}>
+                        {group.variations.map((variation) => (
+                          <div key={variation.key} className="rounded-md border px-3 py-2 text-sm" style={{ borderColor: '#f1e7bf' }}>
+                            <div className="font-medium text-gray-800">{variation.label}</div>
+                            <div className="text-xs text-gray-500">Qty: {variation.qty} | IMEI: {variation.imeiCount} | Available: {variation.availableCount}</div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )
+              })}
+            </div>
+          ) : (
+            <Table columns={columns as any} data={inventoryItems.map((row, idx) => ({ ...row, sn: (page - 1) * 50 + idx + 1 })) as any} />
+          )}
           <div className="flex gap-2 justify-end">
             <button disabled={page === 1} onClick={() => setPage((p) => p - 1)} className="btn-secondary">Prev</button>
             <span className="text-sm text-gray-500 self-center">Page {page} of {data?.total_pages ?? 1}</span>
@@ -1302,16 +1387,9 @@ export default function Inventory() {
               <input className="form-input" {...registerSell('client_phone')} />
             </div>
             <div>
-              <label className="form-label">Payment Status</label>
-              <select className="form-input" {...registerSell('payment_status')}>
-                <option value="UNPAID">UNPAID</option>
-                <option value="PART PAYMENT">PART PAYMENT</option>
-                <option value="PAID">PAID</option>
-              </select>
-            </div>
-            <div>
               <label className="form-label">Amount Paid</label>
               <input type="number" step="0.01" min="0" className="form-input" {...registerSell('paid_amount', { valueAsNumber: true })} />
+              <p className="text-xs text-gray-500 mt-1">Payment status is auto-computed from amount paid and total.</p>
             </div>
             <div className="col-span-2">
               <label className="form-label">Notes</label>

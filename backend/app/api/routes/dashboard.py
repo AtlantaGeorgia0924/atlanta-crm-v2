@@ -1,4 +1,6 @@
-from fastapi import APIRouter, Depends, HTTPException
+from datetime import datetime
+
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.core.auth import get_current_user
 from app.core.dashboard_metrics import app_settings_payload, compute_metrics_from_supabase
@@ -7,6 +9,37 @@ from app.core.rbac import user_is_admin
 from app.db.supabase_client import get_supabase
 
 router = APIRouter()
+
+
+def _extract_actor_name(detail: dict | None, fallback: str | None) -> str:
+    detail = detail or {}
+    for key in [
+        "performed_by_name",
+        "created_by_name",
+        "last_edited_by_name",
+        "applied_by_name",
+        "assigned_staff_name",
+        "sold_by_name",
+    ]:
+        value = detail.get(key)
+        if value:
+            return str(value)
+    return str(fallback or "System")
+
+
+def _extract_reference(detail: dict | None, row: dict) -> str:
+    detail = detail or {}
+    for key in ["invoice_id", "service_job_id", "sale_id", "sale_item_id", "transaction_reference", "reference_no", "record_id"]:
+        value = detail.get(key)
+        if value:
+            return str(value)
+    fallback = row.get("entity_id") or row.get("id")
+    return str(fallback or "-")
+
+
+def _humanize_action(action: str) -> str:
+    value = str(action or "").strip().replace("_", " ").title()
+    return value or "Activity"
 
 
 def _read_dashboard_values_from_settings(sb):
@@ -177,4 +210,46 @@ def staff_metrics(_user=Depends(get_current_user)):
         ),
         reverse=True,
     )
+    return {"items": items, "total": len(items)}
+
+
+@router.get("/activity")
+def dashboard_activity(
+    limit: int = Query(30, ge=1, le=200),
+    _user=Depends(get_current_user),
+):
+    sb = get_supabase()
+    rows = (
+        sb.table("crm_audit_log")
+        .select("id,action,entity_type,entity_id,performed_by,detail,created_at")
+        .order("created_at", desc=True)
+        .limit(limit)
+        .execute()
+        .data
+        or []
+    )
+
+    items = []
+    for row in rows:
+        detail = row.get("detail") if isinstance(row.get("detail"), dict) else {}
+        created_at = row.get("created_at")
+        created_epoch = None
+        if created_at:
+            try:
+                created_epoch = datetime.fromisoformat(str(created_at).replace("Z", "+00:00")).timestamp()
+            except Exception:
+                created_epoch = None
+        items.append(
+            {
+                "id": row.get("id"),
+                "time": created_at,
+                "time_epoch": created_epoch,
+                "user": _extract_actor_name(detail, row.get("performed_by")),
+                "action": _humanize_action(str(row.get("action") or "")),
+                "entity_type": row.get("entity_type"),
+                "reference": _extract_reference(detail, row),
+                "detail": detail,
+            }
+        )
+
     return {"items": items, "total": len(items)}

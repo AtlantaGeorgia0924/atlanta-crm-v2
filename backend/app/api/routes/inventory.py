@@ -335,7 +335,7 @@ class SellProductPayload(BaseModel):
     selling_price: Optional[float] = None
     client_name: str
     client_phone: Optional[str] = None
-    payment_status: str
+    payment_status: Optional[str] = None
     paid_amount: float = 0
     notes: Optional[str] = None
 
@@ -388,6 +388,21 @@ def _normalize_payment_status(value: Optional[str]) -> str:
     if normalized in {"PAID", "PART PAYMENT", "UNPAID"}:
         return normalized
     return "UNPAID"
+
+
+def _derive_payment_state(total_amount: float, amount_paid: float) -> tuple[str, float, float]:
+    total = max(_as_float(total_amount), 0.0)
+    paid = max(_as_float(amount_paid), 0.0)
+    if paid > total:
+        paid = total
+    balance = max(total - paid, 0.0)
+    if total <= 0:
+        return "UNPAID", 0.0, 0.0
+    if paid <= 0:
+        return "UNPAID", 0.0, total
+    if paid < total:
+        return "PART PAYMENT", paid, balance
+    return "PAID", paid, 0.0
 
 
 def _normalize_phone(value: Optional[str]) -> str:
@@ -1059,11 +1074,26 @@ def sell_product(item_id: str, payload: SellProductPayload, _user=Depends(get_cu
     if not client_name:
         raise HTTPException(422, "Client name is required")
 
-    status = _normalize_payment_status(payload.payment_status)
-    paid_amount = max(_as_float(payload.paid_amount), 0)
+    item_row = (
+        sb.table("inventory_items")
+        .select("id,selling_price")
+        .eq("id", item_id)
+        .maybe_single()
+        .execute()
+        .data
+        or {}
+    )
+    if not item_row:
+        raise HTTPException(404, "Inventory item not found")
+
     selling_price = _as_float(payload.selling_price)
-    if payload.selling_price is not None and selling_price <= 0:
+    if payload.selling_price is None:
+        selling_price = _as_float(item_row.get("selling_price"))
+    if selling_price <= 0:
         raise HTTPException(422, "Selling price must be greater than zero")
+
+    total_amount = selling_price * quantity
+    status, paid_amount, _ = _derive_payment_state(total_amount, payload.paid_amount)
 
     client_id = _upsert_client(sb, client_name, payload.client_phone)
 
@@ -1148,9 +1178,10 @@ def sell_product(item_id: str, payload: SellProductPayload, _user=Depends(get_cu
         "service_job_id": sold.get("service_job_id"),
         "remaining_quantity": _as_float(sold.get("remaining_quantity")),
         "amount_charged": _as_float(sold.get("amount_charged")),
-        "balance": _as_float(sold.get("balance")),
+        "balance": max(_as_float(sold.get("balance")), 0.0),
         "profit": _as_float(sold.get("profit")),
-        "payment_status": status,
+        "payment_status": sold.get("payment_status") or status,
+        "paid_amount": _as_float(sold.get("paid_amount")) if sold.get("paid_amount") is not None else paid_amount,
     }
 
 
