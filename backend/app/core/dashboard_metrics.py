@@ -7,6 +7,7 @@ from app.core.financials import compute_outstanding, to_number
 logger = logging.getLogger(__name__)
 
 ACCOUNTING_START_AT = datetime(2026, 5, 1, tzinfo=timezone.utc)
+_TABLE_COLUMNS_CACHE: dict[str, set[str]] = {}
 
 
 def _fetch_all_rows(sb, table_name: str, select_clause: str, batch_size: int = 1000) -> list[dict]:
@@ -26,6 +27,83 @@ def _fetch_all_rows(sb, table_name: str, select_clause: str, batch_size: int = 1
             break
         start += batch_size
     return rows
+
+
+def _table_columns(sb, table_name: str) -> set[str]:
+    cached = _TABLE_COLUMNS_CACHE.get(table_name)
+    if cached is not None:
+        return cached
+
+    columns: set[str] = set()
+    try:
+        rows = (
+            sb.table("information_schema.columns")
+            .select("column_name")
+            .eq("table_schema", "public")
+            .eq("table_name", table_name)
+            .execute()
+            .data
+            or []
+        )
+        columns = {str(row.get("column_name")) for row in rows if row.get("column_name")}
+    except Exception:
+        columns = set()
+
+    if not columns:
+        try:
+            sample = sb.table(table_name).select("*").limit(1).execute().data or []
+            if sample:
+                columns = {str(key) for key in sample[0].keys()}
+        except Exception:
+            columns = set()
+
+    _TABLE_COLUMNS_CACHE[table_name] = columns
+    return columns
+
+
+def _service_jobs_select_clause(sb) -> str:
+    required_fields = [
+        "id",
+        "legacy_source_id",
+        "client_name",
+        "amount_charged",
+        "paid_amount",
+        "payment_status",
+        "service_date",
+        "paid_at",
+        "paid_date",
+        "is_return",
+        "service_expense_amount",
+        "expense_amount",
+        "imei",
+    ]
+    optional_fields = ["deleted_at"]
+    columns = _table_columns(sb, "service_jobs")
+    fields = list(required_fields)
+    fields.extend(field for field in optional_fields if field in columns)
+    return ",".join(fields)
+
+
+def _profit_service_jobs_select_clause(sb) -> str:
+    required_fields = [
+        "id",
+        "legacy_source_id",
+        "client_name",
+        "amount_charged",
+        "paid_amount",
+        "payment_status",
+        "paid_at",
+        "paid_date",
+        "is_return",
+        "service_expense_amount",
+        "expense_amount",
+        "imei",
+    ]
+    optional_fields = ["deleted_at"]
+    columns = _table_columns(sb, "service_jobs")
+    fields = list(required_fields)
+    fields.extend(field for field in optional_fields if field in columns)
+    return ",".join(fields)
 
 
 def _norm(value: str) -> str:
@@ -106,13 +184,22 @@ def _is_sheet_import_row(row: dict, prefix: str) -> bool:
     return str(row.get("legacy_source_id") or "").startswith(prefix)
 
 
+def _is_active_service_row(row: dict) -> bool:
+    status = _norm(row.get("payment_status"))
+    if bool(row.get("is_return")):
+        return False
+    if bool(row.get("deleted_at")):
+        return False
+    return status not in {"RETURNED", "CANCELLED", "CANCELED"}
+
+
 def compute_metrics_from_supabase(sb) -> dict:
     clients = _fetch_all_rows(sb, "clients", "id")
 
     services = _fetch_all_rows(
         sb,
         "service_jobs",
-        "id,legacy_source_id,client_name,amount_charged,paid_amount,payment_status,service_date,paid_at,paid_date,is_return,service_expense_amount,expense_amount,imei",
+        _service_jobs_select_clause(sb),
     )
 
     inventory = _fetch_all_rows(
@@ -139,8 +226,6 @@ def compute_metrics_from_supabase(sb) -> dict:
     # Maps normalised IMEI/SKU → cost_price (0 if missing)
     imei_cost_map: dict[str, float] = {}
     for inv in inventory:
-        if not _is_sheet_import_row(inv, "sheet_import:inventory:"):
-            continue
         cost_price = to_number(inv.get("cost_price"))
         for candidate in (inv.get("imei"), inv.get("sku")):
             key = _norm_imei(candidate)
@@ -163,7 +248,7 @@ def compute_metrics_from_supabase(sb) -> dict:
     skipped_missing_cost = 0
 
     for row in services:
-        if not _is_sheet_import_row(row, "sheet_import:service:"):
+        if not _is_active_service_row(row):
             continue
         total = to_number(row.get("amount_charged"))
         paid = to_number(row.get("paid_amount"))
@@ -242,8 +327,6 @@ def compute_metrics_from_supabase(sb) -> dict:
     low_quality_stock = 0
 
     for row in inventory:
-        if not _is_sheet_import_row(row, "sheet_import:inventory:"):
-            continue
         prod_status = _norm(row.get("product_status") or row.get("payment_status"))
         if prod_status == "AVAILABLE":
             available_products += 1
@@ -411,7 +494,7 @@ def compute_profit_ledger(sb) -> dict:
     services = _fetch_all_rows(
         sb,
         "service_jobs",
-        "id,legacy_source_id,client_name,amount_charged,paid_amount,payment_status,paid_at,paid_date,is_return,service_expense_amount,expense_amount,imei",
+        _profit_service_jobs_select_clause(sb),
     )
     inventory = _fetch_all_rows(
         sb,
@@ -422,8 +505,6 @@ def compute_profit_ledger(sb) -> dict:
     # Build IMEI → cost_price map
     imei_cost_map: dict[str, float] = {}
     for inv in inventory:
-        if not _is_sheet_import_row(inv, "sheet_import:inventory:"):
-            continue
         cost_price = to_number(inv.get("cost_price"))
         for candidate in (inv.get("imei"), inv.get("sku")):
             key = _norm_imei(candidate)
@@ -435,7 +516,7 @@ def compute_profit_ledger(sb) -> dict:
     excluded_rows: list[dict] = []
 
     for row in services:
-        if not _is_sheet_import_row(row, "sheet_import:service:"):
+        if not _is_active_service_row(row):
             continue
         paid = to_number(row.get("paid_amount"))
         status = _norm(row.get("payment_status"))
