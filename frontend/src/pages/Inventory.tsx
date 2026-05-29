@@ -35,6 +35,7 @@ interface StockItem {
   supplier_phone?: string
   supplier_contact?: string
   storage?: string
+  color?: string
   payment_status?: string
   product_status?: string
   sold_out?: boolean
@@ -58,6 +59,7 @@ interface FormValues {
   supplier_phone?: string
   supplier_contact?: string
   storage?: string
+  color?: string
   location?: string
   product_status?: string
   condition?: string
@@ -293,6 +295,7 @@ export default function Inventory() {
         supplier_phone: values.supplier_phone?.trim() ? normalizeNigeriaPhone(values.supplier_phone.trim()) : undefined,
         supplier_contact: values.supplier_contact?.trim() || undefined,
         storage: values.storage?.trim() || undefined,
+        color: values.color?.trim() || undefined,
         location: values.location?.trim() || undefined,
         payment_status: values.product_status?.trim() || undefined,
         condition: values.condition || undefined,
@@ -559,6 +562,7 @@ export default function Inventory() {
           unit: item.unit ? String(item.unit) : 'pcs',
           unit_cost: Number(item.unit_cost ?? 0),
           unit_price: Number(item.unit_price ?? 0),
+          color: item.color ? String(item.color) : undefined,
           reorder_level: Number(item.reorder_level ?? 0),
           product_status: item.product_status ? String(item.product_status) : (item.payment_status ? String(item.payment_status) : undefined),
         }))
@@ -584,6 +588,7 @@ export default function Inventory() {
     { key: 'sku',          header: 'SKU' },
     { key: 'category',     header: 'Category' },
     { key: 'storage',      header: 'Storage' },
+    { key: 'color',        header: 'Color' },
     { key: 'quantity',     header: 'Qty',
       render: (r: StockItem) => (
         <span className={Number(r.quantity) <= Number(r.reorder_level) ? 'text-red-600 font-semibold' : ''}>
@@ -921,6 +926,10 @@ export default function Inventory() {
                 <div>
                   <label className="form-label">Storage</label>
                   <input type="text" className="form-input" placeholder="e.g. 128GB" {...register('storage')} />
+                </div>
+                <div>
+                  <label className="form-label">Color</label>
+                  <input type="text" className="form-input" placeholder="e.g. Black" {...register('color')} />
                 </div>
                 <div>
                   <label className="form-label">Condition</label>
