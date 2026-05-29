@@ -256,6 +256,11 @@ def _normalize_payment_status(value: Optional[str]) -> str:
     return status
 
 
+def _normalize_optional_date(value: Optional[str]) -> Optional[str]:
+    text = str(value or "").strip()
+    return text[:10] if text else None
+
+
 def _compute_financial_state(total_amount, paid_amount) -> tuple[float, float, str]:
     total = max(0.0, to_number(total_amount))
     paid = max(0.0, to_number(paid_amount))
@@ -1387,12 +1392,12 @@ def create_billing(payload: BillingCreate, _user=Depends(get_current_user)):
         "payment_status": payment_status,
         "paid_amount": amount_paid,
         "service_expense_amount": to_number(data.get("service_expense", 0)),
-        "service_expense_date": data.get("invoice_date"),
+        "service_expense_date": _normalize_optional_date(data.get("invoice_date")),
         "service_expense_description": data.get("description"),
-        "paid_date": data.get("invoice_date") if payment_status == "PAID" else None,
+        "paid_date": _normalize_optional_date(data.get("invoice_date")) if payment_status == "PAID" else None,
         "paid_at": datetime.utcnow().isoformat() if payment_status == "PAID" else None,
-        "service_date": data.get("invoice_date"),
-        "due_date": data.get("due_date"),
+        "service_date": _normalize_optional_date(data.get("invoice_date")),
+        "due_date": _normalize_optional_date(data.get("due_date")),
         "notes": data.get("notes"),
         "imei": data.get("imei"),
         "serial_number": data.get("serial_number"),
@@ -1490,6 +1495,11 @@ def update_billing(billing_id: str, payload: BillingUpdate, _user=Depends(get_cu
     if "payment_date" in data:
         data["paid_date"] = data.pop("payment_date")
 
+    for date_field in ("service_date", "due_date", "paid_date"):
+        if date_field in data:
+            raw_date = str(data.get(date_field) or "").strip()
+            data[date_field] = raw_date[:10] if raw_date else None
+
     existing_amount = to_number(existing_before.get("amount_charged"))
     existing_paid = to_number(existing_before.get("paid_amount"))
     existing_qty = to_number(existing_before.get("quantity") or 1) or 1
@@ -1542,7 +1552,17 @@ def update_billing(billing_id: str, payload: BillingUpdate, _user=Depends(get_cu
     if not data:
         raise HTTPException(status_code=400, detail="No valid fields to update")
 
-    result = sb.table("service_jobs").update(data).eq("id", billing_id).execute()
+    try:
+        result = sb.table("service_jobs").update(data).eq("id", billing_id).execute()
+    except Exception as exc:
+        message = str(exc)
+        if "invalid input syntax for type date" in message:
+            raise HTTPException(
+                status_code=422,
+                detail="Invalid date value. Use YYYY-MM-DD or clear the date field.",
+            )
+        raise HTTPException(status_code=400, detail=f"Billing update failed: {message}")
+
     updated = result.data[0]
 
     _log_billing_audit(

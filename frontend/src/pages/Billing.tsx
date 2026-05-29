@@ -202,6 +202,7 @@ function operationStatusClass(status: string): string {
 
 function parseApiError(error: any, fallback: string): string {
   const detail = error?.response?.data?.detail
+  const message = error?.response?.data?.message
   if (Array.isArray(detail) && detail.length > 0) {
     const first = detail[0]
     const loc = Array.isArray(first?.loc) ? first.loc.join('.') : ''
@@ -209,6 +210,7 @@ function parseApiError(error: any, fallback: string): string {
     return loc ? `${loc}: ${msg}` : msg
   }
   if (typeof detail === 'string' && detail.trim()) return detail
+  if (typeof message === 'string' && message.trim()) return message
   if (error?.response?.status === 403) return 'Permission denied for this action'
   if (error?.response?.status === 404) return 'Invoice was not found or may have been removed'
   if (error?.response?.status === 408) return 'Request timed out, please try again'
