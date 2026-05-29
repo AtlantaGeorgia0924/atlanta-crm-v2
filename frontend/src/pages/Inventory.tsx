@@ -324,6 +324,7 @@ export default function Inventory() {
       qc.invalidateQueries({ queryKey: ['inventory'] })
       qc.invalidateQueries({ queryKey: ['inventory-groups'] })
     },
+    onError: (e: any) => toast.error(e?.response?.data?.detail ?? 'Remove failed'),
   })
 
   const createGroupMutation = useMutation({

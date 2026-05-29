@@ -36,6 +36,12 @@ def _inventory_item_columns(sb) -> set[str]:
     return _INVENTORY_COLUMNS_CACHE
 
 
+def _apply_active_inventory_filter(sb, query):
+    if "deleted_at" in _inventory_item_columns(sb):
+        return query.is_("deleted_at", "null")
+    return query
+
+
 def _extract_supplier(description: Optional[str]) -> Optional[str]:
     text = str(description or "")
     marker = "Supplier:"
@@ -394,7 +400,8 @@ def list_inventory(
     _user=Depends(get_current_user),
 ):
     sb = get_supabase()
-    result = sb.table("inventory_items").select("*", count="exact").order("item_name").execute()
+    query = sb.table("inventory_items").select("*", count="exact").order("item_name")
+    result = _apply_active_inventory_filter(sb, query).execute()
     data = [_serialize_item(r) for r in (result.data or [])]
 
     if search:
@@ -534,7 +541,8 @@ def create_items_bulk(payload: StockBulkCreate, _user=Depends(get_current_user))
 @router.get("/groups")
 def list_groups(_user=Depends(get_current_user)):
     sb = get_supabase()
-    rows = sb.table("inventory_items").select("category").execute().data or []
+    query = sb.table("inventory_items").select("category")
+    rows = _apply_active_inventory_filter(sb, query).execute().data or []
     data_groups = {
         _normalize_group_name(row.get("category"))
         for row in rows
@@ -575,7 +583,8 @@ def rename_group(group_name: str, payload: GroupUpdate, _user=Depends(get_curren
     if not old_name or not new_name:
         raise HTTPException(422, "Both current and new group names are required")
 
-    rows = sb.table("inventory_items").select("id,category").eq("category", old_name).execute().data or []
+    rows_query = sb.table("inventory_items").select("id,category").eq("category", old_name)
+    rows = _apply_active_inventory_filter(sb, rows_query).execute().data or []
     for row in rows:
         sb.table("inventory_items").update({"category": new_name}).eq("id", row.get("id")).execute()
 
@@ -609,10 +618,11 @@ def assign_items_to_group(payload: GroupAssignment, _user=Depends(get_current_us
 @router.get("/{item_id}")
 def get_item(item_id: str, _user=Depends(get_current_user)):
     sb = get_supabase()
-    result = sb.table("inventory_items").select("*").eq("id", item_id).single().execute()
-    if not result.data:
+    query = sb.table("inventory_items").select("*").eq("id", item_id).limit(1)
+    rows = _apply_active_inventory_filter(sb, query).execute().data or []
+    if not rows:
         raise HTTPException(404, "Item not found")
-    return _serialize_item(result.data)
+    return _serialize_item(rows[0])
 
 
 @router.get("/{item_id}/transactions")
@@ -990,7 +1000,9 @@ def reverse_sold_product(payload: ReverseSalePayload, _user=Depends(get_current_
 @router.put("/{item_id}")
 def update_item(item_id: str, payload: StockUpdate, _user=Depends(get_current_user)):
     sb = get_supabase()
-    existing = sb.table("inventory_items").select("*").eq("id", item_id).single().execute().data
+    existing_query = sb.table("inventory_items").select("*").eq("id", item_id).limit(1)
+    existing_rows = _apply_active_inventory_filter(sb, existing_query).execute().data or []
+    existing = existing_rows[0] if existing_rows else None
     if not existing:
         raise HTTPException(404, "Item not found")
 
@@ -1110,7 +1122,21 @@ def update_item(item_id: str, payload: StockUpdate, _user=Depends(get_current_us
 @router.delete("/{item_id}", status_code=204)
 def delete_item(item_id: str, _user=Depends(get_current_user)):
     sb = get_supabase()
-    sb.table("inventory_items").delete().eq("id", item_id).execute()
+    existing_query = sb.table("inventory_items").select("id").eq("id", item_id).limit(1)
+    existing = _apply_active_inventory_filter(sb, existing_query).execute().data or []
+    if not existing:
+        raise HTTPException(404, "Item not found")
+
+    item_columns = _inventory_item_columns(sb)
+    if "deleted_at" in item_columns:
+        sb.table("inventory_items").update(
+            {
+                "deleted_at": datetime.utcnow().isoformat(),
+                "deleted_by": str(_user.id),
+            }
+        ).eq("id", item_id).execute()
+    else:
+        sb.table("inventory_items").delete().eq("id", item_id).execute()
     emit_financial_event(
         sb,
         "inventory_item_deleted",

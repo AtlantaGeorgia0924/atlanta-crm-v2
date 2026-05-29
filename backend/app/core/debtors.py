@@ -41,6 +41,8 @@ def compute_debtors_from_supabase(sb) -> dict:
     grouped: dict[str, dict] = {}
 
     for row in rows:
+        if row.get("deleted_at"):
+            continue
         client_name = _normalize_client_name(row.get("client_name"))
         status = _normalize_status(row.get("payment_status"))
         total = to_number(row.get("amount_charged"))

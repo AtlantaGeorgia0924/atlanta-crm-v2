@@ -69,6 +69,12 @@ def _service_job_columns(sb) -> set[str]:
     return _SERVICE_JOB_COLUMNS_CACHE
 
 
+def _apply_active_service_filter(sb, query):
+    if "deleted_at" in _service_job_columns(sb):
+        return query.is_("deleted_at", "null")
+    return query
+
+
 def _staff_scope_enabled(sb) -> bool:
     """Future permission flag scaffold: staff_can_only_view_own_services."""
     rows = (
@@ -607,6 +613,7 @@ def list_billing(
         .order("service_date", desc=True)
         .range(offset, offset + page_size - 1)
     )
+    query = _apply_active_service_filter(sb, query)
     if not is_admin and _staff_scope_enabled(sb):
         query = query.eq("created_by", str(_user.id))
 
@@ -699,6 +706,7 @@ def list_billing_grouped(
         .order("created_at", desc=True)
         .range(offset, offset + page_size - 1)
     )
+    query = _apply_active_service_filter(sb, query)
 
     if not is_admin and _staff_scope_enabled(sb):
         query = query.eq("created_by", str(_user.id))
@@ -845,29 +853,25 @@ def _open_client_invoices(sb, client_name: str, phone_number: Optional[str] = No
     target = _normalize_client_key(client_name)
     target_phone = _normalize_phone_number(phone_number or "")
     try:
-        rows = (
+        query = (
             sb.table("service_jobs")
             .select("id,client_name,service_name,description,service_date,due_date,amount_charged,paid_amount,payment_status,is_return,notes,phone_number,created_at")
             .in_("payment_status", ["UNPAID", "PART PAYMENT", "PARTIAL"])
             .order("service_date")
             .order("created_at")
             .limit(1000)
-            .execute()
-            .data
-            or []
         )
+        rows = _apply_active_service_filter(sb, query).execute().data or []
     except Exception:
-        rows = (
+        query = (
             sb.table("service_jobs")
             .select("id,client_name,service_name,description,service_date,due_date,amount_charged,paid_amount,payment_status,is_return,notes,created_at")
             .in_("payment_status", ["UNPAID", "PART PAYMENT", "PARTIAL"])
             .order("service_date")
             .order("created_at")
             .limit(1000)
-            .execute()
-            .data
-            or []
         )
+        rows = _apply_active_service_filter(sb, query).execute().data or []
 
     result: list[dict] = []
     for row in rows:
@@ -905,27 +909,23 @@ def _all_client_services(sb, client_name: str, phone_number: Optional[str] = Non
     target = _normalize_client_key(client_name)
     target_phone = _normalize_phone_number(phone_number or "")
     try:
-        rows = (
+        query = (
             sb.table("service_jobs")
             .select("id,client_name,phone_number,service_name,description,service_date,created_at,amount_charged,paid_amount,payment_status,is_return,notes,invoice_id,imei,serial_number")
             .order("service_date", desc=True)
             .order("created_at", desc=True)
             .limit(2000)
-            .execute()
-            .data
-            or []
         )
+        rows = _apply_active_service_filter(sb, query).execute().data or []
     except Exception:
-        rows = (
+        query = (
             sb.table("service_jobs")
             .select("*")
             .order("service_date", desc=True)
             .order("created_at", desc=True)
             .limit(2000)
-            .execute()
-            .data
-            or []
         )
+        rows = _apply_active_service_filter(sb, query).execute().data or []
 
     services: list[dict] = []
     for row in rows:
@@ -1241,10 +1241,11 @@ def apply_debtor_payment(client_name: str, payload: DebtorPaymentApplyPayload, _
 @router.get("/{billing_id}")
 def get_billing(billing_id: str, _user=Depends(get_current_user)):
     sb = get_supabase()
-    result = sb.table("service_jobs").select("*").eq("id", billing_id).single().execute()
-    if not result.data:
+    query = sb.table("service_jobs").select("*").eq("id", billing_id).limit(1)
+    rows = _apply_active_service_filter(sb, query).execute().data or []
+    if not rows:
         raise HTTPException(404, "Billing row not found")
-    return _serialize_billing_row(result.data, is_admin=user_is_admin(_user))
+    return _serialize_billing_row(rows[0], is_admin=user_is_admin(_user))
 
 
 @router.get("/client-summary/by-name")
@@ -1253,16 +1254,14 @@ def get_client_summary(client_name: str = Query(...), limit: int = Query(5, ge=1
     is_admin = user_is_admin(_user)
     target = _normalize_client_key(client_name)
 
-    rows = (
+    summary_query = (
         sb.table("service_jobs")
         .select("id,client_name,phone_number,service_name,description,service_date,amount_charged,paid_amount,payment_status,paid_date,last_payment_at,created_at")
         .order("service_date", desc=True)
         .order("created_at", desc=True)
         .limit(2000)
-        .execute()
-        .data
-        or []
     )
+    rows = _apply_active_service_filter(sb, summary_query).execute().data or []
 
     matched = [r for r in rows if _normalize_client_key(r.get("client_name") or "") == target]
     if not matched:
@@ -1342,7 +1341,8 @@ def get_billing_activity(
     _user=Depends(get_current_user),
 ):
     sb = get_supabase()
-    exists = sb.table("service_jobs").select("id").eq("id", billing_id).limit(1).execute().data or []
+    exists_query = sb.table("service_jobs").select("id").eq("id", billing_id).limit(1)
+    exists = _apply_active_service_filter(sb, exists_query).execute().data or []
     if not exists:
         raise HTTPException(404, "Billing row not found")
 
@@ -1459,7 +1459,9 @@ def create_billing(payload: BillingCreate, _user=Depends(get_current_user)):
 @router.put("/{billing_id}")
 def update_billing(billing_id: str, payload: BillingUpdate, _user=Depends(get_current_user)):
     sb = get_supabase()
-    existing_before = sb.table("service_jobs").select("*").eq("id", billing_id).single().execute().data
+    existing_query = sb.table("service_jobs").select("*").eq("id", billing_id).limit(1)
+    existing_rows = _apply_active_service_filter(sb, existing_query).execute().data or []
+    existing_before = existing_rows[0] if existing_rows else None
     if not existing_before:
         raise HTTPException(404, "Billing row not found")
 
@@ -1609,9 +1611,23 @@ def update_billing(billing_id: str, payload: BillingUpdate, _user=Depends(get_cu
 @router.delete("/{billing_id}", status_code=204)
 def delete_billing(billing_id: str, _user=Depends(get_current_user)):
     sb = get_supabase()
-    existing = sb.table("service_jobs").select("*").eq("id", billing_id).limit(1).execute().data or []
+    existing_query = sb.table("service_jobs").select("*").eq("id", billing_id).limit(1)
+    existing = _apply_active_service_filter(sb, existing_query).execute().data or []
+    if not existing:
+        raise HTTPException(404, "Billing row not found")
     before_value = existing[0] if existing else None
-    sb.table("service_jobs").delete().eq("id", billing_id).execute()
+
+    service_columns = _service_job_columns(sb)
+    if "deleted_at" in service_columns:
+        sb.table("service_jobs").update({
+            "deleted_at": datetime.utcnow().isoformat(),
+            "deleted_by": str(_user.id),
+            "last_edited_by": str(_user.id),
+            "last_edited_by_name": _actor_display_name(_user),
+            "last_edited_at": datetime.utcnow().isoformat(),
+        }).eq("id", billing_id).execute()
+    else:
+        sb.table("service_jobs").delete().eq("id", billing_id).execute()
 
     _log_billing_audit(
         sb,

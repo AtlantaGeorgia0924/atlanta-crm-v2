@@ -515,6 +515,7 @@ export default function Billing() {
       toast.success('Deleted')
       qc.invalidateQueries({ queryKey: ['billing-grouped'] })
     },
+    onError: (e: any) => toast.error(parseApiError(e, 'Delete failed')),
   })
 
   const applyPaymentMutation = useMutation({
