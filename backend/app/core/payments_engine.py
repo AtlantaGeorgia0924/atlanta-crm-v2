@@ -205,27 +205,32 @@ def reverse_invoice_payment(
     reason = str(reversal_reason or "").strip() or "Payment reversal"
     resolved_idempotency = str(idempotency_key or "").strip() or None
 
-    try:
-        rpc_rows = _rpc_with_retry(
-            sb,
-            "reverse_service_payment_tx",
-            {
-                "p_service_job_id": service_job_id,
-                "p_reversal_amount": amount,
-                "p_reversal_reason": reason,
-                "p_reversed_by": reversed_by,
-                "p_reversed_by_name": reversed_by_name,
-                "p_reversal_date": resolved_date,
-                "p_idempotency_key": resolved_idempotency,
-            },
-        )
-    except Exception as exc:
-        message = str(exc)
-        if "exceeds paid amount" in message.lower():
-            raise HTTPException(400, message)
-        if "must be greater than zero" in message.lower():
-            raise HTTPException(422, message)
-        raise HTTPException(500, f"Payment reversal failed: {message}")
+    rpc_rows = []
+    for attempt in range(1, 4):
+        try:
+            rpc_rows = _rpc_with_retry(
+                sb,
+                "reverse_service_payment_tx",
+                {
+                    "p_service_job_id": service_job_id,
+                    "p_reversal_amount": amount,
+                    "p_reversal_reason": reason,
+                    "p_reversed_by": reversed_by,
+                    "p_reversed_by_name": reversed_by_name,
+                    "p_reversal_date": resolved_date,
+                    "p_idempotency_key": resolved_idempotency,
+                },
+            )
+            break
+        except Exception as exc:
+            message = str(exc)
+            if "exceeds paid amount" in message.lower():
+                raise HTTPException(400, message)
+            if "must be greater than zero" in message.lower():
+                raise HTTPException(422, message)
+            if attempt < 3 and _is_reference_collision_error(message):
+                continue
+            raise HTTPException(500, f"Payment reversal failed: {message}")
 
     if not rpc_rows:
         raise HTTPException(500, "Payment reversal failed")
