@@ -180,6 +180,7 @@ def _serialize_item(row: dict) -> dict:
     extracted = _extract_supplier_details(row.get("description"))
     return {
         **row,
+        "imei": row.get("imei"),
         "unit_cost": row.get("cost_price", 0),
         "unit_price": row.get("selling_price"),
         "reorder_level": row.get("reorder_level", 0),
@@ -256,6 +257,7 @@ UNLOCK_METHOD_OPTIONS = [
 
 class StockCreate(BaseModel):
     item_name: str
+    imei: Optional[str] = None
     sku: Optional[str] = None
     category: Optional[str] = None
     description: Optional[str] = None
@@ -284,6 +286,7 @@ class StockCreate(BaseModel):
 
 class StockUpdate(BaseModel):
     item_name: Optional[str] = None
+    imei: Optional[str] = None
     sku: Optional[str] = None
     category: Optional[str] = None
     description: Optional[str] = None
@@ -389,6 +392,89 @@ def _normalize_payment_status(value: Optional[str]) -> str:
 
 def _normalize_phone(value: Optional[str]) -> str:
     return "".join(ch for ch in str(value or "") if ch.isdigit())
+
+
+def _service_job_columns(sb) -> set[str]:
+    try:
+        rows = (
+            sb.table("information_schema.columns")
+            .select("column_name")
+            .eq("table_schema", "public")
+            .eq("table_name", "service_jobs")
+            .execute()
+            .data
+            or []
+        )
+        columns = {str(c.get("column_name")) for c in rows if c.get("column_name")}
+    except Exception:
+        columns = set()
+
+    if not columns:
+        try:
+            sample = sb.table("service_jobs").select("*").limit(1).execute().data or []
+            if sample and isinstance(sample[0], dict):
+                columns = {str(k) for k in sample[0].keys()}
+        except Exception:
+            columns = set()
+
+    return columns
+
+
+def _propagate_inventory_device_metadata_to_service_job(sb, service_job_id: str, inventory_item_id: str):
+    service_job_id = str(service_job_id or "").strip()
+    inventory_item_id = str(inventory_item_id or "").strip()
+    if not service_job_id or not inventory_item_id:
+        return
+
+    service_rows = (
+        sb.table("service_jobs")
+        .select("*")
+        .eq("id", service_job_id)
+        .limit(1)
+        .execute()
+        .data
+        or []
+    )
+    if not service_rows:
+        return
+    service_row = service_rows[0]
+
+    item_rows = (
+        sb.table("inventory_items")
+        .select("*")
+        .eq("id", inventory_item_id)
+        .limit(1)
+        .execute()
+        .data
+        or []
+    )
+    if not item_rows:
+        return
+    item = item_rows[0]
+
+    updates = {
+        "imei": item.get("imei") or None,
+        "device_model": item.get("item_name") or None,
+        "condition": item.get("condition") or None,
+        "lock_status": item.get("lock_status") or None,
+        "unlock_method": item.get("unlock_method") or None,
+    }
+
+    # Only fill missing values to avoid clobbering edited service rows.
+    missing_only = {}
+    for key, value in updates.items():
+        current = str(service_row.get(key) or "").strip()
+        next_value = str(value or "").strip()
+        if not current and next_value:
+            missing_only[key] = value
+
+    if not missing_only:
+        return
+
+    allowed = _service_job_columns(sb)
+    payload = {k: v for k, v in missing_only.items() if k in allowed and v is not None}
+    if payload:
+        sb.table("service_jobs").update(payload).eq("id", service_job_id).execute()
 
 
 def _upsert_client(sb, client_name: str, client_phone: Optional[str]) -> Optional[str]:
@@ -538,6 +624,7 @@ def create_item(payload: StockCreate, _user=Depends(get_current_user)):
         _upsert_client(sb, supplier_name, raw_supplier_phone)
     mapped = {
         "item_name": data.get("item_name"),
+        "imei": str(data.get("imei") or "").strip() or None,
         "sku": data.get("sku"),
         "category": _normalize_group_name(data.get("category")),
         "description": data.get("description"),
@@ -616,6 +703,7 @@ def create_items_bulk(payload: StockBulkCreate, _user=Depends(get_current_user))
         row = {
                 "id": str(uuid.uuid4()),
                 "item_name": name,
+            "imei": str(data.get("imei") or "").strip() or None,
                 "sku": data.get("sku"),
                 "category": _normalize_group_name(data.get("category")),
                 "description": data.get("description"),
@@ -926,6 +1014,13 @@ def checkout_inventory_cart(payload: InventoryCheckoutPayload, _user=Depends(get
         or []
     )
 
+    for sale_item in sale_items:
+        _propagate_inventory_device_metadata_to_service_job(
+            sb,
+            str(sale_item.get("service_job_id") or ""),
+            str(sale_item.get("source_inventory_item_id") or ""),
+        )
+
     emit_financial_event(
         sb,
         "inventory_sale",
@@ -1032,6 +1127,8 @@ def sell_product(item_id: str, payload: SellProductPayload, _user=Depends(get_cu
         if ownership_payload:
             sb.table("service_jobs").update(ownership_payload).eq("id", service_job_id).execute()
 
+        _propagate_inventory_device_metadata_to_service_job(sb, service_job_id, item_id)
+
     emit_financial_event(
         sb,
         "inventory_sale",
@@ -1122,6 +1219,10 @@ def update_item(item_id: str, payload: StockUpdate, _user=Depends(get_current_us
         data["cost_price"] = data.pop("unit_cost")
     if "unit_price" in data:
         data["selling_price"] = data.pop("unit_price")
+    if "imei" in data:
+        data["imei"] = str(data.get("imei") or "").strip() or None
+        if data["imei"] is None:
+            data.pop("imei")
     # supplier_phone needs phone normalization
     if "supplier_phone" in data:
         normalized_phone = _normalize_phone(data.pop("supplier_phone"))

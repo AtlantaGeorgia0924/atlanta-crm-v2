@@ -21,6 +21,7 @@ from app.core.payments_engine import apply_invoice_payment
 router = APIRouter()
 
 _SERVICE_JOB_COLUMNS_CACHE: set[str] | None = None
+_INVENTORY_ITEM_COLUMNS_CACHE: set[str] | None = None
 _STAFF_VIEW_OWN_FLAG_KEY = "staff_can_only_view_own_services"
 
 
@@ -69,6 +70,38 @@ def _service_job_columns(sb) -> set[str]:
     return _SERVICE_JOB_COLUMNS_CACHE
 
 
+def _inventory_item_columns(sb) -> set[str]:
+    global _INVENTORY_ITEM_COLUMNS_CACHE
+    if _INVENTORY_ITEM_COLUMNS_CACHE is not None:
+        return _INVENTORY_ITEM_COLUMNS_CACHE
+
+    rows = []
+    try:
+        rows = (
+            sb.table("information_schema.columns")
+            .select("column_name")
+            .eq("table_schema", "public")
+            .eq("table_name", "inventory_items")
+            .execute()
+            .data
+            or []
+        )
+    except Exception:
+        rows = []
+
+    columns = {str(r.get("column_name")) for r in rows if r.get("column_name")}
+    if not columns:
+        try:
+            sample_rows = sb.table("inventory_items").select("*").limit(1).execute().data or []
+            if sample_rows:
+                columns = {str(k) for k in sample_rows[0].keys()}
+        except Exception:
+            columns = set()
+
+    _INVENTORY_ITEM_COLUMNS_CACHE = columns
+    return _INVENTORY_ITEM_COLUMNS_CACHE
+
+
 def _apply_active_service_filter(sb, query):
     if "deleted_at" in _service_job_columns(sb):
         return query.is_("deleted_at", "null")
@@ -104,17 +137,17 @@ def _inventory_search_service_ids(sb, term: str) -> list[str]:
         return []
     wildcard = "%" + "%".join(term.split()) + "%"
 
+    inventory_columns = _inventory_item_columns(sb)
+    search_fields = ["item_name", "imei", "sku", "supplier", "unlock_method"]
+    clauses = [f"{field}.ilike.{wildcard}" for field in search_fields if field in inventory_columns]
+    if not clauses:
+        return []
+
     # Search inventory item metadata first, then map matching items to related service rows.
     inventory_matches = (
         sb.table("inventory_items")
         .select("id")
-        .or_(
-            f"item_name.ilike.{wildcard},"
-            f"imei.ilike.{wildcard},"
-            f"sku.ilike.{wildcard},"
-            f"supplier.ilike.{wildcard},"
-            f"unlock_method.ilike.{wildcard}"
-        )
+        .or_(",".join(clauses))
         .limit(500)
         .execute()
         .data

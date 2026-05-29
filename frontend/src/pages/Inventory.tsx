@@ -23,6 +23,7 @@ function normalizeNigeriaPhone(raw: string): string {
 interface StockItem {
   id: string
   item_name: string
+  imei?: string
   sku: string
   category: string
   quantity: number
@@ -46,6 +47,7 @@ interface StockItem {
 
 interface FormValues {
   item_name: string
+  imei?: string
   sku?: string
   category?: string
   description?: string
@@ -296,6 +298,7 @@ export default function Inventory() {
       const proposedSellingPrice = Number(values.unit_price)
       const payload = {
         item_name: values.item_name?.trim(),
+        imei: values.imei?.trim() || undefined,
         sku: values.sku?.trim() || undefined,
         category: values.category?.trim() || undefined,
         description: values.description?.trim() || undefined,
@@ -572,6 +575,7 @@ export default function Inventory() {
       const items = parsed
         .map((item) => ({
           item_name: String(item.item_name ?? '').trim(),
+          imei: item.imei ? String(item.imei).trim() : undefined,
           sku: item.sku ? String(item.sku) : undefined,
           category: item.category ? String(item.category) : undefined,
           description: item.description ? String(item.description) : undefined,
@@ -607,6 +611,7 @@ export default function Inventory() {
 
   const columns = [
     { key: 'item_name',    header: 'Item' },
+    { key: 'imei',         header: 'IMEI' },
     { key: 'sku',          header: 'SKU' },
     { key: 'category',     header: 'Category' },
     { key: 'storage',      header: 'Storage' },
@@ -945,6 +950,10 @@ export default function Inventory() {
             <div className="space-y-2">
               <p className="text-xs font-semibold uppercase tracking-wide text-gray-500 mt-2">Device Details</p>
               <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="form-label">IMEI</label>
+                  <input type="text" className="form-input" placeholder="e.g. 357293372803775" {...register('imei')} />
+                </div>
                 <div>
                   <label className="form-label">Storage</label>
                   <input type="text" className="form-input" placeholder="e.g. 128GB" {...register('storage')} />
