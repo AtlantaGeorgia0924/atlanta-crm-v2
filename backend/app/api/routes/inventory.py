@@ -186,6 +186,7 @@ def _serialize_item(row: dict) -> dict:
         "supplier": row.get("supplier") or extracted.get("supplier") or _extract_supplier(row.get("description")),
         "supplier_phone": row.get("supplier_phone") or extracted.get("supplier_phone"),
         "supplier_contact": row.get("supplier_contact") or extracted.get("supplier_contact"),
+        "storage": row.get("storage"),
         "location": row.get("location"),
         "product_status": product_status,
         "is_active": True,
@@ -265,6 +266,7 @@ class StockCreate(BaseModel):
     supplier: Optional[str] = None
     supplier_phone: Optional[str] = None
     supplier_contact: Optional[str] = None
+    storage: Optional[str] = None
     location: Optional[str] = None
     source: Optional[str] = "manual"
     payment_status: Optional[str] = None
@@ -291,6 +293,7 @@ class StockUpdate(BaseModel):
     supplier: Optional[str] = None
     supplier_phone: Optional[str] = None
     supplier_contact: Optional[str] = None
+    storage: Optional[str] = None
     location: Optional[str] = None
     is_active: Optional[bool] = None
     payment_status: Optional[str] = None
@@ -543,6 +546,7 @@ def create_item(payload: StockCreate, _user=Depends(get_current_user)):
         "supplier": supplier_name or None,
         "supplier_phone": _normalize_phone(raw_supplier_phone) or None,
         "supplier_contact": supplier_contact or None,
+        "storage": data.get("storage"),
         "location": data.get("location"),
         "payment_status": (data.get("payment_status") or "").upper() or None,
         "item_expense_amount": data.get("item_expense_amount", 0),
@@ -615,6 +619,7 @@ def create_items_bulk(payload: StockBulkCreate, _user=Depends(get_current_user))
                 "unit": data.get("unit", "pcs"),
                 "cost_price": data.get("unit_cost", 0),
                 "selling_price": data.get("unit_price", 0),
+            "storage": data.get("storage"),
                 "payment_status": (data.get("payment_status") or "").upper() or None,
                 "item_expense_amount": data.get("item_expense_amount", 0),
                 "item_expense_description": data.get("item_expense_description"),

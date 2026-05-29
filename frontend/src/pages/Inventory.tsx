@@ -34,6 +34,7 @@ interface StockItem {
   supplier: string
   supplier_phone?: string
   supplier_contact?: string
+  storage?: string
   payment_status?: string
   product_status?: string
   sold_out?: boolean
@@ -55,6 +56,7 @@ interface FormValues {
   supplier?: string
   supplier_phone?: string
   supplier_contact?: string
+  storage?: string
   location?: string
   product_status?: string
   condition?: string
@@ -287,6 +289,7 @@ export default function Inventory() {
         supplier: values.supplier?.trim() || undefined,
         supplier_phone: values.supplier_phone?.trim() ? normalizeNigeriaPhone(values.supplier_phone.trim()) : undefined,
         supplier_contact: values.supplier_contact?.trim() || undefined,
+        storage: values.storage?.trim() || undefined,
         location: values.location?.trim() || undefined,
         payment_status: values.product_status?.trim() || undefined,
         condition: values.condition || undefined,
@@ -577,6 +580,7 @@ export default function Inventory() {
     { key: 'item_name',    header: 'Item' },
     { key: 'sku',          header: 'SKU' },
     { key: 'category',     header: 'Category' },
+    { key: 'storage',      header: 'Storage' },
     { key: 'quantity',     header: 'Qty',
       render: (r: StockItem) => (
         <span className={Number(r.quantity) <= Number(r.reorder_level) ? 'text-red-600 font-semibold' : ''}>
@@ -907,6 +911,10 @@ export default function Inventory() {
             <div className="space-y-2">
               <p className="text-xs font-semibold uppercase tracking-wide text-gray-500 mt-2">Device Details</p>
               <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="form-label">Storage</label>
+                  <input type="text" className="form-input" placeholder="e.g. 128GB" {...register('storage')} />
+                </div>
                 <div>
                   <label className="form-label">Condition</label>
                   <select className="form-input" {...register('condition')}>
