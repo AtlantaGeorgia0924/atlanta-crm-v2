@@ -12,19 +12,19 @@ COMMENT ON COLUMN inventory_items.supplier_contact IS 'Supplier contact person (
 
 -- Backfill supplier details from legacy description markers when present.
 UPDATE inventory_items
-SET supplier = NULLIF(TRIM((REGEXP_MATCHES(description, '(?i)(?:^|\|)\s*(?:supplier|vendor|seller)\s*:\s*([^|]+)'))[1]), '')
+SET supplier = NULLIF(TRIM(SUBSTRING(description FROM '(?i)(?:^|\|)\s*(?:supplier|vendor|seller)\s*:\s*([^|]+)')), '')
 WHERE (supplier IS NULL OR TRIM(supplier) = '')
   AND description IS NOT NULL
   AND description ~* '(?:supplier|vendor|seller)\s*:';
 
 UPDATE inventory_items
-SET supplier_phone = NULLIF(REGEXP_REPLACE(COALESCE((REGEXP_MATCHES(description, '(?i)(?:supplier\s*phone|contact\s*phone|phone)\s*:\s*([^|]+)'))[1], ''), '\\D', '', 'g'), '')
+SET supplier_phone = NULLIF(REGEXP_REPLACE(COALESCE(SUBSTRING(description FROM '(?i)(?:supplier\s*phone|contact\s*phone|phone)\s*:\s*([^|]+)'), ''), '\\D', '', 'g'), '')
 WHERE (supplier_phone IS NULL OR TRIM(supplier_phone) = '')
   AND description IS NOT NULL
   AND description ~* '(?:supplier\s*phone|contact\s*phone|phone)\s*:';
 
 UPDATE inventory_items
-SET supplier_contact = NULLIF(TRIM((REGEXP_MATCHES(description, '(?i)(?:supplier\s*contact|contact\s*person)\s*:\s*([^|]+)'))[1]), '')
+SET supplier_contact = NULLIF(TRIM(SUBSTRING(description FROM '(?i)(?:supplier\s*contact|contact\s*person)\s*:\s*([^|]+)')), '')
 WHERE (supplier_contact IS NULL OR TRIM(supplier_contact) = '')
   AND description IS NOT NULL
   AND description ~* '(?:supplier\s*contact|contact\s*person)\s*:';
