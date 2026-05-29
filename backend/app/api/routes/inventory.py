@@ -264,6 +264,25 @@ class InventoryCheckoutPayload(BaseModel):
     idempotency_key: str
 
 
+class InventorySaleHistoryRow(BaseModel):
+    sale_item_id: str
+    sale_id: Optional[str] = None
+    service_job_id: Optional[str] = None
+    quantity: float = 0
+    unit_price: float = 0
+    amount_charged: float = 0
+    paid_amount: float = 0
+    balance: float = 0
+    payment_status: Optional[str] = None
+    client_name: Optional[str] = None
+    client_phone: Optional[str] = None
+    sold_at: Optional[str] = None
+    sold_by: Optional[str] = None
+    assigned_staff_name: Optional[str] = None
+    created_by_name: Optional[str] = None
+    is_reversed: bool = False
+
+
 def _normalize_payment_status(value: Optional[str]) -> str:
     normalized = str(value or "").strip().upper()
     if normalized == "PARTIAL":
@@ -616,6 +635,96 @@ def get_item_transactions(
     items = result.data or []
     total = int(result.count or 0)
     total_pages = max(1, (total + page_size - 1) // page_size)
+    return {
+        "items": items,
+        "page": page,
+        "page_size": page_size,
+        "total": total,
+        "total_pages": total_pages,
+    }
+
+
+@router.get("/{item_id}/sales-history")
+def get_item_sales_history(
+    item_id: str,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=200),
+    _user=Depends(get_current_user),
+):
+    sb = get_supabase()
+    offset = (page - 1) * page_size
+
+    result = (
+        sb.table("inventory_sale_items")
+        .select(
+            "id,sale_id,service_job_id,quantity,unit_price,amount_charged,sold_at,sold_by,is_reversed",
+            count="exact",
+        )
+        .eq("source_inventory_item_id", item_id)
+        .order("sold_at", desc=True)
+        .range(offset, offset + page_size - 1)
+        .execute()
+    )
+
+    sale_items = result.data or []
+    total = int(result.count or 0)
+    total_pages = max(1, (total + page_size - 1) // page_size)
+
+    sale_ids = [str(row.get("sale_id")) for row in sale_items if row.get("sale_id")]
+    service_job_ids = [str(row.get("service_job_id")) for row in sale_items if row.get("service_job_id")]
+
+    sales_map: dict[str, dict] = {}
+    if sale_ids:
+        sale_rows = (
+            sb.table("inventory_sales")
+            .select("id,client_name,client_phone,paid_amount,balance,payment_status,sold_by,sold_at")
+            .in_("id", sale_ids)
+            .execute()
+            .data
+            or []
+        )
+        sales_map = {str(row.get("id")): row for row in sale_rows if row.get("id")}
+
+    service_map: dict[str, dict] = {}
+    if service_job_ids:
+        service_rows = (
+            sb.table("service_jobs")
+            .select("id,assigned_staff_name,created_by_name")
+            .in_("id", service_job_ids)
+            .execute()
+            .data
+            or []
+        )
+        service_map = {str(row.get("id")): row for row in service_rows if row.get("id")}
+
+    items: list[dict] = []
+    for row in sale_items:
+        sale_id = str(row.get("sale_id") or "")
+        service_job_id = str(row.get("service_job_id") or "")
+        sale_header = sales_map.get(sale_id, {})
+        service_meta = service_map.get(service_job_id, {})
+
+        items.append(
+            {
+                "sale_item_id": str(row.get("id") or ""),
+                "sale_id": sale_id or None,
+                "service_job_id": service_job_id or None,
+                "quantity": _as_float(row.get("quantity")),
+                "unit_price": _as_float(row.get("unit_price")),
+                "amount_charged": _as_float(row.get("amount_charged")),
+                "paid_amount": _as_float(sale_header.get("paid_amount")),
+                "balance": _as_float(sale_header.get("balance")),
+                "payment_status": sale_header.get("payment_status"),
+                "client_name": sale_header.get("client_name"),
+                "client_phone": sale_header.get("client_phone"),
+                "sold_at": row.get("sold_at") or sale_header.get("sold_at"),
+                "sold_by": row.get("sold_by") or sale_header.get("sold_by"),
+                "assigned_staff_name": service_meta.get("assigned_staff_name"),
+                "created_by_name": service_meta.get("created_by_name"),
+                "is_reversed": bool(row.get("is_reversed")),
+            }
+        )
+
     return {
         "items": items,
         "page": page,

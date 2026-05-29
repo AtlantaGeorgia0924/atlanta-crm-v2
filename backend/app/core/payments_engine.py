@@ -1,16 +1,13 @@
 from __future__ import annotations
 
-import secrets
-import string
 import time
+import uuid
 from datetime import date, datetime
 from typing import Optional
 
 from fastapi import HTTPException
 
 from app.core.financials import to_number
-
-_REF_CHARS = string.ascii_uppercase + string.digits
 
 
 def _normalize_date(value: Optional[str]) -> str:
@@ -27,15 +24,21 @@ def _normalize_status(value: Optional[str]) -> str:
     return normalized
 
 
-def _random_suffix(length: int = 4) -> str:
-    return "".join(secrets.choice(_REF_CHARS) for _ in range(length))
+def _reference_timestamp() -> str:
+    return datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+
+
+def _reference_suffix(length: int = 8) -> str:
+    return uuid.uuid4().hex[:length].upper()
 
 
 def generate_payment_reference(sb=None, *, prefix: str = "ATL-PAY") -> str:
-    """Generate a readable unique payment reference like ATL-PAY-YYYYMMDD-8F3K."""
-    stamp = datetime.utcnow().strftime("%Y%m%d")
-    for _ in range(8):
-        candidate = f"{prefix}-{stamp}-{_random_suffix(4)}"
+    """Generate a readable globally unique payment reference.
+
+    Format: PREFIX-YYYYMMDD-HHMMSS-XXXXXXXX
+    """
+    for _ in range(12):
+        candidate = f"{prefix}-{_reference_timestamp()}-{_reference_suffix()}"
         if sb is None:
             return candidate
         existing = (
@@ -49,7 +52,12 @@ def generate_payment_reference(sb=None, *, prefix: str = "ATL-PAY") -> str:
         )
         if not existing:
             return candidate
-    return f"{prefix}-{stamp}-{_random_suffix(6)}"
+    return f"{prefix}-{_reference_timestamp()}-{uuid.uuid4().hex.upper()}"
+
+
+def _is_reference_collision_error(message: str) -> bool:
+    lowered = str(message or "").lower()
+    return "payments_reference_no_key" in lowered or "duplicate key value violates unique constraint" in lowered
 
 
 def _is_retryable_db_error(message: str) -> bool:
@@ -95,35 +103,41 @@ def apply_invoice_payment(
     if amount <= 0:
         raise HTTPException(422, "Payment amount must be greater than zero")
 
-    resolved_reference = str(reference_no or "").strip() or None
+    resolved_reference = str(reference_no or "").strip() or generate_payment_reference(sb)
     resolved_date = _normalize_date(payment_date)
     resolved_note = str(payment_note or "").strip() or None
     resolved_method = str(payment_method or "cash").strip() or "cash"
     resolved_idempotency = str(idempotency_key or "").strip() or None
 
-    try:
-        rpc_rows = _rpc_with_retry(
-            sb,
-            "apply_service_payment_tx",
-            {
-                "p_service_job_id": service_job_id,
-                "p_payment_amount": amount,
-                "p_payment_method": resolved_method,
-                "p_payment_note": resolved_note,
-                "p_reference_no": resolved_reference,
-                "p_payment_date": resolved_date,
-                "p_applied_by": applied_by,
-                "p_applied_by_name": applied_by_name,
-                "p_idempotency_key": resolved_idempotency,
-            },
-        )
-    except Exception as exc:
-        message = str(exc)
-        if "exceeds outstanding balance" in message.lower():
-            raise HTTPException(400, message)
-        if "must be greater than zero" in message.lower():
-            raise HTTPException(422, message)
-        raise HTTPException(500, f"Payment apply failed: {message}")
+    rpc_rows = []
+    for attempt in range(1, 4):
+        try:
+            rpc_rows = _rpc_with_retry(
+                sb,
+                "apply_service_payment_tx",
+                {
+                    "p_service_job_id": service_job_id,
+                    "p_payment_amount": amount,
+                    "p_payment_method": resolved_method,
+                    "p_payment_note": resolved_note,
+                    "p_reference_no": resolved_reference,
+                    "p_payment_date": resolved_date,
+                    "p_applied_by": applied_by,
+                    "p_applied_by_name": applied_by_name,
+                    "p_idempotency_key": resolved_idempotency,
+                },
+            )
+            break
+        except Exception as exc:
+            message = str(exc)
+            if "exceeds outstanding balance" in message.lower():
+                raise HTTPException(400, message)
+            if "must be greater than zero" in message.lower():
+                raise HTTPException(422, message)
+            if attempt < 3 and _is_reference_collision_error(message):
+                resolved_reference = generate_payment_reference(sb)
+                continue
+            raise HTTPException(500, f"Payment apply failed: {message}")
 
     if not rpc_rows:
         raise HTTPException(500, "Payment apply failed")

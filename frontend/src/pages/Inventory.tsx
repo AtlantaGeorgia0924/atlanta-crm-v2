@@ -7,7 +7,7 @@ import Modal from '@/components/Modal'
 import LoadingSpinner from '@/components/LoadingSpinner'
 import { formatCurrency } from '@/lib/utils'
 import { buildIdempotencyKey } from '@/lib/idempotency'
-import { Plus, Pencil, Trash2, ShoppingCart, History, RotateCcw, X } from 'lucide-react'
+import { Plus, Pencil, Trash2, ShoppingCart, History, RotateCcw, X, DollarSign } from 'lucide-react'
 import toast from 'react-hot-toast'
 
 const CONDITION_OPTIONS = ['Brand New', 'Open Box', 'Used - Clean', 'Used - Average', 'Used - Faulty', 'For Parts']
@@ -102,6 +102,35 @@ interface CheckoutFormValues {
   assigned_staff_name?: string
 }
 
+interface SellFormValues {
+  quantity: number
+  selling_price: number
+  client_name: string
+  client_phone?: string
+  payment_status: string
+  paid_amount: number
+  notes?: string
+}
+
+interface InventorySaleHistoryRow {
+  sale_item_id: string
+  sale_id?: string
+  service_job_id?: string
+  quantity: number
+  unit_price: number
+  amount_charged: number
+  paid_amount: number
+  balance: number
+  payment_status?: string
+  client_name?: string
+  client_phone?: string
+  sold_at?: string
+  sold_by?: string
+  assigned_staff_name?: string
+  created_by_name?: string
+  is_reversed?: boolean
+}
+
 const CART_STORAGE_KEY = 'inventory-cart'
 
 export default function Inventory() {
@@ -120,6 +149,9 @@ export default function Inventory() {
   const [groupRenameValue, setGroupRenameValue] = useState('')
   const [historyItem, setHistoryItem] = useState<StockItem | null>(null)
   const [historyPage, setHistoryPage] = useState(1)
+  const [sellItem, setSellItem] = useState<StockItem | null>(null)
+  const [salesHistoryItem, setSalesHistoryItem] = useState<StockItem | null>(null)
+  const [salesHistoryPage, setSalesHistoryPage] = useState(1)
   const [supplierQuery, setSupplierQuery] = useState('')
   const [showSupplierDropdown, setShowSupplierDropdown] = useState(false)
   const [showCart, setShowCart] = useState(false)
@@ -165,6 +197,19 @@ export default function Inventory() {
       payment_method: 'cash',
       amount_paid: 0,
       discount: 0,
+    },
+  })
+  const {
+    register: registerSell,
+    handleSubmit: handleSubmitSell,
+    reset: resetSell,
+    watch: watchSell,
+  } = useForm<SellFormValues>({
+    defaultValues: {
+      quantity: 1,
+      selling_price: 0,
+      payment_status: 'UNPAID',
+      paid_amount: 0,
     },
   })
 
@@ -215,6 +260,15 @@ export default function Inventory() {
         .get(`/inventory/${historyItem!.id}/transactions`, { params: { page: historyPage, page_size: 30 } })
         .then((r) => r.data),
     enabled: !!historyItem,
+  })
+
+  const { data: salesHistoryData, isLoading: salesHistoryLoading } = useQuery({
+    queryKey: ['inventory-sales-history', salesHistoryItem?.id, salesHistoryPage],
+    queryFn: () =>
+      api
+        .get(`/inventory/${salesHistoryItem!.id}/sales-history`, { params: { page: salesHistoryPage, page_size: 20 } })
+        .then((r) => r.data),
+    enabled: !!salesHistoryItem,
   })
 
   const saveMutation = useMutation({
@@ -329,6 +383,7 @@ export default function Inventory() {
       toast.success(`Checkout complete: ${res?.data?.items?.length ?? cart.length} item(s) sold`)
       qc.invalidateQueries({ queryKey: ['inventory'] })
       qc.invalidateQueries({ queryKey: ['inventory-transactions'] })
+      qc.invalidateQueries({ queryKey: ['inventory-sales-history'] })
       qc.invalidateQueries({ queryKey: ['billing'] })
       qc.invalidateQueries({ queryKey: ['billing-grouped'] })
       qc.invalidateQueries({ queryKey: ['debtors'] })
@@ -349,6 +404,7 @@ export default function Inventory() {
       toast.success('Sale reversed and stock restored')
       qc.invalidateQueries({ queryKey: ['inventory'] })
       qc.invalidateQueries({ queryKey: ['inventory-transactions'] })
+      qc.invalidateQueries({ queryKey: ['inventory-sales-history'] })
       qc.invalidateQueries({ queryKey: ['billing-grouped'] })
       qc.invalidateQueries({ queryKey: ['debtors'] })
       qc.invalidateQueries({ queryKey: ['dashboard'] })
@@ -369,6 +425,20 @@ export default function Inventory() {
     })
     setSupplierQuery(row.supplier || '')
     setShowForm(true)
+  }
+
+  const openSell = (row: StockItem) => {
+    const defaultPrice = Number(row.unit_price || 0)
+    setSellItem(row)
+    resetSell({
+      quantity: 1,
+      selling_price: defaultPrice,
+      client_name: '',
+      client_phone: '',
+      payment_status: 'UNPAID',
+      paid_amount: 0,
+      notes: '',
+    })
   }
 
   const addToCart = (row: StockItem) => {
@@ -422,6 +492,46 @@ export default function Inventory() {
     setHistoryItem(row)
     setHistoryPage(1)
   }
+
+  const openSalesHistory = (row: StockItem) => {
+    setSalesHistoryItem(row)
+    setSalesHistoryPage(1)
+  }
+
+  const sellQuantity = Number(watchSell('quantity') || 0)
+  const sellUnitPrice = Number(watchSell('selling_price') || 0)
+  const sellAmountCharged = Math.max(sellQuantity * sellUnitPrice, 0)
+  const sellPaidAmount = Math.min(Math.max(Number(watchSell('paid_amount') || 0), 0), sellAmountCharged)
+  const sellBalance = Math.max(sellAmountCharged - sellPaidAmount, 0)
+
+  const sellMutation = useMutation({
+    mutationFn: (values: SellFormValues) => {
+      if (!sellItem) throw new Error('No inventory item selected for sale')
+      return api.post(`/inventory/${sellItem.id}/sell`, {
+        quantity: Number(values.quantity || 0),
+        selling_price: Number(values.selling_price || 0),
+        client_name: values.client_name?.trim(),
+        client_phone: values.client_phone?.trim() ? normalizeNigeriaPhone(values.client_phone.trim()) : undefined,
+        payment_status: values.payment_status,
+        paid_amount: Number(values.paid_amount || 0),
+        notes: values.notes?.trim() || undefined,
+      })
+    },
+    onSuccess: () => {
+      toast.success('Item sold successfully')
+      qc.invalidateQueries({ queryKey: ['inventory'] })
+      qc.invalidateQueries({ queryKey: ['inventory-transactions'] })
+      qc.invalidateQueries({ queryKey: ['inventory-sales-history'] })
+      qc.invalidateQueries({ queryKey: ['billing'] })
+      qc.invalidateQueries({ queryKey: ['billing-grouped'] })
+      qc.invalidateQueries({ queryKey: ['debtors'] })
+      qc.invalidateQueries({ queryKey: ['dashboard'] })
+      qc.invalidateQueries({ queryKey: ['cashflow-page-data'] })
+      setSellItem(null)
+      resetSell()
+    },
+    onError: (e: any) => toast.error(e?.response?.data?.detail ?? 'Sell failed'),
+  })
 
   const handleBulkSubmit = () => {
     try {
@@ -503,12 +613,27 @@ export default function Inventory() {
       render: (r: StockItem) => (
         <div className="flex gap-2">
           <button
+            onClick={() => openSell(r)}
+            disabled={Number(r.quantity) <= 0}
+            className="inline-flex items-center gap-1 text-xs text-gray-600 hover:text-emerald-700 disabled:opacity-40"
+            title="Sell Item"
+          >
+            <DollarSign size={14} /> Sell
+          </button>
+          <button
             onClick={() => addToCart(r)}
             disabled={Number(r.quantity) <= 0}
             className="inline-flex items-center gap-1 text-xs text-gray-600 hover:text-emerald-700 disabled:opacity-40"
             title="Add to Cart"
           >
             <ShoppingCart size={14} /> Add to Cart
+          </button>
+          <button
+            onClick={() => openSalesHistory(r)}
+            className="inline-flex items-center gap-1 text-xs text-gray-600 hover:text-indigo-700"
+            title="Sales History"
+          >
+            <History size={14} /> Sales History
           </button>
           <button onClick={() => openHistory(r)} className="text-gray-400 hover:text-blue-600" title="Transaction History"><History size={14} /></button>
           <button onClick={() => openEdit(r)} className="text-gray-400 hover:text-primary-600"><Pencil size={14} /></button>
@@ -1013,6 +1138,159 @@ export default function Inventory() {
             </div>
           </div>
         </form>
+      </Modal>
+
+      <Modal
+        title={sellItem ? `Sell Item - ${sellItem.item_name}` : 'Sell Item'}
+        open={!!sellItem}
+        onClose={() => {
+          setSellItem(null)
+          resetSell()
+        }}
+        footer={(
+          <div className="flex justify-end gap-2">
+            <button type="button" className="btn-secondary" onClick={() => setSellItem(null)}>Cancel</button>
+            <button type="submit" form="inventory-sell-form" className="btn-primary" disabled={sellMutation.isPending}>
+              {sellMutation.isPending ? 'Processing...' : 'Sell Now'}
+            </button>
+          </div>
+        )}
+      >
+        <form
+          id="inventory-sell-form"
+          className="space-y-4"
+          onSubmit={handleSubmitSell((values) => {
+            if (!sellItem) return
+            if (Number(values.quantity || 0) <= 0) {
+              toast.error('Quantity must be greater than zero')
+              return
+            }
+            if (Number(values.quantity || 0) > Number(sellItem.quantity || 0)) {
+              toast.error(`Cannot oversell. Remaining quantity is ${sellItem.quantity}`)
+              return
+            }
+            if (!String(values.client_name || '').trim()) {
+              toast.error('Buyer/client name is required')
+              return
+            }
+            sellMutation.mutate(values)
+          })}
+        >
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="form-label">Quantity</label>
+              <input type="number" step="0.01" min="0.01" className="form-input" {...registerSell('quantity', { valueAsNumber: true })} />
+              <p className="mt-1 text-xs text-gray-500">Available: {sellItem?.quantity || 0} {sellItem?.unit || 'pcs'}</p>
+            </div>
+            <div>
+              <label className="form-label">Unit Selling Price</label>
+              <input type="number" step="0.01" min="0" className="form-input" {...registerSell('selling_price', { valueAsNumber: true })} />
+            </div>
+            <div>
+              <label className="form-label">Buyer / Client Name</label>
+              <input className="form-input" {...registerSell('client_name')} />
+            </div>
+            <div>
+              <label className="form-label">Buyer Phone</label>
+              <input className="form-input" {...registerSell('client_phone')} />
+            </div>
+            <div>
+              <label className="form-label">Payment Status</label>
+              <select className="form-input" {...registerSell('payment_status')}>
+                <option value="UNPAID">UNPAID</option>
+                <option value="PART PAYMENT">PART PAYMENT</option>
+                <option value="PAID">PAID</option>
+              </select>
+            </div>
+            <div>
+              <label className="form-label">Amount Paid</label>
+              <input type="number" step="0.01" min="0" className="form-input" {...registerSell('paid_amount', { valueAsNumber: true })} />
+            </div>
+            <div className="col-span-2">
+              <label className="form-label">Notes</label>
+              <textarea className="form-input" rows={2} {...registerSell('notes')} />
+            </div>
+          </div>
+
+          <div className="grid grid-cols-3 gap-2 rounded-lg border border-gray-200 bg-gray-50 p-3 text-sm">
+            <div>
+              <p className="text-gray-500">Amount Charged</p>
+              <p className="font-semibold">{formatCurrency(sellAmountCharged, currency)}</p>
+            </div>
+            <div>
+              <p className="text-gray-500">Paid</p>
+              <p className="font-semibold">{formatCurrency(sellPaidAmount, currency)}</p>
+            </div>
+            <div>
+              <p className="text-gray-500">Outstanding</p>
+              <p className="font-semibold text-red-600">{formatCurrency(sellBalance, currency)}</p>
+            </div>
+          </div>
+        </form>
+      </Modal>
+
+      <Modal
+        title={salesHistoryItem ? `Sales History - ${salesHistoryItem.item_name}` : 'Sales History'}
+        open={!!salesHistoryItem}
+        onClose={() => setSalesHistoryItem(null)}
+        size="lg"
+      >
+        {salesHistoryLoading ? <LoadingSpinner /> : (
+          <div className="space-y-3">
+            <div className="overflow-x-auto rounded-xl border" style={{ borderColor: '#d4af37' }}>
+              <table className="min-w-full text-sm">
+                <thead style={{ background: '#000000' }}>
+                  <tr>
+                    <th className="px-4 py-3 text-left font-semibold text-white">Date</th>
+                    <th className="px-4 py-3 text-left font-semibold text-white">Buyer</th>
+                    <th className="px-4 py-3 text-left font-semibold text-white">Qty</th>
+                    <th className="px-4 py-3 text-left font-semibold text-white">Charged</th>
+                    <th className="px-4 py-3 text-left font-semibold text-white">Paid</th>
+                    <th className="px-4 py-3 text-left font-semibold text-white">Balance</th>
+                    <th className="px-4 py-3 text-left font-semibold text-white">Status</th>
+                    <th className="px-4 py-3 text-left font-semibold text-white">Staff</th>
+                  </tr>
+                </thead>
+                <tbody className="bg-white">
+                  {((salesHistoryData?.items ?? []) as InventorySaleHistoryRow[]).map((sale) => (
+                    <tr key={sale.sale_item_id} className="border-t" style={{ borderColor: '#f1e7bf' }}>
+                      <td className="px-4 py-3">{sale.sold_at ? new Date(sale.sold_at).toLocaleString() : '-'}</td>
+                      <td className="px-4 py-3">
+                        <div className="font-medium">{sale.client_name || '-'}</div>
+                        <div className="text-xs text-gray-500">{sale.client_phone || '-'}</div>
+                      </td>
+                      <td className="px-4 py-3">{sale.quantity}</td>
+                      <td className="px-4 py-3">{formatCurrency(Number(sale.amount_charged || 0), currency)}</td>
+                      <td className="px-4 py-3">{formatCurrency(Number(sale.paid_amount || 0), currency)}</td>
+                      <td className="px-4 py-3">{formatCurrency(Number(sale.balance || 0), currency)}</td>
+                      <td className="px-4 py-3">
+                        <span className="badge-partial">{sale.is_reversed ? 'REVERSED' : (sale.payment_status || 'UNPAID')}</span>
+                      </td>
+                      <td className="px-4 py-3 text-xs">{sale.assigned_staff_name || sale.created_by_name || sale.sold_by || '-'}</td>
+                    </tr>
+                  ))}
+                  {(salesHistoryData?.items ?? []).length === 0 && (
+                    <tr>
+                      <td colSpan={8} className="px-4 py-6 text-center text-gray-500">No sales history yet</td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+
+            <div className="flex gap-2 justify-end">
+              <button disabled={salesHistoryPage === 1} onClick={() => setSalesHistoryPage((p) => p - 1)} className="btn-secondary">Prev</button>
+              <span className="text-sm text-gray-500 self-center">Page {salesHistoryPage} of {salesHistoryData?.total_pages ?? 1}</span>
+              <button
+                disabled={salesHistoryPage >= (salesHistoryData?.total_pages ?? 1)}
+                onClick={() => setSalesHistoryPage((p) => p + 1)}
+                className="btn-secondary"
+              >
+                Next
+              </button>
+            </div>
+          </div>
+        )}
       </Modal>
 
       <Modal

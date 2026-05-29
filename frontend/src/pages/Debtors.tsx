@@ -418,7 +418,12 @@ export default function Debtors() {
                   const isExpanded = !!expandedRow?.debtor_key && expandedRow.debtor_key === r.debtor_key
                   return (
                     <>
-                      <tr key={r.debtor_key || `${r.client_name}-${r.phone_number || ''}`} className="group transition-colors hover:bg-[#fff9e7]" style={{ borderTop: '1px solid #f1e7bf' }}>
+                      <tr
+                        key={r.debtor_key || `${r.client_name}-${r.phone_number || ''}`}
+                        className="group cursor-pointer transition-colors hover:bg-[#fff9e7]"
+                        style={{ borderTop: '1px solid #f1e7bf' }}
+                        onClick={() => toggleExpand(r)}
+                      >
                         <td className="px-4 py-3 whitespace-nowrap font-medium">{r.client_name}</td>
                         <td className="px-4 py-3 whitespace-nowrap">{r.phone_number || '-'}</td>
                         <td className="px-4 py-3 whitespace-nowrap font-semibold text-red-600">{formatCurrency(Number(r.total_outstanding || 0), currency)}</td>
@@ -429,8 +434,25 @@ export default function Debtors() {
                         <td className="px-4 py-3 whitespace-nowrap">{Number(r.whatsapp_sent_count || 0)}</td>
                         <td className="px-4 py-3 whitespace-nowrap">
                           <div className="flex gap-1">
-                            <button type="button" onClick={() => toggleExpand(r)} className="btn-secondary py-1 px-2 text-xs">View Services</button>
-                            <button type="button" title="Apply Payment" onClick={() => openApplyPaymentModal(r)} className="btn-primary py-1 px-2 text-xs">
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                toggleExpand(r)
+                              }}
+                              className="btn-secondary py-1 px-2 text-xs"
+                            >
+                              View Services
+                            </button>
+                            <button
+                              type="button"
+                              title="Apply Payment"
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                openApplyPaymentModal(r)
+                              }}
+                              className="btn-primary py-1 px-2 text-xs"
+                            >
                               <DollarSign size={13} />
                             </button>
                           </div>

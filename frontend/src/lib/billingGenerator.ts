@@ -89,7 +89,7 @@ export function generateBillingText(
   items: BillingItem[],
   totalOutstanding: number,
   paymentDetails: PaymentDetails,
-  currency: string = 'NGN'
+  _currency: string = 'NGN'
 ): string {
   const now = new Date()
   const dateGenerated = formatDateVerbose(now.toISOString().slice(0, 10))
@@ -104,7 +104,7 @@ export function generateBillingText(
   // Header
   text += clientName.toUpperCase() + '\n'
   text += `Generated: ${dateGenerated} at ${timeGenerated}\n`
-  text += `*Total Outstanding: ${currency} ${formatCurrencyNoSymbol(totalOutstanding)}*\n\n`
+  text += `*Total Outstanding: ₦${formatCurrencyNoSymbol(totalOutstanding)}*\n\n`
   
   // Breakdown
   text += 'Breakdown (' + items.length + ' item(s)):\n\n'
@@ -113,7 +113,7 @@ export function generateBillingText(
   items.forEach((item, index) => {
     text += (index + 1) + '. ' + applyBoldItalic(item.service_name.toUpperCase()) + '\n'
     text += `   Date: ${formatDateVerbose(item.service_date)}\n`
-    text += `   Balance: ${currency} ${formatCurrencyNoSymbol(item.outstanding)}\n`
+    text += `   Balance: ₦${formatCurrencyNoSymbol(item.outstanding)}\n`
     text += `   Status: ${item.payment_status}\n\n`
   })
   
