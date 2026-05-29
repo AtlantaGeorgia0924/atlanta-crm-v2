@@ -13,7 +13,7 @@ from app.core.financials import (
     to_number,
 )
 from app.core.debtors import compute_debtors_from_supabase
-from app.core.metrics_refresh import recompute_and_persist_metrics
+from app.core.metrics_refresh import refresh_financial_state
 from app.core.rbac import user_is_admin
 from app.core.financial_events import emit_financial_event
 from app.core.payments_engine import apply_invoice_payment
@@ -1226,7 +1226,7 @@ def apply_debtor_payment(client_name: str, payload: DebtorPaymentApplyPayload, _
             "payment_note": payload.notes,
         },
     )
-    recompute_and_persist_metrics(sb, source="supabase_after_debtor_payment")
+    refresh_financial_state(sb, source="supabase_after_debtor_payment")
 
     return {
         "message": "Payment applied",
@@ -1452,7 +1452,7 @@ def create_billing(payload: BillingCreate, _user=Depends(get_current_user)):
             "payment_status": created.get("payment_status"),
         },
     )
-    recompute_and_persist_metrics(sb, source="supabase_after_billing_create")
+    refresh_financial_state(sb, source="supabase_after_billing_create")
     return _serialize_billing_row(created, is_admin=user_is_admin(_user))
 
 
@@ -1602,7 +1602,7 @@ def update_billing(billing_id: str, payload: BillingUpdate, _user=Depends(get_cu
             "new_status": after_status,
         },
     )
-    recompute_and_persist_metrics(sb, source="supabase_after_billing_update")
+    refresh_financial_state(sb, source="supabase_after_billing_update")
     return _serialize_billing_row(updated, is_admin=user_is_admin(_user))
 
 
@@ -1611,14 +1611,8 @@ def delete_billing(billing_id: str, _user=Depends(get_current_user)):
     sb = get_supabase()
     existing = sb.table("service_jobs").select("*").eq("id", billing_id).limit(1).execute().data or []
     before_value = existing[0] if existing else None
-    emit_financial_event(
-        sb,
-        "invoice_deleted",
-        performed_by=str(_user.id),
-        record_id=billing_id,
-        amount=0.0,
-        detail={"reason": "billing_delete"},
-    )
+    sb.table("service_jobs").delete().eq("id", billing_id).execute()
+
     _log_billing_audit(
         sb,
         action="invoice_deleted",
@@ -1628,8 +1622,17 @@ def delete_billing(billing_id: str, _user=Depends(get_current_user)):
         after_value={"deleted": True},
         detail={"reason": "billing_delete"},
     )
-    sb.table("service_jobs").delete().eq("id", billing_id).execute()
-    recompute_and_persist_metrics(sb, source="supabase_after_billing_delete")
+
+    emit_financial_event(
+        sb,
+        "invoice_deleted",
+        performed_by=str(_user.id),
+        record_id=billing_id,
+        amount=0.0,
+        detail={"reason": "billing_delete"},
+    )
+
+    refresh_financial_state(sb, source="supabase_after_billing_delete")
 
 
 @router.get("/debtors/{client_name}/items")

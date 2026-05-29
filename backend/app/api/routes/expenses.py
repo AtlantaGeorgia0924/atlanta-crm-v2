@@ -3,6 +3,7 @@ from pydantic import BaseModel
 from typing import Optional
 from app.db.supabase_client import get_supabase
 from app.core.auth import get_current_user
+from app.core.metrics_refresh import refresh_financial_state
 from app.core.rbac import require_admin
 
 router = APIRouter(dependencies=[Depends(require_admin)])
@@ -57,6 +58,7 @@ def list_expenses(
 def create_expense(payload: ExpenseCreate, _user=Depends(get_current_user)):
     sb = get_supabase()
     result = sb.table("manual_expenses").insert(payload.model_dump(exclude_none=True)).execute()
+    refresh_financial_state(sb, source="supabase_after_manual_expense_create")
     return result.data[0]
 
 
@@ -67,6 +69,7 @@ def update_expense(expense_id: str, payload: ExpenseUpdate, _user=Depends(get_cu
     if not data:
         raise HTTPException(400, "No fields to update")
     result = sb.table("manual_expenses").update(data).eq("id", expense_id).execute()
+    refresh_financial_state(sb, source="supabase_after_manual_expense_update")
     return result.data[0]
 
 
@@ -74,3 +77,4 @@ def update_expense(expense_id: str, payload: ExpenseUpdate, _user=Depends(get_cu
 def delete_expense(expense_id: str, _user=Depends(get_current_user)):
     sb = get_supabase()
     sb.table("manual_expenses").delete().eq("id", expense_id).execute()
+    refresh_financial_state(sb, source="supabase_after_manual_expense_delete")

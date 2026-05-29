@@ -3,7 +3,7 @@ from pydantic import BaseModel
 from typing import Optional
 from app.db.supabase_client import get_supabase
 from app.core.auth import get_current_user
-from app.core.metrics_refresh import recompute_and_persist_metrics
+from app.core.metrics_refresh import refresh_financial_state
 from app.core.rbac import require_admin
 
 router = APIRouter(dependencies=[Depends(require_admin)])
@@ -79,7 +79,7 @@ def create_allowance(payload: AllowanceCreate, _user=Depends(get_current_user)):
             "notes": notes,
         }
     ).execute()
-    recompute_and_persist_metrics(sb, source="supabase_after_allowance_create")
+    refresh_financial_state(sb, source="supabase_after_allowance_create")
     return result.data[0]
 
 
@@ -100,7 +100,7 @@ def update_allowance(allowance_id: str, payload: AllowanceUpdate, _user=Depends(
         allowance_type = data.get("allowance_type", "other")
         mapped["notes"] = f"type:{allowance_type}\n{data.get('notes') or ''}".strip()
     result = sb.table("allowance_withdrawals").update(mapped).eq("id", allowance_id).execute()
-    recompute_and_persist_metrics(sb, source="supabase_after_allowance_update")
+    refresh_financial_state(sb, source="supabase_after_allowance_update")
     return result.data[0]
 
 
@@ -108,4 +108,4 @@ def update_allowance(allowance_id: str, payload: AllowanceUpdate, _user=Depends(
 def delete_allowance(allowance_id: str, _user=Depends(get_current_user)):
     sb = get_supabase()
     sb.table("allowance_withdrawals").delete().eq("id", allowance_id).execute()
-    recompute_and_persist_metrics(sb, source="supabase_after_allowance_delete")
+    refresh_financial_state(sb, source="supabase_after_allowance_delete")

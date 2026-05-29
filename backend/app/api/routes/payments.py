@@ -4,7 +4,7 @@ from pydantic import BaseModel
 from typing import Optional
 from app.db.supabase_client import get_supabase
 from app.core.auth import get_current_user
-from app.core.metrics_refresh import recompute_and_persist_metrics
+from app.core.metrics_refresh import refresh_financial_state
 from app.core.rbac import require_admin
 from app.core.financial_events import emit_financial_event
 from app.core.payments_engine import (
@@ -172,7 +172,7 @@ def apply_payment(payload: PaymentCreate, _user=Depends(get_current_user)):
     if not audit_saved:
         raise HTTPException(500, "Payment applied but audit log write failed")
 
-    recompute_and_persist_metrics(sb, source="supabase_after_payment")
+    refresh_financial_state(sb, source="supabase_after_payment")
 
     return {
         "invoice": engine_result["invoice"],
@@ -232,7 +232,7 @@ def reverse_payment(payload: PaymentReverse, _user=Depends(get_current_user)):
     if not audit_saved:
         raise HTTPException(500, "Payment reversal applied but audit log write failed")
 
-    recompute_and_persist_metrics(sb, source="supabase_after_payment_reversal")
+    refresh_financial_state(sb, source="supabase_after_payment_reversal")
 
     return {
         "invoice": engine_result["invoice"],

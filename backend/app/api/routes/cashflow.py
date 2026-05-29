@@ -27,7 +27,7 @@ from app.db.supabase_client import get_supabase
 from app.core.auth import get_current_user
 from app.core.financials import to_number
 from app.core.dashboard_metrics import app_settings_payload, compute_metrics_from_supabase
-from app.core.metrics_refresh import recompute_and_persist_metrics
+from app.core.metrics_refresh import refresh_financial_state
 from app.core.cache import get_statement_cache, set_statement_cache
 from app.core.financial_events import emit_financial_event
 from app.core.logging_config import record_latency
@@ -217,7 +217,7 @@ def get_cashflow(
 def trigger_refresh(_user=Depends(get_current_user)):
     """Recalculate financial statement from Supabase-only data."""
     sb = get_supabase()
-    metrics = recompute_and_persist_metrics(sb, source="supabase")
+    metrics = refresh_financial_state(sb, source="supabase")
     return {
         "message": "Cash flow statement refreshed from Supabase.",
         "values_calculated": metrics,
@@ -344,6 +344,7 @@ def create_cashflow_expense(payload: CashflowExpenseCreate, _user=Depends(get_cu
         amount=amount,
         detail={"description": payload.description},
     )
+    refresh_financial_state(sb, source="supabase_after_cashflow_expense_create")
     return record
 
 
@@ -372,7 +373,6 @@ def reverse_cashflow_expense(expense_id: str, _user=Depends(get_current_user)):
         or []
     )
 
-    _cache_invalidate(sb)
     record = updated[0] if updated else {"id": expense_id, "is_reversed": True}
     emit_financial_event(
         sb,
@@ -381,6 +381,7 @@ def reverse_cashflow_expense(expense_id: str, _user=Depends(get_current_user)):
         record_id=expense_id,
         amount=to_number(existing.get("amount")),
     )
+    refresh_financial_state(sb, source="supabase_after_cashflow_expense_reverse")
     return record
 
 
@@ -434,7 +435,6 @@ def withdraw_allowance(payload: AllowanceWithdrawRequest, _user=Depends(get_curr
     }
     inserted = sb.table("allowance_withdrawals").insert(row).execute().data or []
 
-    _cache_invalidate(sb)
     record = inserted[0] if inserted else row
     emit_financial_event(
         sb,
@@ -444,4 +444,5 @@ def withdraw_allowance(payload: AllowanceWithdrawRequest, _user=Depends(get_curr
         amount=requested_amount,
         detail={"week_key": week_key},
     )
+    refresh_financial_state(sb, source="supabase_after_allowance_withdrawal")
     return record

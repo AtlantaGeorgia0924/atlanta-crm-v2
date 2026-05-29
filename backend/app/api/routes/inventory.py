@@ -2,15 +2,38 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from typing import Optional
 import json
+import re
 import time
 import uuid
 from datetime import datetime
 from app.db.supabase_client import get_supabase
 from app.core.auth import get_current_user
-from app.core.metrics_refresh import recompute_and_persist_metrics
+from app.core.financial_events import emit_financial_event
+from app.core.metrics_refresh import refresh_financial_state
 
 router = APIRouter()
 INVENTORY_GROUPS_KEY = "inventory_groups"
+_INVENTORY_COLUMNS_CACHE: set[str] | None = None
+
+
+def _inventory_item_columns(sb) -> set[str]:
+    global _INVENTORY_COLUMNS_CACHE
+    if _INVENTORY_COLUMNS_CACHE is not None:
+        return _INVENTORY_COLUMNS_CACHE
+    try:
+        rows = (
+            sb.table("information_schema.columns")
+            .select("column_name")
+            .eq("table_schema", "public")
+            .eq("table_name", "inventory_items")
+            .execute()
+            .data
+            or []
+        )
+        _INVENTORY_COLUMNS_CACHE = {str(r.get("column_name")) for r in rows if r.get("column_name")}
+    except Exception:
+        _INVENTORY_COLUMNS_CACHE = set()
+    return _INVENTORY_COLUMNS_CACHE
 
 
 def _extract_supplier(description: Optional[str]) -> Optional[str]:
@@ -391,7 +414,7 @@ def list_inventory(
 @router.post("", status_code=201)
 def create_item(payload: StockCreate, _user=Depends(get_current_user)):
     sb = get_supabase()
-    data = payload.model_dump(exclude_none=True)
+    data = payload.model_dump(exclude_none=True, exclude_unset=True)
     # Upsert supplier as a client if phone supplied
     raw_supplier_phone = data.get("supplier_phone")
     supplier_name = str(data.get("supplier") or "").strip()
@@ -416,14 +439,31 @@ def create_item(payload: StockCreate, _user=Depends(get_current_user)):
         "item_expense_date": data.get("item_expense_date"),
         "condition": data.get("condition"),
         "lock_status": data.get("lock_status"),
-        "previously_locked": data.get("previously_locked", False),
+        "previously_locked": data.get("previously_locked"),
         "unlock_method": data.get("unlock_method"),
     }
-    mapped = {k: v for k, v in mapped.items() if v is not None or k in ("previously_locked",)}
+    mapped = {k: v for k, v in mapped.items() if v is not None}
+    item_columns = _inventory_item_columns(sb)
+    if item_columns:
+        mapped = {k: v for k, v in mapped.items() if k in item_columns}
     if mapped.get("payment_status") == "PAID":
         mapped["paid_at"] = datetime.utcnow().isoformat()
-    result = sb.table("inventory_items").insert(mapped).execute()
-    recompute_and_persist_metrics(sb, source="supabase_after_inventory_create")
+    insert_payload = dict(mapped)
+    while True:
+        try:
+            result = sb.table("inventory_items").insert(insert_payload).execute()
+            break
+        except Exception as exc:
+            msg = str(exc)
+            missing = re.search(r"Could not find the '([^']+)' column", msg)
+            if not missing:
+                raise
+            missing_col = missing.group(1)
+            if missing_col not in insert_payload:
+                raise
+            insert_payload.pop(missing_col, None)
+
+    refresh_financial_state(sb, source="supabase_after_inventory_create")
     return result.data[0]
 
 
@@ -434,13 +474,13 @@ def create_items_bulk(payload: StockBulkCreate, _user=Depends(get_current_user))
         raise HTTPException(400, "At least one product is required")
 
     rows = []
+    item_columns = _inventory_item_columns(sb)
     for item in payload.items:
-        data = item.model_dump(exclude_none=True)
+        data = item.model_dump(exclude_none=True, exclude_unset=True)
         name = str(data.get("item_name") or "").strip()
         if not name:
             continue
-        rows.append(
-            {
+        row = {
                 "id": str(uuid.uuid4()),
                 "item_name": name,
                 "sku": data.get("sku"),
@@ -455,14 +495,17 @@ def create_items_bulk(payload: StockBulkCreate, _user=Depends(get_current_user))
                 "item_expense_description": data.get("item_expense_description"),
                 "item_expense_date": data.get("item_expense_date"),
                 "paid_at": datetime.utcnow().isoformat() if (data.get("payment_status") or "").upper() == "PAID" else None,
-            }
-        )
+        }
+        row = {k: v for k, v in row.items() if v is not None}
+        if item_columns:
+            row = {k: v for k, v in row.items() if k in item_columns}
+        rows.append(row)
 
     if not rows:
         raise HTTPException(422, "No valid product rows provided")
 
     result = sb.table("inventory_items").insert(rows).execute()
-    recompute_and_persist_metrics(sb, source="supabase_after_inventory_bulk_create")
+    refresh_financial_state(sb, source="supabase_after_inventory_bulk_create")
     return {
         "inserted": len(result.data or []),
         "items": result.data or [],
@@ -655,7 +698,20 @@ def checkout_inventory_cart(payload: InventoryCheckoutPayload, _user=Depends(get
         or []
     )
 
-    recompute_and_persist_metrics(sb, source="supabase_after_inventory_cart_checkout")
+    emit_financial_event(
+        sb,
+        "inventory_sale",
+        performed_by=str(_user.id),
+        record_id=str(sale_id or ""),
+        amount=_as_float(row.get("paid_amount")),
+        detail={
+            "transaction_reference": row.get("transaction_reference"),
+            "total_amount": _as_float(row.get("total_amount")),
+            "balance": _as_float(row.get("balance")),
+            "item_count": int(row.get("item_count") or 0),
+        },
+    )
+    refresh_financial_state(sb, source="supabase_after_inventory_cart_checkout")
     return {
         "sale_id": sale_id,
         "transaction_reference": row.get("transaction_reference"),
@@ -721,15 +777,18 @@ def sell_product(item_id: str, payload: SellProductPayload, _user=Depends(get_cu
         actor_label = "Admin" if actor_role == "admin" else "Staff"
         actor_name = (str(getattr(_user, "full_name", "") or "").strip() or str(getattr(_user, "email", "") or "").strip())
         display_name = f"{actor_name} ({actor_label})" if actor_name else actor_label
-        columns = (
-            sb.table("information_schema.columns")
-            .select("column_name")
-            .eq("table_schema", "public")
-            .eq("table_name", "service_jobs")
-            .execute()
-            .data
-            or []
-        )
+        try:
+            columns = (
+                sb.table("information_schema.columns")
+                .select("column_name")
+                .eq("table_schema", "public")
+                .eq("table_name", "service_jobs")
+                .execute()
+                .data
+                or []
+            )
+        except Exception:
+            columns = []
         column_names = {str(c.get("column_name")) for c in columns if c.get("column_name")}
         ownership_payload = {
             "created_by": str(_user.id),
@@ -745,7 +804,19 @@ def sell_product(item_id: str, payload: SellProductPayload, _user=Depends(get_cu
         if ownership_payload:
             sb.table("service_jobs").update(ownership_payload).eq("id", service_job_id).execute()
 
-    recompute_and_persist_metrics(sb, source="supabase_after_inventory_sell")
+    emit_financial_event(
+        sb,
+        "inventory_sale",
+        performed_by=str(_user.id),
+        record_id=str(sold.get("sale_item_id") or sold.get("sale_id") or ""),
+        amount=_as_float(sold.get("amount_charged")),
+        detail={
+            "service_job_id": sold.get("service_job_id"),
+            "remaining_quantity": _as_float(sold.get("remaining_quantity")),
+            "balance": _as_float(sold.get("balance")),
+        },
+    )
+    refresh_financial_state(sb, source="supabase_after_inventory_sell")
     return {
         "sale_id": sold.get("sale_id"),
         "sale_item_id": sold.get("sale_item_id"),
@@ -785,7 +856,19 @@ def reverse_sold_product(payload: ReverseSalePayload, _user=Depends(get_current_
         raise HTTPException(500, "Reverse operation failed")
 
     restored = rpc[0]
-    recompute_and_persist_metrics(sb, source="supabase_after_inventory_sale_reversal")
+    emit_financial_event(
+        sb,
+        "inventory_sale_reversed",
+        performed_by=str(_user.id),
+        record_id=str(restored.get("sale_item_id") or ""),
+        amount=0.0,
+        detail={
+            "inventory_item_id": restored.get("inventory_item_id"),
+            "service_job_id": restored.get("service_job_id"),
+            "restored_quantity": _as_float(restored.get("restored_quantity")),
+        },
+    )
+    refresh_financial_state(sb, source="supabase_after_inventory_sale_reversal")
     return {
         "sale_item_id": restored.get("sale_item_id"),
         "inventory_item_id": restored.get("inventory_item_id"),
@@ -899,7 +982,19 @@ def update_item(item_id: str, payload: StockUpdate, _user=Depends(get_current_us
         detail={"fields_updated": sorted(list(data.keys()))},
     )
 
-    recompute_and_persist_metrics(sb, source="supabase_after_inventory_update")
+    if before_qty != after_qty:
+        emit_financial_event(
+            sb,
+            "inventory_quantity_corrected",
+            performed_by=str(_user.id),
+            record_id=item_id,
+            amount=0.0,
+            detail={
+                "quantity_before": before_qty,
+                "quantity_after": after_qty,
+            },
+        )
+    refresh_financial_state(sb, source="supabase_after_inventory_update")
     return updated
 
 
@@ -907,4 +1002,11 @@ def update_item(item_id: str, payload: StockUpdate, _user=Depends(get_current_us
 def delete_item(item_id: str, _user=Depends(get_current_user)):
     sb = get_supabase()
     sb.table("inventory_items").delete().eq("id", item_id).execute()
-    recompute_and_persist_metrics(sb, source="supabase_after_inventory_delete")
+    emit_financial_event(
+        sb,
+        "inventory_item_deleted",
+        performed_by=str(_user.id),
+        record_id=item_id,
+        amount=0.0,
+    )
+    refresh_financial_state(sb, source="supabase_after_inventory_delete")

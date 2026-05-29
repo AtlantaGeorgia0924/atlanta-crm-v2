@@ -12,10 +12,9 @@ service payment, sync import, manual adjustment) calls:
     )
 
 This single call:
-  1. Invalidates all financial caches (Redis + local).
-  2. Writes an audit log row to cashflow_audit_log.
-  3. Emits a structured JSON log line for observability.
-  4. Enqueues a background metrics-refresh job (if RQ is available).
+    1. Writes an audit log row to cashflow_audit_log.
+    2. Emits a structured JSON log line for observability.
+    3. Enqueues a background metrics-refresh job (if RQ is available).
 
 Adding new listeners later only requires editing _LISTENERS below –
 no mutation endpoint needs to change.
@@ -145,10 +144,7 @@ def emit_financial_event(
     """
     t0 = time.monotonic()
 
-    # 1. Invalidate all financial caches
-    invalidate_financial_caches(reason=event_type, triggered_by=performed_by)
-
-    # 2. Write audit log
+    # 1. Write audit log
     _write_audit_log(
         sb,
         action=event_type,
@@ -158,7 +154,7 @@ def emit_financial_event(
         detail=detail,
     )
 
-    # 3. Structured event log
+    # 2. Structured event log
     log_event(
         "financial_event",
         event_type=event_type,
@@ -168,10 +164,10 @@ def emit_financial_event(
         elapsed_ms=round((time.monotonic() - t0) * 1000, 2),
     )
 
-    # 4. Enqueue background metrics refresh
+    # 3. Enqueue background metrics refresh
     _enqueue_metrics_refresh(triggered_by=performed_by)
 
-    # 5. Custom listeners
+    # 4. Custom listeners
     for _priority, fn in _LISTENERS:
         try:
             fn(event_type=event_type, record_id=record_id, performed_by=performed_by, amount=amount, detail=detail)
