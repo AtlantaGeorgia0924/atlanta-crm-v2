@@ -837,8 +837,6 @@ def list_billing_grouped(
 @router.get("/debtors")
 def list_debtors(search: Optional[str] = Query(None), _user=Depends(get_current_user)):
     """Grouped debtor balances calculated dynamically from live service rows."""
-    if not user_is_admin(_user):
-        raise HTTPException(status_code=403, detail="Forbidden")
     sb = get_supabase()
     debtors = compute_debtors_from_supabase(sb)
     grouped_rows = debtors["grouped_clients"]
@@ -996,8 +994,6 @@ def _all_client_services(sb, client_name: str, phone_number: Optional[str] = Non
 
 @router.get("/debtors/{client_name}/ledger")
 def debtor_ledger(client_name: str, phone_number: Optional[str] = Query(None), _user=Depends(get_current_user)):
-    if not user_is_admin(_user):
-        raise HTTPException(status_code=403, detail="Forbidden")
     sb = get_supabase()
     invoices = _open_client_invoices(sb, client_name, phone_number)
     invoice_ids = [str(i.get("id")) for i in invoices if i.get("id")]
@@ -1065,8 +1061,6 @@ def list_debtor_services(
     page_size: int = Query(50, ge=1, le=300),
     _user=Depends(get_current_user),
 ):
-    if not user_is_admin(_user):
-        raise HTTPException(status_code=403, detail="Forbidden")
     services = _all_client_services(get_supabase(), client_name, phone_number)
 
     if payment_status:
@@ -1710,8 +1704,6 @@ def delete_billing(billing_id: str, _user=Depends(get_current_user)):
 @router.get("/debtors/{client_name}/items")
 def get_debtor_items(client_name: str, phone_number: Optional[str] = Query(None), _user=Depends(get_current_user)):
     """Get all outstanding items for a specific client (used in Debtor Details page)."""
-    if not user_is_admin(_user):
-        raise HTTPException(status_code=403, detail="Forbidden")
     sb = get_supabase()
     client_items = _open_client_invoices(sb, client_name, phone_number)
     total_outstanding = sum(to_number(item.get("balance")) for item in client_items)

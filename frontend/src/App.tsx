@@ -45,8 +45,8 @@ export default function App() {
           <Route path="clients"     element={<Clients />} />
           <Route path="billing"     element={<Billing />} />
           <Route path="inventory"   element={<Inventory />} />
-          <Route path="debtors"     element={<RequireAdmin><Debtors /></RequireAdmin>} />
-          <Route path="debtors/:clientName" element={<RequireAdmin><DebtorDetails /></RequireAdmin>} />
+          <Route path="debtors"     element={<Debtors />} />
+          <Route path="debtors/:clientName" element={<DebtorDetails />} />
           <Route path="expenses"    element={<RequireAdmin><Expenses /></RequireAdmin>} />
           <Route path="allowances"  element={<RequireAdmin><Allowances /></RequireAdmin>} />
           <Route path="cashflow"    element={<RequireAdmin><CashFlow /></RequireAdmin>} />

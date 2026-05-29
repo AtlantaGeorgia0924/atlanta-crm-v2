@@ -27,6 +27,7 @@ const staffNav = [
   { to: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
   { to: '/billing', label: 'Services', icon: FileText },
   { to: '/inventory', label: 'Inventory', icon: Package },
+  { to: '/debtors', label: 'Debtors', icon: AlertCircle },
   { to: '/clients', label: 'Clients', icon: Users },
 ]
 
