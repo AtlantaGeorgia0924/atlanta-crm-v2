@@ -557,6 +557,7 @@ class BillingCreate(BaseModel):
     source: Optional[str] = "manual"
     phone_number: Optional[str] = None
     client_phone: Optional[str] = None
+    device_model: Optional[str] = None
     imei: Optional[str] = None
     serial_number: Optional[str] = None
     condition: Optional[str] = None
@@ -580,6 +581,7 @@ class BillingUpdate(BaseModel):
     notes: Optional[str] = None
     phone_number: Optional[str] = None
     client_phone: Optional[str] = None
+    device_model: Optional[str] = None
     imei: Optional[str] = None
     serial_number: Optional[str] = None
     condition: Optional[str] = None
@@ -1387,6 +1389,7 @@ def create_billing(payload: BillingCreate, _user=Depends(get_current_user)):
         "phone_number": data.get("phone_number") or data.get("client_phone"),
         "service_name": data.get("service_name"),
         "description": data.get("description"),
+        "device_model": data.get("device_model"),
         "quantity": quantity,
         "amount_charged": total,
         "payment_status": payment_status,
