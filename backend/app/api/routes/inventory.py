@@ -76,8 +76,8 @@ def _extract_supplier_details(description: Optional[str]) -> dict:
         return None
 
     supplier_name = _extract_segment(["supplier", "vendor", "seller"])
-    supplier_contact = _extract_segment(["supplier\s*contact", "contact\s*person"])
-    supplier_phone_raw = _extract_segment(["supplier\s*phone", "contact\s*phone", "phone"])
+    supplier_contact = _extract_segment([r"supplier\s*contact", r"contact\s*person"])
+    supplier_phone_raw = _extract_segment([r"supplier\s*phone", r"contact\s*phone", "phone"])
     supplier_phone = _normalize_phone(supplier_phone_raw) if supplier_phone_raw else None
     if supplier_phone == "":
         supplier_phone = None
