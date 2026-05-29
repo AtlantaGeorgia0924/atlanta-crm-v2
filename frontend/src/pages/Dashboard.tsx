@@ -3,6 +3,7 @@ import { useQuery } from '@tanstack/react-query'
 import api from '@/lib/api'
 import LoadingSpinner from '@/components/LoadingSpinner'
 import { formatCurrency } from '@/lib/utils'
+import { useAuthStore } from '@/store/authStore'
 
 interface Summary {
   clients: number
@@ -107,6 +108,9 @@ function dayKey(ts?: string): string {
 }
 
 export default function Dashboard() {
+  const user = useAuthStore((s) => s.user)
+  const isStaff = user?.role === 'staff'
+
   const { data: summary, isLoading } = useQuery<Summary>({
     queryKey: ['dashboard'],
     queryFn: () => api.get('/dashboard').then((r) => r.data),
@@ -219,6 +223,8 @@ export default function Dashboard() {
 
   if (isLoading || !summary) return <LoadingSpinner />
 
+  const maskedOrValue = (value: string | number, financial: boolean) => (isStaff && financial ? '*****' : value)
+
   return (
     <div className="p-6 space-y-6" style={{ background: '#f7f7f5' }}>
       <div className="rounded-2xl border p-5" style={{ background: '#0f0f0f', borderColor: '#D4AF37' }}>
@@ -227,11 +233,11 @@ export default function Dashboard() {
       </div>
 
       <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4">
-        <KpiCard title="Total Sales" value={formatCurrency(totalSales, 'NGN')} />
-        <KpiCard title="Total Collected" value={formatCurrency(totalCollected, 'NGN')} />
-        <KpiCard title="Outstanding Balance" value={formatCurrency(outstanding, 'NGN')} />
-        <KpiCard title="Inventory Value" value={formatCurrency(Number(safeSummary.available_products || 0) * 1, 'NGN')} />
-        <KpiCard title="Net Profit" value={formatCurrency(netProfit, 'NGN')} />
+        <KpiCard title="Total Sales" value={maskedOrValue(formatCurrency(totalSales, 'NGN'), true)} />
+        <KpiCard title="Total Collected" value={maskedOrValue(formatCurrency(totalCollected, 'NGN'), true)} />
+        <KpiCard title="Outstanding Balance" value={maskedOrValue(formatCurrency(outstanding, 'NGN'), true)} />
+        <KpiCard title="Inventory Value" value={maskedOrValue(formatCurrency(Number(safeSummary.available_products || 0) * 1, 'NGN'), true)} />
+        <KpiCard title="Net Profit" value={maskedOrValue(formatCurrency(netProfit, 'NGN'), true)} />
         <KpiCard title="Debtors Count" value={debtorRows.length} />
       </div>
 
