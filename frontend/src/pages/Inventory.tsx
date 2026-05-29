@@ -71,6 +71,10 @@ interface ClientSuggestion {
   id: string
   name: string
   phone?: string
+  email?: string
+  company?: string
+  address?: string
+  notes?: string
 }
 
 interface GroupRow {
@@ -163,6 +167,8 @@ export default function Inventory() {
   const [showCart, setShowCart] = useState(false)
   const [cartClientQuery, setCartClientQuery] = useState('')
   const [showCartClientDropdown, setShowCartClientDropdown] = useState(false)
+  const [sellClientQuery, setSellClientQuery] = useState('')
+  const [showSellClientDropdown, setShowSellClientDropdown] = useState(false)
   const [cart, setCart] = useState<CartItem[]>(() => {
     try {
       const parsed = JSON.parse(localStorage.getItem(CART_STORAGE_KEY) || '[]')
@@ -210,6 +216,7 @@ export default function Inventory() {
     handleSubmit: handleSubmitSell,
     reset: resetSell,
     watch: watchSell,
+    setValue: setSellValue,
   } = useForm<SellFormValues>({
     defaultValues: {
       quantity: 1,
@@ -256,6 +263,13 @@ export default function Inventory() {
     queryKey: ['cart-client-search', cartClientQuery],
     queryFn: () => api.get('/clients', { params: { search: cartClientQuery, page_size: 8 } }).then((r) => r.data),
     enabled: showCart && cartClientQuery.trim().length >= 2,
+    staleTime: 10_000,
+  })
+
+  const { data: sellClientSuggestions } = useQuery<{ items: ClientSuggestion[] }>({
+    queryKey: ['sell-client-search', sellClientQuery],
+    queryFn: () => api.get('/clients', { params: { search: sellClientQuery, page_size: 8 } }).then((r) => r.data),
+    enabled: !!sellItem && sellClientQuery.trim().length >= 2,
     staleTime: 10_000,
   })
 
@@ -442,6 +456,8 @@ export default function Inventory() {
   const openSell = (row: StockItem) => {
     const defaultPrice = Number(row.unit_price || 0)
     setSellItem(row)
+    setSellClientQuery('')
+    setShowSellClientDropdown(false)
     resetSell({
       quantity: 1,
       selling_price: defaultPrice,
@@ -540,6 +556,8 @@ export default function Inventory() {
       qc.invalidateQueries({ queryKey: ['dashboard'] })
       qc.invalidateQueries({ queryKey: ['cashflow-page-data'] })
       setSellItem(null)
+      setSellClientQuery('')
+      setShowSellClientDropdown(false)
       resetSell()
     },
     onError: (e: any) => toast.error(e?.response?.data?.detail ?? 'Sell failed'),
@@ -580,6 +598,11 @@ export default function Inventory() {
   const switchView = (nextView: InventoryView) => {
     setView(nextView)
     setPage(1)
+  }
+
+  const buildClientContactText = (client: ClientSuggestion): string => {
+    const details = [client.phone, client.email, client.company].filter(Boolean)
+    return details.length ? details.join(' • ') : 'No contact info'
   }
 
   const columns = [
@@ -1124,7 +1147,7 @@ export default function Inventory() {
                       }}
                     >
                       <div className="font-medium">{client.name}</div>
-                      <div className="text-xs text-gray-500">{client.phone || 'No phone'}</div>
+                      <div className="text-xs text-gray-500">{buildClientContactText(client)}</div>
                     </button>
                   ))}
                 </div>
@@ -1231,7 +1254,39 @@ export default function Inventory() {
             </div>
             <div>
               <label className="form-label">Buyer / Client Name</label>
-              <input className="form-input" {...registerSell('client_name')} />
+              <div className="relative">
+                <input
+                  className="form-input"
+                  {...registerSell('client_name')}
+                  value={sellClientQuery}
+                  onChange={(e) => {
+                    setSellClientQuery(e.target.value)
+                    setSellValue('client_name', e.target.value)
+                    setShowSellClientDropdown(true)
+                  }}
+                  onFocus={() => setShowSellClientDropdown(true)}
+                />
+                {showSellClientDropdown && sellClientQuery.trim() && (sellClientSuggestions?.items ?? []).length > 0 && (
+                  <div className="absolute z-20 mt-1 w-full rounded-lg border bg-white shadow-lg" style={{ borderColor: '#d4af37' }}>
+                    {(sellClientSuggestions?.items ?? []).map((client) => (
+                      <button
+                        type="button"
+                        key={client.id}
+                        className="block w-full px-3 py-2 text-left text-sm hover:bg-[#fff9e7]"
+                        onClick={() => {
+                          setSellClientQuery(client.name)
+                          setSellValue('client_name', client.name)
+                          setSellValue('client_phone', client.phone || '')
+                          setShowSellClientDropdown(false)
+                        }}
+                      >
+                        <div className="font-medium">{client.name}</div>
+                        <div className="text-xs text-gray-500">{buildClientContactText(client)}</div>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
             </div>
             <div>
               <label className="form-label">Buyer Phone</label>
