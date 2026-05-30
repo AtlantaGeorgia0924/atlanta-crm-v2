@@ -17,7 +17,6 @@ import { buildIdempotencyKey } from '@/lib/idempotency'
 import LoadingSpinner from '@/components/LoadingSpinner'
 import Modal from '@/components/Modal'
 import { formatCurrency, statusLabel } from '@/lib/utils'
-import { resolveImei } from '@/lib/imei'
 import { useAuthStore } from '@/store/authStore'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -232,6 +231,12 @@ function resolveSerial(row: BillingRow): string {
   return String(value || '').trim() || '—'
 }
 
+function resolveImeiValue(row: BillingRow): string {
+  const anyRow = row as any
+  const value = row.imei || anyRow.device_imei || anyRow.imei_number || anyRow.source_imei || anyRow.imei1 || anyRow.imei_2 || ''
+  return String(value || '').trim()
+}
+
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export default function Billing() {
@@ -239,7 +244,7 @@ export default function Billing() {
   const [searchParams, setSearchParams] = useSearchParams()
   const user = useAuthStore((s) => s.user)
   const isAdmin = user?.role === 'admin'
-  const imeiText = (row: BillingRow) => resolveImei(row) || '—'
+  const imeiText = (row: BillingRow) => resolveImeiValue(row) || '—'
 
   const [showForm, setShowForm] = useState(false)
   const [editRow, setEditRow] = useState<BillingRow | null>(null)
@@ -878,7 +883,7 @@ export default function Billing() {
       row.phone_number ? `Phone: ${row.phone_number}` : '',
       `Service: ${row.service_name}`,
       row.device_model ? `Device: ${row.device_model}` : '',
-      resolveImei(row) ? `IMEI: ${resolveImei(row)}` : '',
+      resolveImeiValue(row) ? `IMEI: ${resolveImeiValue(row)}` : '',
       `Amount: ${formatCurrency(row.total_amount, currency)}`,
       `Paid: ${formatCurrency(row.amount_paid, currency)}`,
       `Balance: ${formatCurrency(row.balance, currency)}`,
