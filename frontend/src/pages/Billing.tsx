@@ -3,18 +3,11 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useForm } from 'react-hook-form'
 import { useSearchParams } from 'react-router-dom'
 import {
-  BookText,
-  CircleDollarSign,
-  Copy,
+  ChevronDown,
   Filter,
-  History,
-  Pencil,
   Plus,
   RefreshCcw,
   Search,
-  SendHorizontal,
-  Trash2,
-  Undo2,
   X,
 } from 'lucide-react'
 import toast from 'react-hot-toast'
@@ -267,6 +260,7 @@ export default function Billing() {
   const [reversePayIdempotencyKey, setReversePayIdempotencyKey] = useState('')
   const [loadingEdit, setLoadingEdit] = useState(false)
   const [showAdvancedFilters, setShowAdvancedFilters] = useState(false)
+  const [actionMenuRowId, setActionMenuRowId] = useState<string | null>(null)
   const [clientQuickViewName, setClientQuickViewName] = useState<string | null>(null)
   const [paymentQuickViewRow, setPaymentQuickViewRow] = useState<BillingRow | null>(null)
   const [expandedNotesRows, setExpandedNotesRows] = useState<Set<string>>(new Set())
@@ -983,8 +977,16 @@ export default function Billing() {
     [allRows]
   )
 
-  const devicesAwaitingPayment = useMemo(
-    () => allRows.filter((row) => Number(row.balance || 0) > 0 && String(row.status || '').toUpperCase() !== 'RETURNED').length,
+  const pendingJobs = useMemo(
+    () => allRows.filter((row) => {
+      const st = String(row.status || '').toUpperCase()
+      return st === 'UNPAID' || st === 'PART PAYMENT'
+    }).length,
+    [allRows]
+  )
+
+  const partPaymentCount = useMemo(
+    () => allRows.filter((row) => String(row.status || '').toUpperCase() === 'PART PAYMENT').length,
     [allRows]
   )
 
@@ -1060,20 +1062,20 @@ export default function Billing() {
   // ─── Render ─────────────────────────────────────────────────────────────────
 
   return (
-    <div className="min-h-full bg-gradient-to-b from-[#090909] via-[#111111] to-[#f6f3ea] p-4 md:p-6 space-y-4">
+    <div className="min-h-full bg-[#f5f6f4] p-3 md:p-4 space-y-3">
 
-      <section className="rounded-2xl border border-[#d4af37]/50 bg-[#101010] p-4 shadow-[0_16px_44px_rgba(0,0,0,0.38)]">
-        <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+      <section className="rounded-xl border border-[#e7d89f] bg-white px-4 py-3">
+        <div className="flex flex-col gap-2 xl:flex-row xl:items-center xl:justify-between">
           <div>
-            <h1 className="text-xl md:text-2xl font-bold tracking-wide text-[#f5e1aa]">Services & Billing</h1>
-            <p className="text-[11px] text-[#ccb57a]">Premium POS / ERP sales workspace</p>
+            <h1 className="text-lg md:text-xl font-semibold text-[#151515]">Services & Billing</h1>
+            <p className="text-[11px] text-gray-500">Manage sales, repairs and customer payments</p>
           </div>
 
-          <div className="flex w-full flex-col gap-2 sm:flex-row lg:w-auto">
-            <div className="relative min-w-[260px] flex-1">
+          <div className="flex w-full flex-col gap-2 sm:flex-row xl:w-auto">
+            <div className="relative min-w-[300px] flex-1 xl:min-w-[360px]">
               <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
               <input
-                className="h-10 w-full rounded-xl border border-[#d4af37]/45 bg-white pl-9 pr-9 text-sm text-gray-800"
+                className="h-9 w-full rounded-lg border border-[#e7d89f] bg-white pl-9 pr-9 text-sm text-gray-800"
                 placeholder="Search client, phone, IMEI, device, invoice, notes"
                 value={searchInput}
                 onChange={(e) => setSearchInput(e.target.value)}
@@ -1085,63 +1087,69 @@ export default function Billing() {
               )}
             </div>
 
-            <button type="button" title="Refresh" className="inline-flex h-10 items-center gap-2 rounded-xl border border-[#d4af37]/50 bg-white px-3 text-xs font-semibold text-gray-700 hover:bg-[#fff8e1]" onClick={refreshBillingView}>
+            <button type="button" title="Refresh" className="inline-flex h-9 items-center gap-2 rounded-lg border border-[#e7d89f] bg-white px-3 text-xs font-semibold text-gray-700 hover:bg-[#fff8e1]" onClick={refreshBillingView}>
               <RefreshCcw size={14} /> Refresh
             </button>
-            <button type="button" title="Filters" className="inline-flex h-10 items-center gap-2 rounded-xl border border-[#d4af37]/50 bg-white px-3 text-xs font-semibold text-gray-700 hover:bg-[#fff8e1]" onClick={() => setShowAdvancedFilters((prev) => !prev)}>
+            <button type="button" title="Filters" className="inline-flex h-9 items-center gap-2 rounded-lg border border-[#e7d89f] bg-white px-3 text-xs font-semibold text-gray-700 hover:bg-[#fff8e1]" onClick={() => setShowAdvancedFilters((prev) => !prev)}>
               <Filter size={14} /> Filter
             </button>
-            <button type="button" className="inline-flex h-10 items-center gap-2 rounded-xl bg-[#d4af37] px-3 text-xs font-bold text-[#101010] hover:bg-[#e4bf4b]" onClick={openNewInvoice}>
+            <button type="button" className="inline-flex h-9 items-center gap-2 rounded-lg bg-[#d4af37] px-3 text-xs font-bold text-[#101010] hover:bg-[#e4bf4b]" onClick={openNewInvoice}>
               <Plus size={14} /> New Invoice
             </button>
           </div>
         </div>
       </section>
 
-      <section className="grid grid-cols-2 gap-2 md:grid-cols-3 xl:grid-cols-6">
+      <section className="grid grid-cols-2 gap-2 lg:grid-cols-3 xl:grid-cols-6">
         <div className="rounded-xl border border-[#d4af37]/35 bg-white px-3 py-2 shadow-sm">
-          <p className="text-[10px] uppercase tracking-wide text-gray-500">Total Jobs</p>
-          <p className="text-lg font-bold text-gray-900">{totalSummary.jobs}</p>
+          <p className="text-[10px] uppercase tracking-wide text-gray-500">Services Today</p>
+          <p className="text-base font-semibold text-gray-900">{todayJobs}</p>
         </div>
         {isAdmin && (
           <div className="rounded-xl border border-[#d4af37]/35 bg-white px-3 py-2 shadow-sm">
-            <p className="text-[10px] uppercase tracking-wide text-gray-500">Total Revenue</p>
-            <p className="text-lg font-bold text-gray-900">{formatCurrency(totalSummary.totalAmount, currency)}</p>
+            <p className="text-[10px] uppercase tracking-wide text-gray-500">Revenue Today</p>
+            <p className="text-base font-semibold text-gray-900">{formatCurrency(totalSummary.totalAmount, currency)}</p>
           </div>
         )}
         {isAdmin && (
           <div className="rounded-xl border border-[#d4af37]/35 bg-white px-3 py-2 shadow-sm">
-            <p className="text-[10px] uppercase tracking-wide text-gray-500">Total Collected</p>
-            <p className="text-lg font-bold text-emerald-700">{formatCurrency(totalSummary.totalPaid, currency)}</p>
+            <p className="text-[10px] uppercase tracking-wide text-gray-500">Collected Today</p>
+            <p className="text-base font-semibold text-emerald-700">{formatCurrency(totalSummary.totalPaid, currency)}</p>
           </div>
         )}
         {isAdmin && (
           <div className="rounded-xl border border-[#d4af37]/35 bg-white px-3 py-2 shadow-sm">
             <p className="text-[10px] uppercase tracking-wide text-gray-500">Outstanding Balance</p>
-            <p className="text-lg font-bold text-amber-700">{formatCurrency(totalSummary.totalOutstanding, currency)}</p>
+            <p className="text-base font-semibold text-amber-700">{formatCurrency(totalSummary.totalOutstanding, currency)}</p>
           </div>
         )}
         <div className="rounded-xl border border-[#d4af37]/35 bg-white px-3 py-2 shadow-sm">
           <p className="text-[10px] uppercase tracking-wide text-gray-500">Active Debtors</p>
-          <p className="text-lg font-bold text-gray-900">{activeDebtorsCount}</p>
+          <p className="text-base font-semibold text-gray-900">{activeDebtorsCount}</p>
         </div>
-        <div className="rounded-xl border border-[#d4af37]/35 bg-white px-3 py-2 shadow-sm">
-          <p className="text-[10px] uppercase tracking-wide text-gray-500">Today's Jobs</p>
-          <p className="text-lg font-bold text-gray-900">{todayJobs}</p>
-        </div>
+        {isAdmin && (
+          <div className="rounded-xl border border-[#d4af37]/35 bg-white px-3 py-2 shadow-sm">
+            <p className="text-[10px] uppercase tracking-wide text-gray-500">Awaiting Pickup</p>
+            <p className="text-base font-semibold text-gray-900">{devicesAwaitingPickup}</p>
+          </div>
+        )}
         {!isAdmin && (
           <>
             <div className="rounded-xl border border-[#d4af37]/35 bg-white px-3 py-2 shadow-sm">
-              <p className="text-[10px] uppercase tracking-wide text-gray-500">Devices Delivered</p>
-              <p className="text-lg font-bold text-emerald-700">{devicesDelivered}</p>
-            </div>
-            <div className="rounded-xl border border-[#d4af37]/35 bg-white px-3 py-2 shadow-sm">
-              <p className="text-[10px] uppercase tracking-wide text-gray-500">Awaiting Payment</p>
-              <p className="text-lg font-bold text-amber-700">{devicesAwaitingPayment}</p>
-            </div>
-            <div className="rounded-xl border border-[#d4af37]/35 bg-white px-3 py-2 shadow-sm">
               <p className="text-[10px] uppercase tracking-wide text-gray-500">Awaiting Pickup</p>
-              <p className="text-lg font-bold text-gray-900">{devicesAwaitingPickup}</p>
+              <p className="text-base font-semibold text-gray-900">{devicesAwaitingPickup}</p>
+            </div>
+            <div className="rounded-xl border border-[#d4af37]/35 bg-white px-3 py-2 shadow-sm">
+              <p className="text-[10px] uppercase tracking-wide text-gray-500">Devices Delivered</p>
+              <p className="text-base font-semibold text-emerald-700">{devicesDelivered}</p>
+            </div>
+            <div className="rounded-xl border border-[#d4af37]/35 bg-white px-3 py-2 shadow-sm">
+              <p className="text-[10px] uppercase tracking-wide text-gray-500">Pending Jobs</p>
+              <p className="text-base font-semibold text-amber-700">{pendingJobs}</p>
+            </div>
+            <div className="rounded-xl border border-[#d4af37]/35 bg-white px-3 py-2 shadow-sm">
+              <p className="text-[10px] uppercase tracking-wide text-gray-500">Part Payments</p>
+              <p className="text-base font-semibold text-amber-700">{partPaymentCount}</p>
             </div>
           </>
         )}
@@ -1240,15 +1248,13 @@ export default function Billing() {
                     ? 'billing-table-enter-fade'
                     : ''
             }`}>
-              <div className="hidden md:block max-h-[74vh] overflow-y-auto">
-                <div className="sticky top-0 z-30 grid grid-cols-[56px_1.2fr_1.5fr_1fr_0.95fr_0.95fr_0.95fr_0.95fr_1fr_0.95fr_220px] items-center gap-2 border-b border-[#eadca9] bg-[#121212] px-3 py-2 text-[11px] font-semibold uppercase tracking-wide text-[#f4dea5]">
+              <div className="hidden md:block max-h-[76vh] overflow-y-auto">
+                <div className="sticky top-0 z-30 grid grid-cols-[56px_1.25fr_1.9fr_0.95fr_0.95fr_0.95fr_1fr_0.95fr_240px] items-center gap-2 border-b border-[#eadca9] bg-[#121212] px-3 py-2 text-[11px] font-semibold uppercase tracking-wide text-[#f4dea5]">
                   <span>S/N</span>
                   <span>Client</span>
                   <span>Device</span>
-                  <span>IMEI</span>
                   <span>Payment Status</span>
                   <span>Amount</span>
-                  <span>Paid</span>
                   <span>Balance</span>
                   <span>Staff</span>
                   <span>Date</span>
@@ -1274,7 +1280,7 @@ export default function Billing() {
 
                   return (
                     <div key={entry.key} className={`border-b border-[#f7f1d8] ${isRevealedRow ? 'billing-row-stagger-enter' : ''}`} style={{ animationDelay: isRevealedRow ? `${revealDelay}ms` : undefined }}>
-                      <div className={`grid cursor-pointer grid-cols-[56px_1.2fr_1.5fr_1fr_0.95fr_0.95fr_0.95fr_0.95fr_1fr_0.95fr_220px] items-center gap-2 px-3 py-2 text-xs transition ${zebraClass} hover:bg-[#fff5d9]`} onClick={() => toggleRow(row.id)}>
+                      <div className={`grid cursor-pointer grid-cols-[56px_1.25fr_1.9fr_0.95fr_0.95fr_0.95fr_1fr_0.95fr_240px] items-center gap-2 px-3 py-2 text-xs transition ${zebraClass} hover:bg-[#fff5d9]`} onClick={() => toggleRow(row.id)}>
                         <span className="font-semibold text-gray-500">{idx + 1}</span>
                         <div className="min-w-0">
                           <button type="button" className="max-w-full truncate text-left font-semibold text-[#234d87] hover:underline" title={row.client_name} onClick={(e) => { e.stopPropagation(); setClientQuickViewName(row.client_name) }}>
@@ -1284,31 +1290,31 @@ export default function Billing() {
                         </div>
                         <div className="min-w-0 leading-tight">
                           <p className="truncate text-[12px] font-semibold text-gray-900">{highlightMatch(row.device_model || row.service_name || '—')}</p>
-                          <p className="truncate text-[11px] text-gray-500">{String((row as any).storage || 'N/A')}, {String((row as any).color || 'N/A')}</p>
-                          <p className="truncate text-[11px] text-gray-400">Battery: {battery}</p>
+                          <p className="truncate text-[11px] text-gray-500">{String((row as any).storage || 'N/A')} • {String((row as any).color || 'N/A')}</p>
+                          <p className="truncate text-[11px] text-gray-500">Battery {battery}</p>
+                          <p className="truncate text-[11px] text-gray-400">IMEI: {highlightMatch(imeiText(row))}</p>
                         </div>
-                        <p className="truncate text-[11px] text-gray-700">{highlightMatch(imeiText(row))}</p>
                         <span className={operationStatusClass(row.status)}>{statusLabel(row.status)}</span>
                         <p className="tabular-nums font-semibold text-gray-800">{formatCurrency(Number(row.total_amount || 0), currency)}</p>
-                        <p className="tabular-nums font-semibold text-emerald-700">{formatCurrency(Number(row.amount_paid || 0), currency)}</p>
                         <p className={`tabular-nums font-semibold ${Number(row.balance || 0) > 0 ? 'text-amber-700' : 'text-gray-500'}`}>{formatCurrency(Number(row.balance || 0), currency)}</p>
                         <p className="truncate text-gray-600">{row.assigned_staff_name || row.created_by_name || 'Unassigned'}</p>
                         <p className="text-gray-600">{String(row.service_date || row.invoice_date || '').slice(0, 10) || '—'}</p>
-                        <div className="flex items-center justify-center gap-1" onClick={(e) => e.stopPropagation()}>
-                          <button type="button" title="Apply Payment" className="rounded border border-[#e7d89f] bg-white p-1.5 text-gray-700 hover:bg-[#fff7de]" onClick={() => openApplyPayment(row)}><CircleDollarSign size={13} /></button>
-                          <button type="button" title="Send Bill" className="rounded border border-[#e7d89f] bg-white p-1.5 text-gray-700 hover:bg-[#fff7de]" onClick={() => { void openWhatsApp(row) }}><SendHorizontal size={13} /></button>
-                          <button type="button" title="Copy Bill" className="rounded border border-[#e7d89f] bg-white p-1.5 text-gray-700 hover:bg-[#fff7de]" onClick={() => { void copyBill(row) }}><Copy size={13} /></button>
-                          <button type="button" title="History" className="rounded border border-[#e7d89f] bg-white p-1.5 text-gray-700 hover:bg-[#fff7de]" onClick={() => toggleRow(row.id)}><History size={13} /></button>
-                          <button type="button" title="Ledger" className="rounded border border-[#e7d89f] bg-white p-1.5 text-gray-700 hover:bg-[#fff7de]" onClick={() => setPaymentQuickViewRow(row)}><BookText size={13} /></button>
-                          <button type="button" title="Edit" className="rounded border border-[#e7d89f] bg-white p-1.5 text-gray-700 hover:bg-[#fff7de]" onClick={() => { void openEdit(row) }}><Pencil size={13} /></button>
-                          {isAdmin && (
-                            <button type="button" title="Reverse Payment" className="rounded border border-amber-300 bg-amber-50 p-1.5 text-amber-800 hover:bg-amber-100" onClick={() => openReversePayment(row)}><Undo2 size={13} /></button>
-                          )}
-                          {row.status !== 'RETURNED' && (
-                            <button type="button" title="Mark Returned" className="rounded border border-amber-300 bg-amber-50 p-1.5 text-amber-800 hover:bg-amber-100" onClick={() => { if (confirm('Mark as returned?')) markReturnedMutation.mutate(row.id) }}><Undo2 size={13} /></button>
-                          )}
-                          {isAdmin && (
-                            <button type="button" title="Delete" className="rounded border border-red-300 bg-red-50 p-1.5 text-red-700 hover:bg-red-100" onClick={() => { if (confirm('Delete invoice?')) deleteMutation.mutate(row.id) }}><Trash2 size={13} /></button>
+                        <div className="relative flex items-center justify-end gap-1" onClick={(e) => e.stopPropagation()}>
+                          <button type="button" title="Apply Payment" className="rounded border border-[#e7d89f] bg-white px-2 py-1 text-[11px] font-medium text-gray-700 hover:bg-[#fff7de]" onClick={() => openApplyPayment(row)}>Apply Payment</button>
+                          <button type="button" title="Send Bill" className="rounded border border-[#e7d89f] bg-white px-2 py-1 text-[11px] font-medium text-gray-700 hover:bg-[#fff7de]" onClick={() => { void openWhatsApp(row) }}>Send Bill</button>
+                          <button type="button" title="History" className="rounded border border-[#e7d89f] bg-white px-2 py-1 text-[11px] font-medium text-gray-700 hover:bg-[#fff7de]" onClick={() => toggleRow(row.id)}>History</button>
+                          <button type="button" title="More" className="inline-flex items-center gap-1 rounded border border-[#e7d89f] bg-white px-2 py-1 text-[11px] font-medium text-gray-700 hover:bg-[#fff7de]" onClick={() => setActionMenuRowId((prev) => prev === row.id ? null : row.id)}>
+                            More <ChevronDown size={12} />
+                          </button>
+                          {actionMenuRowId === row.id && (
+                            <div className="absolute right-0 top-[calc(100%+4px)] z-40 w-40 rounded-md border border-[#e7d89f] bg-white shadow-lg">
+                              <button type="button" className="block w-full px-3 py-2 text-left text-[11px] hover:bg-[#fff7de]" onClick={() => { setActionMenuRowId(null); setPaymentQuickViewRow(row) }}>View Ledger</button>
+                              <button type="button" className="block w-full px-3 py-2 text-left text-[11px] hover:bg-[#fff7de]" onClick={() => { setActionMenuRowId(null); void copyBill(row) }}>Copy Bill</button>
+                              <button type="button" className="block w-full px-3 py-2 text-left text-[11px] hover:bg-[#fff7de]" onClick={() => { setActionMenuRowId(null); void openEdit(row) }}>Edit</button>
+                              {isAdmin && <button type="button" className="block w-full px-3 py-2 text-left text-[11px] text-amber-800 hover:bg-amber-50" onClick={() => { setActionMenuRowId(null); openReversePayment(row) }}>Reverse Payment</button>}
+                              {row.status !== 'RETURNED' && <button type="button" className="block w-full px-3 py-2 text-left text-[11px] text-amber-800 hover:bg-amber-50" onClick={() => { setActionMenuRowId(null); if (confirm('Mark as returned?')) markReturnedMutation.mutate(row.id) }}>Mark Returned</button>}
+                              {isAdmin && <button type="button" className="block w-full px-3 py-2 text-left text-[11px] text-red-700 hover:bg-red-50" onClick={() => { setActionMenuRowId(null); if (confirm('Delete invoice?')) deleteMutation.mutate(row.id) }}>Delete</button>}
+                            </div>
                           )}
                         </div>
                       </div>
@@ -1373,6 +1379,16 @@ export default function Billing() {
                             <p className={`text-gray-700 ${notesExpanded ? '' : 'line-clamp-2'}`}>{row.notes || '—'}</p>
                           </div>
 
+                          <div className="rounded-lg border border-[#efdca5] bg-white p-2">
+                            <p className="text-[10px] font-semibold tracking-wide text-[#866b2f]">AUDIT LOG</p>
+                            <div className="mt-1 space-y-1 text-gray-700">
+                              <p>Created: <strong>{String(row.service_date || row.invoice_date || '').slice(0, 19).replace('T', ' ') || '—'}</strong></p>
+                              <p>Edited: <strong>{String(row.last_edited_at || '').slice(0, 19).replace('T', ' ') || '—'}</strong></p>
+                              <p>Paid: <strong>{String(row.last_payment_at || '').slice(0, 19).replace('T', ' ') || '—'}</strong></p>
+                              <p>Returned: <strong>{String(row.returned_at || '').slice(0, 19).replace('T', ' ') || '—'}</strong></p>
+                            </div>
+                          </div>
+
                           <InvoicePaymentHistory invoiceId={row.id} currency={currency} />
                           <BillingWhatsAppHistory invoiceId={row.id} />
                           <BillingReturnHistory invoiceId={row.id} />
@@ -1414,16 +1430,23 @@ export default function Billing() {
                           <p className="truncate text-gray-500">Battery: {(row as any).battery_health ? `${(row as any).battery_health}%` : 'N/A'}</p>
                           <p className="mt-1 text-gray-700">Amount {formatCurrency(Number(row.total_amount || 0), currency)} • Paid {formatCurrency(Number(row.amount_paid || 0), currency)} • Bal {formatCurrency(Number(row.balance || 0), currency)}</p>
                         </div>
-                        <div className="flex flex-wrap items-center gap-1" onClick={(e) => e.stopPropagation()}>
-                          <button type="button" title="Apply Payment" className="rounded border border-[#e7d89f] bg-white p-1.5 text-gray-700" onClick={() => openApplyPayment(row)}><CircleDollarSign size={13} /></button>
-                          <button type="button" title="Send Bill" className="rounded border border-[#e7d89f] bg-white p-1.5 text-gray-700" onClick={() => { void openWhatsApp(row) }}><SendHorizontal size={13} /></button>
-                          <button type="button" title="Copy Bill" className="rounded border border-[#e7d89f] bg-white p-1.5 text-gray-700" onClick={() => { void copyBill(row) }}><Copy size={13} /></button>
-                          <button type="button" title="History" className="rounded border border-[#e7d89f] bg-white p-1.5 text-gray-700" onClick={() => toggleRow(row.id)}><History size={13} /></button>
-                          <button type="button" title="Ledger" className="rounded border border-[#e7d89f] bg-white p-1.5 text-gray-700" onClick={() => setPaymentQuickViewRow(row)}><BookText size={13} /></button>
-                          <button type="button" title="Edit" className="rounded border border-[#e7d89f] bg-white p-1.5 text-gray-700" onClick={() => { void openEdit(row) }}><Pencil size={13} /></button>
-                          {isAdmin && <button type="button" title="Reverse Payment" className="rounded border border-amber-300 bg-amber-50 p-1.5 text-amber-800" onClick={() => openReversePayment(row)}><Undo2 size={13} /></button>}
-                          {row.status !== 'RETURNED' && <button type="button" title="Mark Returned" className="rounded border border-amber-300 bg-amber-50 p-1.5 text-amber-800" onClick={() => { if (confirm('Mark as returned?')) markReturnedMutation.mutate(row.id) }}><Undo2 size={13} /></button>}
-                          {isAdmin && <button type="button" title="Delete" className="rounded border border-red-300 bg-red-50 p-1.5 text-red-700" onClick={() => { if (confirm('Delete invoice?')) deleteMutation.mutate(row.id) }}><Trash2 size={13} /></button>}
+                        <div className="relative flex flex-wrap items-center gap-1" onClick={(e) => e.stopPropagation()}>
+                          <button type="button" className="rounded border border-[#e7d89f] bg-white px-2 py-1 text-[11px] font-medium text-gray-700" onClick={() => openApplyPayment(row)}>Apply Payment</button>
+                          <button type="button" className="rounded border border-[#e7d89f] bg-white px-2 py-1 text-[11px] font-medium text-gray-700" onClick={() => { void openWhatsApp(row) }}>Send Bill</button>
+                          <button type="button" className="rounded border border-[#e7d89f] bg-white px-2 py-1 text-[11px] font-medium text-gray-700" onClick={() => toggleRow(row.id)}>History</button>
+                          <button type="button" className="inline-flex items-center gap-1 rounded border border-[#e7d89f] bg-white px-2 py-1 text-[11px] font-medium text-gray-700" onClick={() => setActionMenuRowId((prev) => prev === row.id ? null : row.id)}>
+                            More <ChevronDown size={12} />
+                          </button>
+                          {actionMenuRowId === row.id && (
+                            <div className="absolute right-0 top-[calc(100%+4px)] z-40 w-40 rounded-md border border-[#e7d89f] bg-white shadow-lg">
+                              <button type="button" className="block w-full px-3 py-2 text-left text-[11px] hover:bg-[#fff7de]" onClick={() => { setActionMenuRowId(null); setPaymentQuickViewRow(row) }}>View Ledger</button>
+                              <button type="button" className="block w-full px-3 py-2 text-left text-[11px] hover:bg-[#fff7de]" onClick={() => { setActionMenuRowId(null); void copyBill(row) }}>Copy Bill</button>
+                              <button type="button" className="block w-full px-3 py-2 text-left text-[11px] hover:bg-[#fff7de]" onClick={() => { setActionMenuRowId(null); void openEdit(row) }}>Edit</button>
+                              {isAdmin && <button type="button" className="block w-full px-3 py-2 text-left text-[11px] text-amber-800 hover:bg-amber-50" onClick={() => { setActionMenuRowId(null); openReversePayment(row) }}>Reverse Payment</button>}
+                              {row.status !== 'RETURNED' && <button type="button" className="block w-full px-3 py-2 text-left text-[11px] text-amber-800 hover:bg-amber-50" onClick={() => { setActionMenuRowId(null); if (confirm('Mark as returned?')) markReturnedMutation.mutate(row.id) }}>Mark Returned</button>}
+                              {isAdmin && <button type="button" className="block w-full px-3 py-2 text-left text-[11px] text-red-700 hover:bg-red-50" onClick={() => { setActionMenuRowId(null); if (confirm('Delete invoice?')) deleteMutation.mutate(row.id) }}>Delete</button>}
+                            </div>
+                          )}
                         </div>
                       </div>
                       {expanded && (
@@ -1432,6 +1455,7 @@ export default function Billing() {
                           <div className="rounded border border-[#efdca5] bg-white px-2 py-1"><p className="text-[10px] font-semibold text-[#866b2f]">CLIENT INFORMATION</p><p>{row.client_name}</p><p>{row.phone_number || '—'}</p></div>
                           <div className="rounded border border-[#efdca5] bg-white px-2 py-1"><p className="text-[10px] font-semibold text-[#866b2f]">FINANCIAL INFORMATION</p><p>Amount Charged: {formatCurrency(Number(row.total_amount || 0), currency)}</p><p>Amount Paid: {formatCurrency(Number(row.amount_paid || 0), currency)}</p><p>Outstanding: {formatCurrency(Number(row.balance || 0), currency)}</p></div>
                           <div className="rounded border border-[#efdca5] bg-white px-2 py-1"><p className="text-[10px] font-semibold text-[#866b2f]">NOTES</p><p>{row.notes || '—'}</p></div>
+                          <div className="rounded border border-[#efdca5] bg-white px-2 py-1"><p className="text-[10px] font-semibold text-[#866b2f]">AUDIT LOG</p><p>Created: {String(row.service_date || row.invoice_date || '').slice(0, 19).replace('T', ' ') || '—'}</p><p>Edited: {String(row.last_edited_at || '').slice(0, 19).replace('T', ' ') || '—'}</p><p>Paid: {String(row.last_payment_at || '').slice(0, 19).replace('T', ' ') || '—'}</p><p>Returned: {String(row.returned_at || '').slice(0, 19).replace('T', ' ') || '—'}</p></div>
                           <InvoicePaymentHistory invoiceId={row.id} currency={currency} />
                           <BillingWhatsAppHistory invoiceId={row.id} />
                           <BillingReturnHistory invoiceId={row.id} />
