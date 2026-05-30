@@ -3,7 +3,19 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useForm } from 'react-hook-form'
 import { useSearchParams } from 'react-router-dom'
 import {
-  MoreVertical, Plus, Search, X,
+  BookText,
+  CircleDollarSign,
+  Copy,
+  Filter,
+  History,
+  Pencil,
+  Plus,
+  RefreshCcw,
+  Search,
+  SendHorizontal,
+  Trash2,
+  Undo2,
+  X,
 } from 'lucide-react'
 import toast from 'react-hot-toast'
 
@@ -12,6 +24,7 @@ import { buildIdempotencyKey } from '@/lib/idempotency'
 import LoadingSpinner from '@/components/LoadingSpinner'
 import Modal from '@/components/Modal'
 import { formatCurrency, statusLabel } from '@/lib/utils'
+import { resolveImei } from '@/lib/imei'
 import { useAuthStore } from '@/store/authStore'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -192,11 +205,11 @@ function normalizePhone(raw?: string): string {
 
 function operationStatusClass(status: string): string {
   const s = String(status || '').toUpperCase()
-  if (s === 'PAID') return 'inline-flex items-center rounded-full px-2 py-0.5 text-xs font-semibold bg-emerald-100 text-emerald-700'
-  if (s === 'PART PAYMENT' || s === 'PARTIAL') return 'inline-flex items-center rounded-full px-2 py-0.5 text-xs font-semibold bg-amber-100 text-amber-700'
-  if (s === 'UNPAID') return 'inline-flex items-center rounded-full px-2 py-0.5 text-xs font-semibold bg-red-100 text-red-700'
-  if (s === 'RETURNED') return 'inline-flex items-center rounded-full px-2 py-0.5 text-xs font-semibold bg-blue-100 text-blue-700'
-  return 'inline-flex items-center rounded-full px-2 py-0.5 text-xs font-semibold bg-gray-100 text-gray-700'
+  if (s === 'PAID') return 'inline-flex items-center rounded-full px-3 py-1 text-xs font-semibold bg-emerald-100 text-emerald-700'
+  if (s === 'PART PAYMENT' || s === 'PARTIAL') return 'inline-flex items-center rounded-full px-3 py-1 text-xs font-semibold bg-amber-100 text-amber-700'
+  if (s === 'UNPAID') return 'inline-flex items-center rounded-full px-3 py-1 text-xs font-semibold bg-red-100 text-red-700'
+  if (s === 'RETURNED') return 'inline-flex items-center rounded-full px-3 py-1 text-xs font-semibold bg-gray-200 text-gray-700'
+  return 'inline-flex items-center rounded-full px-3 py-1 text-xs font-semibold bg-gray-100 text-gray-700'
 }
 
 function parseApiError(error: any, fallback: string): string {
@@ -220,6 +233,12 @@ function parseApiError(error: any, fallback: string): string {
   return String(error?.message || fallback)
 }
 
+function resolveSerial(row: BillingRow): string {
+  const anyRow = row as any
+  const value = row.serial_number || anyRow.serial_no || anyRow.device_serial || ''
+  return String(value || '').trim() || '—'
+}
+
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export default function Billing() {
@@ -227,6 +246,7 @@ export default function Billing() {
   const [searchParams, setSearchParams] = useSearchParams()
   const user = useAuthStore((s) => s.user)
   const isAdmin = user?.role === 'admin'
+  const imeiText = (row: BillingRow) => resolveImei(row) || '—'
 
   const [showForm, setShowForm] = useState(false)
   const [editRow, setEditRow] = useState<BillingRow | null>(null)
@@ -247,9 +267,9 @@ export default function Billing() {
   const [reversePayIdempotencyKey, setReversePayIdempotencyKey] = useState('')
   const [loadingEdit, setLoadingEdit] = useState(false)
   const [showAdvancedFilters, setShowAdvancedFilters] = useState(false)
-  const [actionMenuRowId, setActionMenuRowId] = useState<string | null>(null)
   const [clientQuickViewName, setClientQuickViewName] = useState<string | null>(null)
   const [paymentQuickViewRow, setPaymentQuickViewRow] = useState<BillingRow | null>(null)
+  const [expandedNotesRows, setExpandedNotesRows] = useState<Set<string>>(new Set())
   const [visibleCount, setVisibleCount] = useState(140)
   const [revealStartIndex, setRevealStartIndex] = useState<number | null>(null)
   const [revealEndIndex, setRevealEndIndex] = useState<number | null>(null)
@@ -687,6 +707,16 @@ export default function Billing() {
     return entries
   }, [grouped, isRangeMode])
 
+  const activeDebtorsCount = useMemo(() => {
+    const names = new Set<string>()
+    for (const entry of flatRows) {
+      if (entry.kind === 'item') {
+        names.add(String(entry.row.client_name || '').trim().toUpperCase())
+      }
+    }
+    return names.size
+  }, [flatRows])
+
   useEffect(() => {
     setVisibleCount(140)
     setRevealStartIndex(null)
@@ -854,7 +884,7 @@ export default function Billing() {
       row.phone_number ? `Phone: ${row.phone_number}` : '',
       `Service: ${row.service_name}`,
       row.device_model ? `Device: ${row.device_model}` : '',
-      row.imei ? `IMEI: ${row.imei}` : '',
+      resolveImei(row) ? `IMEI: ${resolveImei(row)}` : '',
       `Amount: ${formatCurrency(row.total_amount, currency)}`,
       `Paid: ${formatCurrency(row.amount_paid, currency)}`,
       `Balance: ${formatCurrency(row.balance, currency)}`,
@@ -921,10 +951,84 @@ export default function Billing() {
     }
   }
 
+  const copyBill = async (row: BillingRow) => {
+    try {
+      await navigator.clipboard.writeText(generateBillText(row))
+      toast.success('Bill copied')
+    } catch {
+      toast.error('Unable to copy bill')
+    }
+  }
+
+  const openReversePayment = (row: BillingRow) => {
+    setReversePayRow(row)
+    setReversePayAmount('')
+    setReversePayReason('')
+    setReversePayIdempotencyKey(buildIdempotencyKey('payment-reverse'))
+  }
+
   const hasActiveFilters = !!(search || rangeFrom || rangeTo || statusFilter || paidState || minAmount || maxAmount || returned || createdBy || editedBy || assignedStaff)
-  const tableTemplate = isAdmin
-    ? '1.05fr 1.85fr 1fr 0.82fr 0.92fr 0.84fr'
-    : '1.2fr 2.15fr 0.95fr 0.95fr 0.9fr'
+  const allRows = useMemo(
+    () => flatRows.filter((entry): entry is Extract<FlatBillingEntry, { kind: 'item' }> => entry.kind === 'item').map((entry) => entry.row),
+    [flatRows]
+  )
+
+  const todayJobs = useMemo(
+    () => allRows.filter((row) => String(row.service_date || row.invoice_date || '').slice(0, 10) === todayISO).length,
+    [allRows, todayISO]
+  )
+
+  const devicesDelivered = useMemo(
+    () => allRows.filter((row) => String(row.status || '').toUpperCase() === 'PAID').length,
+    [allRows]
+  )
+
+  const devicesAwaitingPayment = useMemo(
+    () => allRows.filter((row) => Number(row.balance || 0) > 0 && String(row.status || '').toUpperCase() !== 'RETURNED').length,
+    [allRows]
+  )
+
+  const devicesAwaitingPickup = useMemo(
+    () => allRows.filter((row) => {
+      const pickup = String((row as any).pickup_status || (row as any).delivery_status || '').toUpperCase()
+      if (!pickup) return false
+      return pickup !== 'PICKED_UP' && pickup !== 'DELIVERED'
+    }).length,
+    [allRows]
+  )
+
+  const refreshBillingView = () => {
+    qc.invalidateQueries({ queryKey: ['billing-grouped'] })
+    qc.invalidateQueries({ queryKey: ['billing-client-quick-view'] })
+    qc.invalidateQueries({ queryKey: ['invoice-payments'] })
+  }
+
+  const openNewInvoice = () => {
+    setEditRow(null)
+    setClientSearch('')
+    setSelectedClientId('')
+    setShowClientDropdown(false)
+    reset({
+      client_name: '',
+      client_phone: '',
+      service_name: '',
+      device_model: '',
+      description: '',
+      imei: '',
+      serial_number: '',
+      condition: '',
+      lock_status: '',
+      payment_status: 'UNPAID',
+      quantity: 1,
+      unit_price: 0,
+      amount_paid: 0,
+      service_expense: 0,
+      invoice_date: new Date().toISOString().slice(0, 10),
+      due_date: '',
+      notes: '',
+    } as FormValues)
+    setShowForm(true)
+  }
 
   const highlightMatch = (text?: string) => {
     const value = String(text || '')
@@ -945,328 +1049,331 @@ export default function Billing() {
     )
   }
 
-  const financialStack = (row: BillingRow) => (
-    <div className="leading-tight">
-      <div className="text-[11px] text-gray-500">Total: <span className="font-semibold text-gray-800 tabular-nums">{formatCurrency(Number(row.total_amount || 0), currency)}</span></div>
-      <div className="text-[11px] text-gray-500">Paid: <span className="font-semibold text-emerald-700 tabular-nums">{formatCurrency(Number(row.amount_paid || 0), currency)}</span></div>
-      <div className="text-[11px] text-gray-500">Bal: <span className={`font-semibold tabular-nums ${Number(row.balance || 0) > 0 ? 'text-amber-700' : 'text-gray-500'}`}>{formatCurrency(Number(row.balance || 0), currency)}</span></div>
-    </div>
-  )
+  const statusChips = [
+    { label: 'All', value: '' },
+    { label: 'Paid', value: 'PAID' },
+    { label: 'Part Payment', value: 'PART PAYMENT' },
+    { label: 'Unpaid', value: 'UNPAID' },
+    { label: 'Returned', value: 'RETURNED' },
+  ]
 
   // ─── Render ─────────────────────────────────────────────────────────────────
 
   return (
-    <div className="p-6 space-y-4">
+    <div className="min-h-full bg-gradient-to-b from-[#090909] via-[#111111] to-[#f6f3ea] p-4 md:p-6 space-y-4">
 
-      {/* ── Header ── */}
-      <div className="flex items-center justify-between gap-3">
-        <h1 className="text-2xl font-bold">Service / Billing</h1>
-        <button
-          onClick={() => {
-            setEditRow(null)
-            setClientSearch('')
-            setSelectedClientId('')
-            setShowClientDropdown(false)
-            reset({
-              client_name: '',
-              client_phone: '',
-              service_name: '',
-              device_model: '',
-              description: '',
-              imei: '',
-              serial_number: '',
-              condition: '',
-              lock_status: '',
-              payment_status: 'UNPAID',
-              quantity: 1,
-              unit_price: 0,
-              amount_paid: 0,
-              service_expense: 0,
-              invoice_date: new Date().toISOString().slice(0, 10),
-              due_date: '',
-              notes: '',
-            } as FormValues)
-            setShowForm(true)
-          }}
-          className="btn-primary"
-        >
-          <Plus size={15} /> New Invoice
-        </button>
-      </div>
+      <section className="rounded-2xl border border-[#d4af37]/50 bg-[#101010] p-4 shadow-[0_16px_44px_rgba(0,0,0,0.38)]">
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+          <div>
+            <h1 className="text-xl md:text-2xl font-bold tracking-wide text-[#f5e1aa]">Services & Billing</h1>
+            <p className="text-[11px] text-[#ccb57a]">Premium POS / ERP sales workspace</p>
+          </div>
 
-      {/* ── Operational Header / Filters ── */}
-      <div className="rounded-xl border bg-white px-4 py-2 space-y-2" style={{ borderColor: '#e7d89f' }}>
+          <div className="flex w-full flex-col gap-2 sm:flex-row lg:w-auto">
+            <div className="relative min-w-[260px] flex-1">
+              <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
+              <input
+                className="h-10 w-full rounded-xl border border-[#d4af37]/45 bg-white pl-9 pr-9 text-sm text-gray-800"
+                placeholder="Search client, phone, IMEI, device, invoice, notes"
+                value={searchInput}
+                onChange={(e) => setSearchInput(e.target.value)}
+              />
+              {!!searchInput && (
+                <button type="button" title="Clear" className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-700" onClick={() => setSearchInput('')}>
+                  <X size={14} />
+                </button>
+              )}
+            </div>
+
+            <button type="button" title="Refresh" className="inline-flex h-10 items-center gap-2 rounded-xl border border-[#d4af37]/50 bg-white px-3 text-xs font-semibold text-gray-700 hover:bg-[#fff8e1]" onClick={refreshBillingView}>
+              <RefreshCcw size={14} /> Refresh
+            </button>
+            <button type="button" title="Filters" className="inline-flex h-10 items-center gap-2 rounded-xl border border-[#d4af37]/50 bg-white px-3 text-xs font-semibold text-gray-700 hover:bg-[#fff8e1]" onClick={() => setShowAdvancedFilters((prev) => !prev)}>
+              <Filter size={14} /> Filter
+            </button>
+            <button type="button" className="inline-flex h-10 items-center gap-2 rounded-xl bg-[#d4af37] px-3 text-xs font-bold text-[#101010] hover:bg-[#e4bf4b]" onClick={openNewInvoice}>
+              <Plus size={14} /> New Invoice
+            </button>
+          </div>
+        </div>
+      </section>
+
+      <section className="grid grid-cols-2 gap-2 md:grid-cols-3 xl:grid-cols-6">
+        <div className="rounded-xl border border-[#d4af37]/35 bg-white px-3 py-2 shadow-sm">
+          <p className="text-[10px] uppercase tracking-wide text-gray-500">Total Jobs</p>
+          <p className="text-lg font-bold text-gray-900">{totalSummary.jobs}</p>
+        </div>
+        {isAdmin && (
+          <div className="rounded-xl border border-[#d4af37]/35 bg-white px-3 py-2 shadow-sm">
+            <p className="text-[10px] uppercase tracking-wide text-gray-500">Total Revenue</p>
+            <p className="text-lg font-bold text-gray-900">{formatCurrency(totalSummary.totalAmount, currency)}</p>
+          </div>
+        )}
+        {isAdmin && (
+          <div className="rounded-xl border border-[#d4af37]/35 bg-white px-3 py-2 shadow-sm">
+            <p className="text-[10px] uppercase tracking-wide text-gray-500">Total Collected</p>
+            <p className="text-lg font-bold text-emerald-700">{formatCurrency(totalSummary.totalPaid, currency)}</p>
+          </div>
+        )}
+        {isAdmin && (
+          <div className="rounded-xl border border-[#d4af37]/35 bg-white px-3 py-2 shadow-sm">
+            <p className="text-[10px] uppercase tracking-wide text-gray-500">Outstanding Balance</p>
+            <p className="text-lg font-bold text-amber-700">{formatCurrency(totalSummary.totalOutstanding, currency)}</p>
+          </div>
+        )}
+        <div className="rounded-xl border border-[#d4af37]/35 bg-white px-3 py-2 shadow-sm">
+          <p className="text-[10px] uppercase tracking-wide text-gray-500">Active Debtors</p>
+          <p className="text-lg font-bold text-gray-900">{activeDebtorsCount}</p>
+        </div>
+        <div className="rounded-xl border border-[#d4af37]/35 bg-white px-3 py-2 shadow-sm">
+          <p className="text-[10px] uppercase tracking-wide text-gray-500">Today's Jobs</p>
+          <p className="text-lg font-bold text-gray-900">{todayJobs}</p>
+        </div>
+        {!isAdmin && (
+          <>
+            <div className="rounded-xl border border-[#d4af37]/35 bg-white px-3 py-2 shadow-sm">
+              <p className="text-[10px] uppercase tracking-wide text-gray-500">Devices Delivered</p>
+              <p className="text-lg font-bold text-emerald-700">{devicesDelivered}</p>
+            </div>
+            <div className="rounded-xl border border-[#d4af37]/35 bg-white px-3 py-2 shadow-sm">
+              <p className="text-[10px] uppercase tracking-wide text-gray-500">Awaiting Payment</p>
+              <p className="text-lg font-bold text-amber-700">{devicesAwaitingPayment}</p>
+            </div>
+            <div className="rounded-xl border border-[#d4af37]/35 bg-white px-3 py-2 shadow-sm">
+              <p className="text-[10px] uppercase tracking-wide text-gray-500">Awaiting Pickup</p>
+              <p className="text-lg font-bold text-gray-900">{devicesAwaitingPickup}</p>
+            </div>
+          </>
+        )}
+      </section>
+
+      <section className="rounded-xl border border-[#d4af37]/35 bg-white px-3 py-3 shadow-sm space-y-3">
         <div className="flex items-center gap-2 flex-wrap">
-          <div className="relative flex-1 min-w-80">
-            <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
-            <input
-              className="form-input pl-9 py-2 text-sm w-full"
-              placeholder="Search client, phone, IMEI, invoice, service, notes..."
-              value={searchInput}
-              onChange={(e) => setSearchInput(e.target.value)}
-            />
-            {!!searchInput && (
+          {statusChips.map((chip) => {
+            const active = (statusFilter || '') === chip.value
+            return (
               <button
+                key={chip.label}
                 type="button"
-                title="Clear search"
-                className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-700"
-                onClick={() => setSearchInput('')}
+                onClick={() => setParam('payment_status', chip.value)}
+                className={`rounded-full border px-3 py-1 text-xs font-semibold transition ${active ? 'bg-[#111] text-white border-[#111]' : 'bg-white text-gray-700 border-[#e7d89f] hover:bg-[#fff7de]'}`}
               >
-                <X size={14} />
+                {chip.label}
               </button>
-            )}
-          </div>
-
-          <span className="text-xs font-semibold text-gray-700 whitespace-nowrap">Jobs Count: {totalSummary.jobs}</span>
-
-          <button type="button" className="btn-secondary text-xs" onClick={() => shiftDay(-1)}>← Previous Day</button>
-          <input
-            type="date"
-            className="form-input py-1.5 text-xs"
-            value={selectedDate}
-            onChange={(e) => applySingleDay(e.target.value)}
-          />
-          <button type="button" className="btn-secondary text-xs" onClick={() => shiftDay(1)}>Next Day →</button>
-
-          <div className="flex items-center gap-1 text-xs">
-            <button type="button" className={`btn-secondary text-xs ${!isRangeMode ? 'ring-1 ring-amber-300' : ''}`} onClick={() => applyQuickRange('today')}>Today</button>
-            <button type="button" className={`btn-secondary text-xs ${activeRange === 'week' ? 'ring-1 ring-amber-300' : ''}`} onClick={() => applyQuickRange('week')}>This Week</button>
-            <button type="button" className={`btn-secondary text-xs ${activeRange === 'month' ? 'ring-1 ring-amber-300' : ''}`} onClick={() => applyQuickRange('month')}>This Month</button>
-          </div>
-
-          <button
-            type="button"
-            className="btn-secondary text-xs"
-            onClick={() => setShowAdvancedFilters((prev) => !prev)}
-          >
-            Advanced Filters {showAdvancedFilters ? '▲' : '▼'}
-          </button>
-
+            )
+          })}
+          <button type="button" className={`rounded-full border px-3 py-1 text-xs font-semibold transition ${!isRangeMode ? 'bg-[#111] text-white border-[#111]' : 'bg-white text-gray-700 border-[#e7d89f] hover:bg-[#fff7de]'}`} onClick={() => applyQuickRange('today')}>Today</button>
+          <button type="button" className={`rounded-full border px-3 py-1 text-xs font-semibold transition ${activeRange === 'week' ? 'bg-[#111] text-white border-[#111]' : 'bg-white text-gray-700 border-[#e7d89f] hover:bg-[#fff7de]'}`} onClick={() => applyQuickRange('week')}>This Week</button>
+          <button type="button" className={`rounded-full border px-3 py-1 text-xs font-semibold transition ${activeRange === 'month' ? 'bg-[#111] text-white border-[#111]' : 'bg-white text-gray-700 border-[#e7d89f] hover:bg-[#fff7de]'}`} onClick={() => applyQuickRange('month')}>This Month</button>
+          <button type="button" className="ml-auto rounded-full border border-[#e7d89f] px-3 py-1 text-xs font-semibold text-gray-700 hover:bg-[#fff7de]" onClick={() => shiftDay(-1)}>Previous Day</button>
+          <input type="date" className="h-8 rounded-full border border-[#e7d89f] px-3 text-xs" value={selectedDate} onChange={(e) => applySingleDay(e.target.value)} />
+          <button type="button" className="rounded-full border border-[#e7d89f] px-3 py-1 text-xs font-semibold text-gray-700 hover:bg-[#fff7de]" onClick={() => shiftDay(1)}>Next Day</button>
           {hasActiveFilters && (
-            <button type="button" className="btn-secondary text-xs" onClick={clearFilters}>Clear</button>
+            <button type="button" className="rounded-full border border-[#e7d89f] px-3 py-1 text-xs font-semibold text-gray-700 hover:bg-[#fff7de]" onClick={clearFilters}>Clear</button>
           )}
         </div>
 
-        <div className="text-xs text-gray-500">
-          <span>
-            {isRangeMode
-              ? `Range mode: ${rangeFrom} to ${rangeTo}`
-              : `Selected date: ${labelForDate(selectedDate)} (${selectedDate})`}
-          </span>
-        </div>
+        <p className="text-xs text-gray-500">{isRangeMode ? `Range: ${rangeFrom} to ${rangeTo}` : `Selected date: ${labelForDate(selectedDate)} (${selectedDate})`}</p>
 
         {showAdvancedFilters && (
-          <div className="border-t pt-2" style={{ borderColor: '#f1e7bf' }}>
-            <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-2">
-              <input type="date" className="form-input py-1.5 text-xs" value={rangeFrom} onChange={(e) => setParam('from_date', e.target.value)} placeholder="From date" />
-              <input type="date" className="form-input py-1.5 text-xs" value={rangeTo} onChange={(e) => setParam('to_date', e.target.value)} placeholder="To date" />
-
-              <select className="form-input py-2 text-xs" value={statusFilter} onChange={(e) => setParam('payment_status', e.target.value)}>
-                <option value="">Payment status</option>
-                <option value="PAID">PAID</option>
-                <option value="PART PAYMENT">PART PAYMENT</option>
-                <option value="UNPAID">UNPAID</option>
-                <option value="RETURNED">RETURNED</option>
+          <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-2 border-t pt-2" style={{ borderColor: '#f1e7bf' }}>
+            <input type="date" className="form-input py-1.5 text-xs" value={rangeFrom} onChange={(e) => setParam('from_date', e.target.value)} placeholder="From date" />
+            <input type="date" className="form-input py-1.5 text-xs" value={rangeTo} onChange={(e) => setParam('to_date', e.target.value)} placeholder="To date" />
+            <select className="form-input py-2 text-xs" value={statusFilter} onChange={(e) => setParam('payment_status', e.target.value)}>
+              <option value="">Payment status</option>
+              <option value="PAID">PAID</option>
+              <option value="PART PAYMENT">PART PAYMENT</option>
+              <option value="UNPAID">UNPAID</option>
+              <option value="RETURNED">RETURNED</option>
+            </select>
+            <select className="form-input py-2 text-xs" value={returned} onChange={(e) => setParam('is_return', e.target.value)}>
+              <option value="">Return status</option>
+              <option value="false">Not returned</option>
+              <option value="true">Returned</option>
+            </select>
+            {isAdmin && (
+              <select className="form-input py-2 text-xs" value={createdBy} onChange={(e) => setParam('created_by', e.target.value)}>
+                <option value="">Created by</option>
+                {userOptions.map((u) => <option key={u.id} value={u.id}>{u.label}</option>)}
               </select>
-
-              <select className="form-input py-2 text-xs" value={returned} onChange={(e) => setParam('is_return', e.target.value)}>
-                <option value="">Return status</option>
-                <option value="false">Not returned</option>
-                <option value="true">Returned</option>
+            )}
+            {isAdmin && (
+              <select className="form-input py-2 text-xs" value={editedBy} onChange={(e) => setParam('edited_by', e.target.value)}>
+                <option value="">Edited by</option>
+                {userOptions.map((u) => <option key={u.id} value={u.id}>{u.label}</option>)}
               </select>
-
-              {isAdmin && (
-                <select className="form-input py-2 text-xs" value={createdBy} onChange={(e) => setParam('created_by', e.target.value)}>
-                  <option value="">Created by</option>
-                  {userOptions.map((u) => <option key={u.id} value={u.id}>{u.label}</option>)}
-                </select>
-              )}
-
-              {isAdmin && (
-                <select className="form-input py-2 text-xs" value={editedBy} onChange={(e) => setParam('edited_by', e.target.value)}>
-                  <option value="">Edited by</option>
-                  {userOptions.map((u) => <option key={u.id} value={u.id}>{u.label}</option>)}
-                </select>
-              )}
-
-              {isAdmin && (
-                <select className="form-input py-2 text-xs" value={assignedStaff} onChange={(e) => setParam('assigned_staff', e.target.value)}>
-                  <option value="">Assigned staff</option>
-                  {userOptions.map((u) => <option key={u.id} value={u.id}>{u.label}</option>)}
-                </select>
-              )}
-
-              {isAdmin && <input type="number" min="0" className="form-input py-1.5 text-xs" placeholder="Min amount" value={minAmount} onChange={(e) => setParam('min_amount', e.target.value)} />}
-              {isAdmin && <input type="number" min="0" className="form-input py-1.5 text-xs" placeholder="Max amount" value={maxAmount} onChange={(e) => setParam('max_amount', e.target.value)} />}
-            </div>
+            )}
+            {isAdmin && (
+              <select className="form-input py-2 text-xs" value={assignedStaff} onChange={(e) => setParam('assigned_staff', e.target.value)}>
+                <option value="">Assigned staff</option>
+                {userOptions.map((u) => <option key={u.id} value={u.id}>{u.label}</option>)}
+              </select>
+            )}
+            {isAdmin && <input type="number" min="0" className="form-input py-1.5 text-xs" placeholder="Min amount" value={minAmount} onChange={(e) => setParam('min_amount', e.target.value)} />}
+            {isAdmin && <input type="number" min="0" className="form-input py-1.5 text-xs" placeholder="Max amount" value={maxAmount} onChange={(e) => setParam('max_amount', e.target.value)} />}
           </div>
         )}
-      </div>
+      </section>
 
-      {/* ── Continuous table with sticky date separators ── */}
       {isLoading ? (
-        <LoadingSpinner />
+        <section className="rounded-xl border border-[#e7d89f] bg-white p-4 space-y-2">
+          {Array.from({ length: 6 }).map((_, idx) => (
+            <div key={idx} className="h-11 animate-pulse rounded-lg bg-[#f7f2df]" />
+          ))}
+        </section>
       ) : (
         <div className="space-y-2">
           {flatRows.length === 0 && (
-            <div className="rounded-xl border p-8 text-sm text-gray-400 text-center" style={{ borderColor: '#e7d89f' }}>
-              No jobs found for the current filters.
-            </div>
+            <section className="rounded-xl border border-[#e7d89f] bg-white p-10 text-center">
+              <p className="text-sm font-semibold text-gray-700">No transactions found</p>
+              <p className="text-xs text-gray-500 mt-1">Try clearing filters or adjusting your search query.</p>
+            </section>
           )}
 
           {flatRows.length > 0 && (
-            <section
-              className={`rounded-xl border bg-white ${
-                tableMotion === 'left'
-                  ? 'billing-table-enter-left'
-                  : tableMotion === 'right'
-                    ? 'billing-table-enter-right'
-                    : tableMotion === 'fade'
-                      ? 'billing-table-enter-fade'
-                      : ''
-              }`}
-              style={{ borderColor: '#e7d89f' }}
-            >
-              <div className="hidden md:block max-h-[72vh] overflow-y-auto">
-                <div
-                  className="sticky top-0 z-30 grid items-center gap-2 px-3 py-1.5 text-[11px] font-medium text-gray-400 uppercase tracking-wide border-b bg-white"
-                  style={{ gridTemplateColumns: tableTemplate, borderColor: '#f7f1d8' }}
-                >
+            <section className={`overflow-hidden rounded-xl border border-[#e7d89f] bg-white ${
+              tableMotion === 'left'
+                ? 'billing-table-enter-left'
+                : tableMotion === 'right'
+                  ? 'billing-table-enter-right'
+                  : tableMotion === 'fade'
+                    ? 'billing-table-enter-fade'
+                    : ''
+            }`}>
+              <div className="hidden md:block max-h-[74vh] overflow-y-auto">
+                <div className="sticky top-0 z-30 grid grid-cols-[56px_1.2fr_1.5fr_1fr_0.95fr_0.95fr_0.95fr_0.95fr_1fr_0.95fr_220px] items-center gap-2 border-b border-[#eadca9] bg-[#121212] px-3 py-2 text-[11px] font-semibold uppercase tracking-wide text-[#f4dea5]">
+                  <span>S/N</span>
                   <span>Client</span>
-                  <span>Service / Device</span>
-                  {isAdmin && <span>Financials</span>}
-                  <span className="text-center">Status</span>
+                  <span>Device</span>
+                  <span>IMEI</span>
+                  <span>Payment Status</span>
+                  <span>Amount</span>
+                  <span>Paid</span>
+                  <span>Balance</span>
                   <span>Staff</span>
+                  <span>Date</span>
                   <span className="text-center">Actions</span>
                 </div>
 
                 {flatRows.slice(0, visibleCount).map((entry, idx) => {
                   if (entry.kind === 'separator') {
-                    const g = entry.group
-                    const hasOutstanding = Number(g.summary.total_outstanding) > 0
                     return (
-                      <div
-                        key={entry.key}
-                        className="sticky top-9 z-20 border-b border-t px-4 py-2 bg-[#fffdf5]"
-                        style={{ borderColor: '#f1e7bf' }}
-                      >
-                        <div className="flex items-center justify-between gap-3 text-xs">
-                          <div className="flex items-center gap-2 min-w-0">
-                            <span className="font-semibold text-sm text-gray-900">{labelForDate(g.service_date)}</span>
-                            <span className="text-gray-400 hidden sm:inline">{g.service_date}</span>
-                          </div>
-                          <div className="flex items-center gap-3 shrink-0 text-gray-500">
-                            <span>{g.summary.job_count} jobs</span>
-                            {isAdmin && <span className="hidden lg:inline"><span className="text-gray-400">Total </span>{formatCurrency(g.summary.total_amount, currency)}</span>}
-                            {isAdmin && <span className="hidden lg:inline text-emerald-600">{formatCurrency(g.summary.total_paid, currency)} paid</span>}
-                            {isAdmin && hasOutstanding ? (
-                              <span className="font-semibold text-amber-700 bg-amber-50 border border-amber-200 px-2 py-0.5 rounded-full">
-                                {formatCurrency(g.summary.total_outstanding, currency)} due
-                              </span>
-                            ) : (
-                              <span className="text-emerald-600 text-xs font-medium">✓ Settled</span>
-                            )}
-                          </div>
-                        </div>
+                      <div key={entry.key} className="sticky top-[40px] z-20 border-y border-[#f1e7bf] bg-[#fffaf0] px-4 py-1 text-xs font-medium text-gray-700">
+                        {labelForDate(entry.group.service_date)}
                       </div>
                     )
                   }
 
                   const row = entry.row
                   const expanded = expandedRows.has(row.id)
-                  const showBottomBorder = idx < Math.min(visibleCount, flatRows.length) - 1
                   const isRevealedRow = revealStartIndex != null && revealEndIndex != null && idx >= revealStartIndex && idx < revealEndIndex
                   const revealDelay = revealStartIndex == null ? 0 : Math.min((idx - revealStartIndex) * 14, 180)
+                  const battery = (row as any).battery_health ? `${(row as any).battery_health}%` : 'N/A'
+                  const zebraClass = idx % 2 === 0 ? 'bg-white' : 'bg-[#fffdfa]'
+                  const notesExpanded = expandedNotesRows.has(row.id)
 
                   return (
-                    <div
-                      key={entry.key}
-                      className={`${showBottomBorder ? 'border-b' : ''} ${isRevealedRow ? 'billing-row-stagger-enter' : ''}`}
-                      style={{
-                        borderColor: '#f7f1d8',
-                        animationDelay: isRevealedRow ? `${revealDelay}ms` : undefined,
-                      }}
-                    >
-                      <div
-                        className="group grid items-center gap-2 px-3 py-1 text-xs hover:bg-[#fffdf5] cursor-pointer transition-colors"
-                        style={{ gridTemplateColumns: tableTemplate }}
-                        onClick={() => toggleRow(row.id)}
-                      >
+                    <div key={entry.key} className={`border-b border-[#f7f1d8] ${isRevealedRow ? 'billing-row-stagger-enter' : ''}`} style={{ animationDelay: isRevealedRow ? `${revealDelay}ms` : undefined }}>
+                      <div className={`grid cursor-pointer grid-cols-[56px_1.2fr_1.5fr_1fr_0.95fr_0.95fr_0.95fr_0.95fr_1fr_0.95fr_220px] items-center gap-2 px-3 py-2 text-xs transition ${zebraClass} hover:bg-[#fff5d9]`} onClick={() => toggleRow(row.id)}>
+                        <span className="font-semibold text-gray-500">{idx + 1}</span>
                         <div className="min-w-0">
-                          <button
-                            type="button"
-                            className="truncate text-left font-semibold text-[#2b5c9a] hover:underline"
-                            title={row.client_name}
-                            onClick={(e) => {
-                              e.stopPropagation()
-                              setClientQuickViewName(row.client_name)
-                            }}
-                          >
+                          <button type="button" className="max-w-full truncate text-left font-semibold text-[#234d87] hover:underline" title={row.client_name} onClick={(e) => { e.stopPropagation(); setClientQuickViewName(row.client_name) }}>
                             {highlightMatch(row.client_name)}
                           </button>
-                          <div className="truncate text-[11px] text-gray-500">{highlightMatch(row.phone_number)}</div>
+                          <p className="truncate text-[11px] text-gray-500">{highlightMatch(row.phone_number) || 'No phone'}</p>
                         </div>
                         <div className="min-w-0 leading-tight">
-                          <div className="truncate text-[12px] font-semibold text-gray-800" title={String(row.device_model || '—')}>
-                            {highlightMatch(row.device_model || '—')}
-                          </div>
-                          <div className="truncate text-[11px] text-gray-500" title={String(row.service_name || '—')}>
-                            {highlightMatch(row.service_name || '—')}
-                          </div>
-                          <div className="truncate text-[11px] text-gray-400" title={String(row.imei || '—')}>
-                            IMEI: {highlightMatch(row.imei || '—')}
-                          </div>
+                          <p className="truncate text-[12px] font-semibold text-gray-900">{highlightMatch(row.device_model || row.service_name || '—')}</p>
+                          <p className="truncate text-[11px] text-gray-500">{String((row as any).storage || 'N/A')}, {String((row as any).color || 'N/A')}</p>
+                          <p className="truncate text-[11px] text-gray-400">Battery: {battery}</p>
                         </div>
-                        {isAdmin && financialStack(row)}
-                        <div className="text-center">
-                          <span className={operationStatusClass(row.status)}>{statusLabel(row.status)}</span>
-                        </div>
-                        <span className="truncate text-gray-500" title={row.assigned_staff_name || row.created_by_name || 'Unassigned'}>
-                          {row.assigned_staff_name || row.created_by_name || 'Unassigned'}
-                        </span>
-                        <div className="relative flex justify-center" onClick={(e) => e.stopPropagation()}>
-                          <button
-                            type="button"
-                            className="inline-flex items-center gap-1 rounded border px-2 py-1 text-[11px] text-gray-700 hover:bg-gray-50"
-                            style={{ borderColor: '#e7d89f' }}
-                            onClick={() => setActionMenuRowId((prev) => (prev === row.id ? null : row.id))}
-                          >
-                            <MoreVertical size={14} /> Actions
-                          </button>
-                          {actionMenuRowId === row.id && (
-                            <div className="absolute right-0 top-[calc(100%+4px)] z-40 w-40 rounded-md border bg-white shadow-lg" style={{ borderColor: '#e7d89f' }}>
-                              <button type="button" className="w-full px-3 py-1.5 text-left text-[11px] hover:bg-gray-50" onClick={() => { setActionMenuRowId(null); void openEdit(row) }}>Edit</button>
-                              {isAdmin && <button type="button" className="w-full px-3 py-1.5 text-left text-[11px] hover:bg-gray-50" onClick={() => { setActionMenuRowId(null); openApplyPayment(row) }}>Apply Payment</button>}
-                              <button type="button" className="w-full px-3 py-1.5 text-left text-[11px] hover:bg-gray-50" onClick={() => { setActionMenuRowId(null); void openWhatsApp(row) }}>Send Bill</button>
-                              <button type="button" className="w-full px-3 py-1.5 text-left text-[11px] hover:bg-gray-50" onClick={() => { setActionMenuRowId(null); toggleRow(row.id) }}>View History</button>
-                              {row.status !== 'RETURNED' && <button type="button" className="w-full px-3 py-1.5 text-left text-[11px] text-amber-700 hover:bg-amber-50" onClick={() => { setActionMenuRowId(null); if (confirm('Mark as returned?')) markReturnedMutation.mutate(row.id) }}>Mark Returned</button>}
-                              {isAdmin && <button type="button" className="w-full px-3 py-1.5 text-left text-[11px] text-red-600 hover:bg-red-50" onClick={() => { setActionMenuRowId(null); if (confirm('Delete invoice?')) deleteMutation.mutate(row.id) }}>Delete</button>}
-                            </div>
+                        <p className="truncate text-[11px] text-gray-700">{highlightMatch(imeiText(row))}</p>
+                        <span className={operationStatusClass(row.status)}>{statusLabel(row.status)}</span>
+                        <p className="tabular-nums font-semibold text-gray-800">{formatCurrency(Number(row.total_amount || 0), currency)}</p>
+                        <p className="tabular-nums font-semibold text-emerald-700">{formatCurrency(Number(row.amount_paid || 0), currency)}</p>
+                        <p className={`tabular-nums font-semibold ${Number(row.balance || 0) > 0 ? 'text-amber-700' : 'text-gray-500'}`}>{formatCurrency(Number(row.balance || 0), currency)}</p>
+                        <p className="truncate text-gray-600">{row.assigned_staff_name || row.created_by_name || 'Unassigned'}</p>
+                        <p className="text-gray-600">{String(row.service_date || row.invoice_date || '').slice(0, 10) || '—'}</p>
+                        <div className="flex items-center justify-center gap-1" onClick={(e) => e.stopPropagation()}>
+                          <button type="button" title="Apply Payment" className="rounded border border-[#e7d89f] bg-white p-1.5 text-gray-700 hover:bg-[#fff7de]" onClick={() => openApplyPayment(row)}><CircleDollarSign size={13} /></button>
+                          <button type="button" title="Send Bill" className="rounded border border-[#e7d89f] bg-white p-1.5 text-gray-700 hover:bg-[#fff7de]" onClick={() => { void openWhatsApp(row) }}><SendHorizontal size={13} /></button>
+                          <button type="button" title="Copy Bill" className="rounded border border-[#e7d89f] bg-white p-1.5 text-gray-700 hover:bg-[#fff7de]" onClick={() => { void copyBill(row) }}><Copy size={13} /></button>
+                          <button type="button" title="History" className="rounded border border-[#e7d89f] bg-white p-1.5 text-gray-700 hover:bg-[#fff7de]" onClick={() => toggleRow(row.id)}><History size={13} /></button>
+                          <button type="button" title="Ledger" className="rounded border border-[#e7d89f] bg-white p-1.5 text-gray-700 hover:bg-[#fff7de]" onClick={() => setPaymentQuickViewRow(row)}><BookText size={13} /></button>
+                          <button type="button" title="Edit" className="rounded border border-[#e7d89f] bg-white p-1.5 text-gray-700 hover:bg-[#fff7de]" onClick={() => { void openEdit(row) }}><Pencil size={13} /></button>
+                          {isAdmin && (
+                            <button type="button" title="Reverse Payment" className="rounded border border-amber-300 bg-amber-50 p-1.5 text-amber-800 hover:bg-amber-100" onClick={() => openReversePayment(row)}><Undo2 size={13} /></button>
+                          )}
+                          {row.status !== 'RETURNED' && (
+                            <button type="button" title="Mark Returned" className="rounded border border-amber-300 bg-amber-50 p-1.5 text-amber-800 hover:bg-amber-100" onClick={() => { if (confirm('Mark as returned?')) markReturnedMutation.mutate(row.id) }}><Undo2 size={13} /></button>
+                          )}
+                          {isAdmin && (
+                            <button type="button" title="Delete" className="rounded border border-red-300 bg-red-50 p-1.5 text-red-700 hover:bg-red-100" onClick={() => { if (confirm('Delete invoice?')) deleteMutation.mutate(row.id) }}><Trash2 size={13} /></button>
                           )}
                         </div>
                       </div>
 
                       {expanded && (
-                        <div
-                          className="px-5 pb-3 pt-2 bg-[#fffdf5] border-t text-xs text-gray-600 space-y-2"
-                          style={{ borderColor: '#f7f1d8' }}
-                          onClick={(e) => e.stopPropagation()}
-                        >
-                          <div className="grid grid-cols-1 md:grid-cols-2 gap-2 text-[11px]">
-                            <div className="rounded border border-amber-100 bg-white px-2 py-1">
-                              <p className="text-gray-400">Phone Number</p>
-                              <p className="font-medium text-gray-700">{row.phone_number || '—'}</p>
+                        <div className="space-y-3 border-t border-[#f1e7bf] bg-[#fffdf7] px-4 py-3 text-xs" onClick={(e) => e.stopPropagation()}>
+                          <div className="grid gap-3 lg:grid-cols-4">
+                            <div className="rounded-lg border border-[#efdca5] bg-white p-2">
+                              <p className="text-[10px] font-semibold tracking-wide text-[#866b2f]">DEVICE INFORMATION</p>
+                              <p className="mt-1 text-gray-700">Device Name: <strong>{row.device_model || row.service_name || '—'}</strong></p>
+                              <p className="text-gray-700">IMEI: <strong>{imeiText(row)}</strong></p>
+                              <p className="text-gray-700">Serial Number: <strong>{resolveSerial(row)}</strong></p>
+                              <p className="text-gray-700">Storage: <strong>{String((row as any).storage || '—')}</strong></p>
+                              <p className="text-gray-700">Color: <strong>{String((row as any).color || '—')}</strong></p>
+                              <p className="text-gray-700">Battery Health: <strong>{(row as any).battery_health ? `${(row as any).battery_health}%` : '—'}</strong></p>
+                              <p className="text-gray-700">Lock Status: <strong>{row.lock_status || '—'}</strong></p>
                             </div>
-                            <div className="rounded border border-amber-100 bg-white px-2 py-1">
-                              <p className="text-gray-400">IMEI</p>
-                              <p className="font-medium text-gray-700">{row.imei || '—'}</p>
+
+                            <div className="rounded-lg border border-[#efdca5] bg-white p-2">
+                              <p className="text-[10px] font-semibold tracking-wide text-[#866b2f]">CLIENT INFORMATION</p>
+                              <p className="mt-1 text-gray-700">Client Name: <strong>{row.client_name}</strong></p>
+                              <p className="text-gray-700">Phone: <strong>{row.phone_number || '—'}</strong></p>
+                              <p className="text-gray-700">Address: <strong>{String((row as any).client_address || '—')}</strong></p>
+                            </div>
+
+                            <div className="rounded-lg border border-[#efdca5] bg-white p-2">
+                              <p className="text-[10px] font-semibold tracking-wide text-[#866b2f]">FINANCIAL INFORMATION</p>
+                              <p className="mt-1 text-gray-700">Amount Charged: <strong>{formatCurrency(Number(row.total_amount || 0), currency)}</strong></p>
+                              <p className="text-gray-700">Amount Paid: <strong>{formatCurrency(Number(row.amount_paid || 0), currency)}</strong></p>
+                              <p className="text-gray-700">Outstanding: <strong>{formatCurrency(Number(row.balance || 0), currency)}</strong></p>
+                              <p className="text-gray-700">Payment Status: <strong>{statusLabel(row.status)}</strong></p>
+                            </div>
+
+                            <div className="rounded-lg border border-[#efdca5] bg-white p-2">
+                              <p className="text-[10px] font-semibold tracking-wide text-[#866b2f]">PAYMENT TIMELINE</p>
+                              <div className="mt-1 space-y-1 border-l border-amber-200 pl-2">
+                                <p className="text-gray-700">Invoice Created • {String(row.service_date || row.invoice_date || '').slice(0, 19).replace('T', ' ') || '—'}</p>
+                                <p className="text-gray-700">Payment Applied • {String(row.last_payment_at || '').slice(0, 19).replace('T', ' ') || '—'}</p>
+                                <p className="text-gray-700">WhatsApp Bill Sent • See WhatsApp History</p>
+                                <p className="text-gray-700">Returned • {String(row.returned_at || '').slice(0, 19).replace('T', ' ') || '—'}</p>
+                                <p className="text-gray-700">Edited • {String(row.last_edited_at || '').slice(0, 19).replace('T', ' ') || '—'}</p>
+                              </div>
                             </div>
                           </div>
-                          <div className="rounded border border-amber-100 bg-white px-2 py-1">
-                            <p className="text-gray-400">Notes</p>
-                            <p className="font-medium text-gray-700">{row.notes || '—'}</p>
+
+                          <div className="rounded-lg border border-[#efdca5] bg-white p-2">
+                            <div className="flex items-center justify-between gap-2">
+                              <p className="text-[10px] font-semibold tracking-wide text-[#866b2f]">NOTES</p>
+                              <button
+                                type="button"
+                                className="text-[10px] font-semibold text-[#866b2f] hover:underline"
+                                onClick={() => setExpandedNotesRows((prev) => {
+                                  const next = new Set(prev)
+                                  if (next.has(row.id)) next.delete(row.id)
+                                  else next.add(row.id)
+                                  return next
+                                })}
+                              >
+                                {notesExpanded ? 'Collapse' : 'Expand'}
+                              </button>
+                            </div>
+                            <p className={`text-gray-700 ${notesExpanded ? '' : 'line-clamp-2'}`}>{row.notes || '—'}</p>
                           </div>
-                          {isAdmin && <InvoicePaymentHistory invoiceId={row.id} currency={currency} />}
+
+                          <InvoicePaymentHistory invoiceId={row.id} currency={currency} />
                           <BillingWhatsAppHistory invoiceId={row.id} />
                           <BillingReturnHistory invoiceId={row.id} />
                         </div>
@@ -1276,17 +1383,15 @@ export default function Billing() {
                 })}
 
                 {visibleCount < flatRows.length && (
-                  <div ref={loadMoreRef} className="px-4 py-3 text-center text-xs text-gray-400">
-                    Loading more rows...
-                  </div>
+                  <div ref={loadMoreRef} className="px-4 py-3 text-center text-xs text-gray-400">Loading more rows...</div>
                 )}
               </div>
 
               <div className="md:hidden max-h-[76vh] overflow-y-auto space-y-2 p-2">
-                {flatRows.slice(0, visibleCount).map((entry) => {
+                {flatRows.slice(0, visibleCount).map((entry, idx) => {
                   if (entry.kind === 'separator') {
                     return (
-                      <div key={entry.key} className="sticky top-0 z-20 rounded border bg-[#fffdf5] px-3 py-1 text-xs font-medium text-gray-600" style={{ borderColor: '#f1e7bf' }}>
+                      <div key={entry.key} className="sticky top-0 z-20 rounded border bg-[#fffaf0] px-3 py-1 text-xs font-medium text-gray-600" style={{ borderColor: '#f1e7bf' }}>
                         {labelForDate(entry.group.service_date)}
                       </div>
                     )
@@ -1294,53 +1399,40 @@ export default function Billing() {
                   const row = entry.row
                   const expanded = expandedRows.has(row.id)
                   return (
-                    <div key={entry.key} className="rounded-lg border bg-white" style={{ borderColor: '#f1e7bf' }}>
-                      <div className="p-3 space-y-2" onClick={() => toggleRow(row.id)}>
+                    <div key={entry.key} className={`rounded-lg border bg-white ${idx % 2 === 0 ? '' : 'bg-[#fffdfa]'}`} style={{ borderColor: '#f1e7bf' }}>
+                      <div className="space-y-2 p-3" onClick={() => toggleRow(row.id)}>
                         <div className="flex items-start justify-between gap-2">
                           <div className="min-w-0">
-                            <p className="truncate text-sm font-semibold text-[#2b5c9a]">{row.client_name}</p>
+                            <p className="truncate text-sm font-semibold text-[#234d87]">{row.client_name}</p>
                             <p className="truncate text-xs text-gray-500">{row.phone_number || 'No phone'}</p>
                           </div>
                           <span className={operationStatusClass(row.status)}>{statusLabel(row.status)}</span>
                         </div>
-                        <div className="text-xs leading-tight">
-                          <p className="truncate font-medium text-gray-800">{row.device_model || '—'}</p>
-                          <p className="truncate text-gray-500">{row.service_name || '—'}</p>
-                          <p className="truncate text-gray-400">IMEI: {row.imei || '—'}</p>
+                        <div className="text-xs">
+                          <p className="truncate font-semibold text-gray-900">{row.device_model || row.service_name || '—'}</p>
+                          <p className="truncate text-gray-600">IMEI: {imeiText(row)}</p>
+                          <p className="truncate text-gray-500">Battery: {(row as any).battery_health ? `${(row as any).battery_health}%` : 'N/A'}</p>
+                          <p className="mt-1 text-gray-700">Amount {formatCurrency(Number(row.total_amount || 0), currency)} • Paid {formatCurrency(Number(row.amount_paid || 0), currency)} • Bal {formatCurrency(Number(row.balance || 0), currency)}</p>
                         </div>
-                        {isAdmin && financialStack(row)}
-                        <div className="flex items-center justify-between">
-                          <p className="text-xs text-gray-500">{row.assigned_staff_name || row.created_by_name || 'Unassigned'}</p>
-                          <div className="relative" onClick={(e) => e.stopPropagation()}>
-                            <button
-                              type="button"
-                              className="inline-flex items-center gap-1 rounded border px-2 py-1 text-[11px] text-gray-700"
-                              style={{ borderColor: '#e7d89f' }}
-                              onClick={() => setActionMenuRowId((prev) => (prev === row.id ? null : row.id))}
-                            >
-                              <MoreVertical size={14} /> Actions
-                            </button>
-                            {actionMenuRowId === row.id && (
-                              <div className="absolute right-0 top-[calc(100%+4px)] z-40 w-40 rounded-md border bg-white shadow-lg" style={{ borderColor: '#e7d89f' }}>
-                                <button type="button" className="w-full px-3 py-1.5 text-left text-[11px] hover:bg-gray-50" onClick={() => { setActionMenuRowId(null); void openEdit(row) }}>Edit</button>
-                                {isAdmin && <button type="button" className="w-full px-3 py-1.5 text-left text-[11px] hover:bg-gray-50" onClick={() => { setActionMenuRowId(null); openApplyPayment(row) }}>Apply Payment</button>}
-                                <button type="button" className="w-full px-3 py-1.5 text-left text-[11px] hover:bg-gray-50" onClick={() => { setActionMenuRowId(null); void openWhatsApp(row) }}>Send Bill</button>
-                                <button type="button" className="w-full px-3 py-1.5 text-left text-[11px] hover:bg-gray-50" onClick={() => { setActionMenuRowId(null); toggleRow(row.id) }}>View History</button>
-                                {row.status !== 'RETURNED' && <button type="button" className="w-full px-3 py-1.5 text-left text-[11px] text-amber-700 hover:bg-amber-50" onClick={() => { setActionMenuRowId(null); if (confirm('Mark as returned?')) markReturnedMutation.mutate(row.id) }}>Mark Returned</button>}
-                                {isAdmin && <button type="button" className="w-full px-3 py-1.5 text-left text-[11px] text-red-600 hover:bg-red-50" onClick={() => { setActionMenuRowId(null); if (confirm('Delete invoice?')) deleteMutation.mutate(row.id) }}>Delete</button>}
-                              </div>
-                            )}
-                          </div>
+                        <div className="flex flex-wrap items-center gap-1" onClick={(e) => e.stopPropagation()}>
+                          <button type="button" title="Apply Payment" className="rounded border border-[#e7d89f] bg-white p-1.5 text-gray-700" onClick={() => openApplyPayment(row)}><CircleDollarSign size={13} /></button>
+                          <button type="button" title="Send Bill" className="rounded border border-[#e7d89f] bg-white p-1.5 text-gray-700" onClick={() => { void openWhatsApp(row) }}><SendHorizontal size={13} /></button>
+                          <button type="button" title="Copy Bill" className="rounded border border-[#e7d89f] bg-white p-1.5 text-gray-700" onClick={() => { void copyBill(row) }}><Copy size={13} /></button>
+                          <button type="button" title="History" className="rounded border border-[#e7d89f] bg-white p-1.5 text-gray-700" onClick={() => toggleRow(row.id)}><History size={13} /></button>
+                          <button type="button" title="Ledger" className="rounded border border-[#e7d89f] bg-white p-1.5 text-gray-700" onClick={() => setPaymentQuickViewRow(row)}><BookText size={13} /></button>
+                          <button type="button" title="Edit" className="rounded border border-[#e7d89f] bg-white p-1.5 text-gray-700" onClick={() => { void openEdit(row) }}><Pencil size={13} /></button>
+                          {isAdmin && <button type="button" title="Reverse Payment" className="rounded border border-amber-300 bg-amber-50 p-1.5 text-amber-800" onClick={() => openReversePayment(row)}><Undo2 size={13} /></button>}
+                          {row.status !== 'RETURNED' && <button type="button" title="Mark Returned" className="rounded border border-amber-300 bg-amber-50 p-1.5 text-amber-800" onClick={() => { if (confirm('Mark as returned?')) markReturnedMutation.mutate(row.id) }}><Undo2 size={13} /></button>}
+                          {isAdmin && <button type="button" title="Delete" className="rounded border border-red-300 bg-red-50 p-1.5 text-red-700" onClick={() => { if (confirm('Delete invoice?')) deleteMutation.mutate(row.id) }}><Trash2 size={13} /></button>}
                         </div>
                       </div>
                       {expanded && (
-                        <div className="border-t bg-[#fffdf5] p-3 space-y-2 text-xs" style={{ borderColor: '#f1e7bf' }}>
-                          <div className="grid grid-cols-1 gap-2">
-                            <div className="rounded border border-amber-100 bg-white px-2 py-1"><p className="text-gray-400">Phone Number</p><p className="font-medium text-gray-700">{row.phone_number || '—'}</p></div>
-                            <div className="rounded border border-amber-100 bg-white px-2 py-1"><p className="text-gray-400">IMEI</p><p className="font-medium text-gray-700">{row.imei || '—'}</p></div>
-                            <div className="rounded border border-amber-100 bg-white px-2 py-1"><p className="text-gray-400">Notes</p><p className="font-medium text-gray-700">{row.notes || '—'}</p></div>
-                          </div>
-                          {isAdmin && <InvoicePaymentHistory invoiceId={row.id} currency={currency} />}
+                        <div className="space-y-2 border-t border-[#f1e7bf] bg-[#fffdf7] p-3 text-xs">
+                          <div className="rounded border border-[#efdca5] bg-white px-2 py-1"><p className="text-[10px] font-semibold text-[#866b2f]">DEVICE INFORMATION</p><p>{row.device_model || row.service_name || '—'}</p><p>IMEI: {imeiText(row)}</p><p>Battery Health: {(row as any).battery_health ? `${(row as any).battery_health}%` : '—'}</p></div>
+                          <div className="rounded border border-[#efdca5] bg-white px-2 py-1"><p className="text-[10px] font-semibold text-[#866b2f]">CLIENT INFORMATION</p><p>{row.client_name}</p><p>{row.phone_number || '—'}</p></div>
+                          <div className="rounded border border-[#efdca5] bg-white px-2 py-1"><p className="text-[10px] font-semibold text-[#866b2f]">FINANCIAL INFORMATION</p><p>Amount Charged: {formatCurrency(Number(row.total_amount || 0), currency)}</p><p>Amount Paid: {formatCurrency(Number(row.amount_paid || 0), currency)}</p><p>Outstanding: {formatCurrency(Number(row.balance || 0), currency)}</p></div>
+                          <div className="rounded border border-[#efdca5] bg-white px-2 py-1"><p className="text-[10px] font-semibold text-[#866b2f]">NOTES</p><p>{row.notes || '—'}</p></div>
+                          <InvoicePaymentHistory invoiceId={row.id} currency={currency} />
                           <BillingWhatsAppHistory invoiceId={row.id} />
                           <BillingReturnHistory invoiceId={row.id} />
                         </div>
@@ -1348,14 +1440,12 @@ export default function Billing() {
                     </div>
                   )
                 })}
-                {visibleCount < flatRows.length && (
-                  <div ref={loadMoreRef} className="px-4 py-2 text-center text-xs text-gray-400">Loading more rows...</div>
-                )}
+                {visibleCount < flatRows.length && <div ref={loadMoreRef} className="px-4 py-2 text-center text-xs text-gray-400">Loading more rows...</div>}
               </div>
             </section>
           )}
 
-          <div className="flex gap-2 justify-end">
+          <div className="flex items-center justify-end gap-2">
             <button disabled={page === 1} onClick={() => setParam('page', String(page - 1))} className="btn-secondary">Prev</button>
             <span className="text-sm text-gray-500 self-center">Page {page} of {groupedData?.total_pages ?? 1}</span>
             <button disabled={page >= (groupedData?.total_pages ?? 1)} onClick={() => setParam('page', String(page + 1))} className="btn-secondary">Next</button>
@@ -1421,6 +1511,7 @@ export default function Billing() {
             <div className="rounded-lg border bg-gray-50 px-3 py-2 text-xs" style={{ borderColor: '#e7d89f' }}>
               <p><span className="text-gray-500">Client:</span> <strong>{paymentQuickViewRow.client_name}</strong></p>
               <p><span className="text-gray-500">Service:</span> {paymentQuickViewRow.service_name}</p>
+              <p><span className="text-gray-500">IMEI:</span> {imeiText(paymentQuickViewRow)}</p>
               {isAdmin && <p><span className="text-gray-500">Balance:</span> <strong className="text-amber-700">{formatCurrency(Number(paymentQuickViewRow.balance || 0), currency)}</strong></p>}
             </div>
             <InvoicePaymentHistory invoiceId={paymentQuickViewRow.id} currency={currency} />
@@ -1756,12 +1847,13 @@ function InvoicePaymentHistory({ invoiceId, currency }: { invoiceId: string; cur
       ) : rows.length === 0 ? (
         <p className="text-[11px] text-gray-400">No payment transactions yet.</p>
       ) : (
-        <div className="space-y-1.5">
+        <div className="space-y-2 border-l border-amber-200 pl-3">
           {rows.slice(0, 10).map((payment) => {
             const amount = Number(payment.payment_amount ?? payment.amount ?? 0)
             const note = payment.payment_note || payment.notes || ''
             return (
-              <div key={payment.id} className="flex items-start justify-between gap-4 text-[11px]">
+              <div key={payment.id} className="relative flex items-start justify-between gap-4 text-[11px]">
+                <span className="absolute -left-[14px] top-1.5 h-2 w-2 rounded-full bg-amber-500" />
                 <div className="space-y-0.5">
                   <p className="font-medium text-gray-700">{payment.reference_no || payment.id.slice(0, 8)}</p>
                   <p className="text-gray-500">
@@ -1806,14 +1898,15 @@ function BillingWhatsAppHistory({ invoiceId }: { invoiceId: string }) {
       ) : items.length === 0 ? (
         <p className="text-[11px] text-gray-400">No WhatsApp activity recorded yet.</p>
       ) : (
-        <div className="space-y-1.5">
+        <div className="space-y-2 border-l border-amber-200 pl-3">
           {items.map((item) => {
             const label = String(item.action || '').replace(/_/g, ' ').toUpperCase() || 'EVENT'
             const when = String(item.created_at || '').slice(0, 19).replace('T', ' ')
             const detail = item.detail || {}
             const actor = detail.edited_by_name || detail.applied_by_name || detail.created_by_name || item.performed_by || ''
             return (
-              <div key={item.id} className="flex items-start justify-between gap-4 text-[11px]">
+              <div key={item.id} className="relative flex items-start justify-between gap-4 text-[11px]">
+                <span className="absolute -left-[14px] top-1.5 h-2 w-2 rounded-full bg-amber-500" />
                 <div>
                   <p className="font-medium text-gray-700">{label}</p>
                   <p className="text-gray-500">{when}{actor ? ` • ${actor}` : ''}</p>
@@ -1847,14 +1940,15 @@ function BillingReturnHistory({ invoiceId }: { invoiceId: string }) {
       ) : items.length === 0 ? (
         <p className="text-[11px] text-gray-400">No return activity recorded yet.</p>
       ) : (
-        <div className="space-y-1.5">
+        <div className="space-y-2 border-l border-amber-200 pl-3">
           {items.map((item) => {
             const label = String(item.action || '').replace(/_/g, ' ').toUpperCase() || 'EVENT'
             const when = String(item.created_at || '').slice(0, 19).replace('T', ' ')
             const detail = item.detail || {}
             const actor = detail.edited_by_name || detail.applied_by_name || detail.created_by_name || item.performed_by || ''
             return (
-              <div key={item.id} className="flex items-start justify-between gap-4 text-[11px]">
+              <div key={item.id} className="relative flex items-start justify-between gap-4 text-[11px]">
+                <span className="absolute -left-[14px] top-1.5 h-2 w-2 rounded-full bg-gray-500" />
                 <div>
                   <p className="font-medium text-gray-700">{label}</p>
                   <p className="text-gray-500">{when}{actor ? ` • ${actor}` : ''}</p>
