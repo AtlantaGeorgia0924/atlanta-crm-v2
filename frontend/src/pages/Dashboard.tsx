@@ -281,6 +281,7 @@ export default function Dashboard() {
   const totalSales = Number(statement?.total_sales ?? safeSummary.monthly_sales ?? 0)
   const totalCollected = Number(statement?.total_collected ?? 0)
   const outstanding = Number(statement?.amount_owed ?? safeSummary.amount_owed ?? 0)
+  const netProfit = Number(statement?.net_profit ?? safeSummary.net_profit ?? 0)
 
   const inventoryRows = useMemo<InventoryRow[]>(() => inventoryData?.items ?? inventoryData?.data ?? [], [inventoryData])
   const lowStockItems = useMemo<InventoryRow[]>(() => (lowStockData?.items ?? lowStockData?.data ?? []).slice(0, 8), [lowStockData])
@@ -500,6 +501,17 @@ export default function Dashboard() {
           <KpiCard key={card.title} {...card} />
         ))}
       </div>
+
+      {!isStaff ? (
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          <KpiCard
+            title="Net Profit"
+            value={formatCurrency(netProfit, 'NGN')}
+            icon={Wallet}
+            tone="green"
+          />
+        </div>
+      ) : null}
 
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
         {row2Cards.map((card) => (
