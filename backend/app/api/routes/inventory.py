@@ -188,6 +188,7 @@ def _serialize_item(row: dict) -> dict:
         "supplier_phone": row.get("supplier_phone") or extracted.get("supplier_phone"),
         "supplier_contact": row.get("supplier_contact") or extracted.get("supplier_contact"),
         "storage": row.get("storage"),
+        "battery_health": row.get("battery_health"),
         "color": row.get("color"),
         "location": row.get("location"),
         "product_status": product_status,
@@ -270,6 +271,7 @@ class StockCreate(BaseModel):
     supplier_phone: Optional[str] = None
     supplier_contact: Optional[str] = None
     storage: Optional[str] = None
+    battery_health: Optional[float] = None
     color: Optional[str] = None
     location: Optional[str] = None
     source: Optional[str] = "manual"
@@ -299,6 +301,7 @@ class StockUpdate(BaseModel):
     supplier_phone: Optional[str] = None
     supplier_contact: Optional[str] = None
     storage: Optional[str] = None
+    battery_health: Optional[float] = None
     color: Optional[str] = None
     location: Optional[str] = None
     is_active: Optional[bool] = None
@@ -652,6 +655,7 @@ def create_item(payload: StockCreate, _user=Depends(get_current_user)):
         "supplier_phone": _normalize_phone(raw_supplier_phone) or None,
         "supplier_contact": supplier_contact or None,
         "storage": data.get("storage"),
+        "battery_health": data.get("battery_health"),
         "color": data.get("color"),
         "location": data.get("location"),
         "payment_status": (data.get("payment_status") or "").upper() or None,
@@ -727,6 +731,7 @@ def create_items_bulk(payload: StockBulkCreate, _user=Depends(get_current_user))
                 "cost_price": data.get("unit_cost", 0),
                 "selling_price": data.get("unit_price", 0),
                 "storage": data.get("storage"),
+                "battery_health": data.get("battery_health"),
                 "color": data.get("color"),
                 "payment_status": (data.get("payment_status") or "").upper() or None,
                 "item_expense_amount": data.get("item_expense_amount", 0),

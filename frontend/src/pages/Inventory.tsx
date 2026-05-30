@@ -7,6 +7,7 @@ import Modal from '@/components/Modal'
 import LoadingSpinner from '@/components/LoadingSpinner'
 import { formatCurrency } from '@/lib/utils'
 import { buildIdempotencyKey } from '@/lib/idempotency'
+import { resolveImei } from '@/lib/imei'
 import { Plus, ShoppingCart, RotateCcw, X, RefreshCw, ChevronDown } from 'lucide-react'
 import toast from 'react-hot-toast'
 
@@ -18,6 +19,15 @@ function normalizeNigeriaPhone(raw: string): string {
   if (digits.startsWith('234') && digits.length >= 13) return digits
   if (digits.startsWith('0') && digits.length === 11) return '234' + digits.slice(1)
   return digits
+}
+
+function formatBatteryHealth(value: unknown): string {
+  if (value === null || value === undefined) return 'N/A'
+  const text = String(value).trim()
+  if (!text) return 'N/A'
+  const parsed = Number(text)
+  if (!Number.isFinite(parsed)) return 'N/A'
+  return `${parsed}%`
 }
 
 interface StockItem {
@@ -35,6 +45,7 @@ interface StockItem {
   supplier_phone?: string
   supplier_contact?: string
   storage?: string
+  battery_health?: number
   color?: string
   payment_status?: string
   product_status?: string
@@ -60,6 +71,7 @@ interface FormValues {
   supplier_phone?: string
   supplier_contact?: string
   storage?: string
+  battery_health?: number
   color?: string
   location?: string
   product_status?: string
@@ -140,6 +152,9 @@ interface InventorySaleHistoryRow {
   assigned_staff_name?: string
   created_by_name?: string
   is_reversed?: boolean
+  source_item_storage?: string
+  source_item_battery_health?: number
+  source_item_color?: string
 }
 
 const CART_STORAGE_KEY = 'inventory-cart'
@@ -314,6 +329,7 @@ export default function Inventory() {
         supplier_phone: values.supplier_phone?.trim() ? normalizeNigeriaPhone(values.supplier_phone.trim()) : undefined,
         supplier_contact: values.supplier_contact?.trim() || undefined,
         storage: values.storage?.trim() || undefined,
+        battery_health: Number.isFinite(Number(values.battery_health)) ? Number(values.battery_health) : undefined,
         color: values.color?.trim() || undefined,
         location: values.location?.trim() || undefined,
         payment_status: values.product_status?.trim() || undefined,
@@ -574,6 +590,7 @@ export default function Inventory() {
           unit_cost: Number(item.unit_cost ?? 0),
           unit_price: Number(item.unit_price ?? 0),
           color: item.color ? String(item.color) : undefined,
+          battery_health: Number.isFinite(Number(item.battery_health)) ? Number(item.battery_health) : undefined,
           reorder_level: Number(item.reorder_level ?? 0),
           product_status: item.product_status ? String(item.product_status) : (item.payment_status ? String(item.payment_status) : undefined),
         }))
@@ -617,8 +634,9 @@ export default function Inventory() {
 
   const variationLabel = (row: StockItem): string => {
     const storage = String(row.storage || '').trim() || 'N/A'
+    const batteryHealth = formatBatteryHealth(row.battery_health)
     const color = String(row.color || '').trim() || 'N/A'
-    return `${storage} ${color}`
+    return `${storage} ${batteryHealth} ${color}`
   }
 
   const groupedInventory = useMemo(() => {
@@ -699,7 +717,7 @@ export default function Inventory() {
       header: 'Attributes',
       render: (r: StockItem) => (
         <span className="text-xs text-gray-600">
-          {r.storage || 'N/A'}, {r.condition || 'N/A'}, {r.color || 'N/A'}
+          {r.storage || 'N/A'}, {formatBatteryHealth(r.battery_health)}, {r.color || 'N/A'}
         </span>
       ),
     },
@@ -1048,6 +1066,10 @@ export default function Inventory() {
                   <input type="text" className="form-input" placeholder="e.g. Black" {...register('color')} />
                 </div>
                 <div>
+                  <label className="form-label">Battery Health (%)</label>
+                  <input type="number" min="0" max="100" step="1" className="form-input" placeholder="e.g. 92" {...register('battery_health', { valueAsNumber: true })} />
+                </div>
+                <div>
                   <label className="form-label">Condition</label>
                   <input type="text" className="form-input" placeholder="e.g. Open Box" {...register('condition')} />
                 </div>
@@ -1337,6 +1359,13 @@ export default function Inventory() {
           })}
         >
           <div className="grid grid-cols-2 gap-3">
+            <div className="col-span-2 rounded-lg border border-gray-200 bg-gray-50 p-3 text-sm">
+              <p className="font-semibold text-gray-800">Device Attributes</p>
+              <p className="mt-1 text-xs text-gray-600">
+                {sellItem?.storage || 'N/A'}, {formatBatteryHealth(sellItem?.battery_health)}, {sellItem?.color || 'N/A'}
+              </p>
+              <p className="mt-1 text-xs text-gray-500">IMEI: {resolveImei(sellItem as any) || '—'}</p>
+            </div>
             <div>
               <label className="form-label">Quantity</label>
               <input type="number" step="0.01" min="0.01" className="form-input" {...registerSell('quantity', { valueAsNumber: true })} />
@@ -1422,6 +1451,13 @@ export default function Inventory() {
       >
         {salesHistoryLoading ? <LoadingSpinner /> : (
           <div className="space-y-3">
+            {salesHistoryItem && (
+              <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-xs text-gray-700">
+                <p className="font-medium">Item Attributes</p>
+                <p className="mt-1">{salesHistoryItem.storage || 'N/A'}, {formatBatteryHealth(salesHistoryItem.battery_health)}, {salesHistoryItem.color || 'N/A'}</p>
+                <p className="text-gray-500">IMEI: {resolveImei(salesHistoryItem as any) || '—'}</p>
+              </div>
+            )}
             <div className="overflow-x-auto rounded-xl border" style={{ borderColor: '#d4af37' }}>
               <table className="min-w-full text-sm">
                 <thead style={{ background: '#000000' }}>
@@ -1486,6 +1522,13 @@ export default function Inventory() {
       >
         {txLoading ? <LoadingSpinner /> : (
           <div className="space-y-3">
+            {historyItem && (
+              <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-xs text-gray-700">
+                <p className="font-medium">Item Attributes</p>
+                <p className="mt-1">{historyItem.storage || 'N/A'}, {formatBatteryHealth(historyItem.battery_health)}, {historyItem.color || 'N/A'}</p>
+                <p className="text-gray-500">IMEI: {resolveImei(historyItem as any) || '—'}</p>
+              </div>
+            )}
             <div className="overflow-x-auto rounded-xl border" style={{ borderColor: '#d4af37' }}>
               <table className="min-w-full text-sm">
                 <thead style={{ background: '#000000' }}>
