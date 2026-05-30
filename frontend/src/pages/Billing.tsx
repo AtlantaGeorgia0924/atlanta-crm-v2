@@ -1252,7 +1252,7 @@ export default function Billing() {
                 <div className="sticky top-0 z-30 grid grid-cols-[56px_1.25fr_1.9fr_0.95fr_0.95fr_0.95fr_1fr_0.95fr_240px] items-center gap-2 border-b border-[#eadca9] bg-[#121212] px-3 py-2 text-[11px] font-semibold uppercase tracking-wide text-[#f4dea5]">
                   <span>S/N</span>
                   <span>Client</span>
-                  <span>Device</span>
+                  <span>Description</span>
                   <span>Payment Status</span>
                   <span>Amount</span>
                   <span>Balance</span>
