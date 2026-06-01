@@ -473,9 +473,14 @@ def _propagate_inventory_device_metadata_to_service_job(sb, service_job_id: str,
     updates = {
         "imei": item.get("imei") or None,
         "device_model": item.get("item_name") or None,
+        "serial_number": item.get("serial_number") or None,
         "condition": item.get("condition") or None,
         "lock_status": item.get("lock_status") or None,
         "unlock_method": item.get("unlock_method") or None,
+        "storage": item.get("storage") or None,
+        "battery_health": item.get("battery_health") or None,
+        "color": item.get("color") or None,
+        "location": item.get("location") or None,
     }
 
     # Only fill missing values to avoid clobbering edited service rows.
