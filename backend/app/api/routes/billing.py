@@ -373,6 +373,9 @@ def _serialize_billing_row(row: dict, *, is_admin: bool = True) -> dict:
         or row.get("device_serial")
     )
     serialized["location"] = row.get("location")
+    serialized["storage"] = row.get("storage")
+    serialized["color"] = row.get("color")
+    serialized["battery_health"] = row.get("battery_health")
     return serialized if is_admin else _mask_financial_fields_for_staff(serialized)
 
 
@@ -623,6 +626,9 @@ class BillingCreate(BaseModel):
     condition: Optional[str] = None
     lock_status: Optional[str] = None
     location: Optional[str] = None
+    storage: Optional[str] = None
+    color: Optional[str] = None
+    battery_health: Optional[float] = None
     unlock_method: Optional[str] = None
 
 
@@ -648,6 +654,9 @@ class BillingUpdate(BaseModel):
     condition: Optional[str] = None
     lock_status: Optional[str] = None
     location: Optional[str] = None
+    storage: Optional[str] = None
+    color: Optional[str] = None
+    battery_health: Optional[float] = None
     unlock_method: Optional[str] = None
 
 
@@ -1463,6 +1472,9 @@ def create_billing(payload: BillingCreate, _user=Depends(get_current_user)):
         "condition": data.get("condition"),
         "lock_status": data.get("lock_status"),
         "location": data.get("location"),
+        "storage": data.get("storage"),
+        "color": data.get("color"),
+        "battery_health": data.get("battery_health"),
         "unlock_method": data.get("unlock_method"),
         "created_by": str(_user.id),
         "created_by_name": actor_name,

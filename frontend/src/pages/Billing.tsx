@@ -32,6 +32,9 @@ interface BillingRow {
   condition?: string
   lock_status?: string
   location?: string
+  storage?: string
+  color?: string
+  battery_health?: number
   quantity: number
   total_amount: number
   amount_charged?: number
@@ -96,6 +99,9 @@ interface FormValues {
   condition?: string
   lock_status?: string
   location?: string
+  storage?: string
+  color?: string
+  battery_health?: number
   payment_status?: string
   description: string
   quantity: number
@@ -323,16 +329,22 @@ export default function Billing() {
     const id = setTimeout(() => {
       const next = new URLSearchParams(searchParams)
       const trimmed = searchInput.trim()
+      const currentSearch = searchParams.get('search') || ''
+      const currentPage = searchParams.get('page') || '1'
+
       if (trimmed) {
         next.set('search', trimmed)
       } else {
         next.delete('search')
       }
       next.set('page', '1')
-      setSearchParams(next, { replace: true })
+
+      if (currentSearch !== trimmed || currentPage !== '1') {
+        setSearchParams(next, { replace: true })
+      }
     }, 300)
     return () => clearTimeout(id)
-  }, [searchInput]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [searchInput, searchParams, setSearchParams])
 
   const setParam = (key: string, value?: string) => {
     const next = new URLSearchParams(searchParams)
@@ -469,6 +481,9 @@ export default function Billing() {
         condition: values.condition?.trim() || undefined,
         lock_status: values.lock_status?.trim() || undefined,
         location: values.location?.trim() || undefined,
+        storage: values.storage?.trim() || undefined,
+        color: values.color?.trim() || undefined,
+        battery_health: Number.isFinite(Number(values.battery_health)) ? Number(values.battery_health) : undefined,
         payment_status: values.payment_status?.trim() || undefined,
         quantity: Number.isFinite(quantity) && quantity > 0 ? quantity : 1,
         unit_price: unitPrice,
@@ -647,6 +662,9 @@ export default function Billing() {
         condition: details?.condition ?? '',
         lock_status: details?.lock_status ?? '',
         location: details?.location ?? '',
+        storage: details?.storage ?? row.storage ?? '',
+        color: details?.color ?? row.color ?? '',
+        battery_health: Number.isFinite(Number(details?.battery_health ?? row.battery_health ?? undefined)) ? Number(details?.battery_health ?? row.battery_health) : undefined,
         payment_status: String(details?.payment_status || details?.status || row.payment_status || row.status || '').toUpperCase(),
         description: details?.description ?? '',
         quantity,
@@ -1030,6 +1048,9 @@ export default function Billing() {
       condition: '',
       lock_status: '',
       location: '',
+      storage: '',
+      color: '',
+      battery_health: undefined,
       payment_status: 'UNPAID',
       quantity: 1,
       unit_price: 0,
@@ -1642,6 +1663,18 @@ export default function Billing() {
           <div>
             <label className="form-label">Location</label>
             <input className="form-input" {...register('location')} placeholder="e.g. Lagos" />
+          </div>
+          <div>
+            <label className="form-label">Storage</label>
+            <input className="form-input" {...register('storage')} placeholder="e.g. 256GB" />
+          </div>
+          <div>
+            <label className="form-label">Color</label>
+            <input className="form-input" {...register('color')} placeholder="e.g. Black" />
+          </div>
+          <div>
+            <label className="form-label">Battery Health</label>
+            <input type="number" step="1" min="0" max="100" className="form-input" {...register('battery_health', { valueAsNumber: true })} placeholder="e.g. 89" />
           </div>
           <div>
             <label className="form-label">Quantity</label>
