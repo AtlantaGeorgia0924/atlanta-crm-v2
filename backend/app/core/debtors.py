@@ -32,6 +32,19 @@ def _row_oldest_key(row: dict) -> str:
     return str(row.get("created_at") or row.get("service_date") or "")
 
 
+def resolve_imei(row: dict) -> str:
+    value = (
+        row.get("imei")
+        or row.get("device_imei")
+        or row.get("imei_number")
+        or row.get("source_imei")
+        or row.get("imei1")
+        or row.get("imei_2")
+        or ""
+    )
+    return str(value or "").strip()
+
+
 def compute_debtors_from_supabase(sb) -> dict:
     """Compute grouped debtors from live service rows with phone-first grouping."""
     rows = _fetch_all_rows(sb, "service_jobs", "*")
@@ -158,7 +171,7 @@ def compute_debtors_from_supabase(sb) -> dict:
                 str(row.get("legacy_source_id") or ""),
                 str(row.get("invoice_id") or ""),
                 str(row.get("invoice_reference") or ""),
-                str(row.get("imei") or ""),
+                str(resolve_imei(row) or ""),
                 str(row.get("serial_number") or ""),
             ]
         ).strip()

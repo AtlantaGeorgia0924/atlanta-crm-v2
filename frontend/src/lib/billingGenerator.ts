@@ -1,9 +1,17 @@
+import { resolveImei } from '@/lib/imei'
+
 interface BillingItem {
   service_name: string
   service_date: string
   outstanding: number
   payment_status: string
   description?: string
+  imei?: string
+  device_imei?: string
+  imei_number?: string
+  source_imei?: string
+  imei1?: string
+  imei_2?: string
 }
 
 interface PaymentDetails {
@@ -111,8 +119,12 @@ export function generateBillingText(
   
   // Items
   items.forEach((item, index) => {
+    const imei = resolveImei(item)
     text += (index + 1) + '. ' + applyBoldItalic(item.service_name.toUpperCase()) + '\n'
     text += `   Date: ${formatDateVerbose(item.service_date)}\n`
+    if (imei) {
+      text += `   IMEI: ${imei}\n`
+    }
     text += `   Balance: ₦${formatCurrencyNoSymbol(item.outstanding)}\n`
     text += `   Status: ${item.payment_status}\n\n`
   })

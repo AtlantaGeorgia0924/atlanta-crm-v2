@@ -7,6 +7,7 @@ import Modal from '@/components/Modal'
 import LoadingSpinner from '@/components/LoadingSpinner'
 import { formatCurrency } from '@/lib/utils'
 import { generateBillingText, encodeWhatsAppText } from '@/lib/billingGenerator'
+import { resolveImei } from '@/lib/imei'
 import { DollarSign, FileText, Copy, Send, RefreshCw } from 'lucide-react'
 import toast from 'react-hot-toast'
 
@@ -33,6 +34,12 @@ interface LedgerItem {
   outstanding?: number
   payment_status: string
   notes?: string
+  imei?: string
+  device_imei?: string
+  imei_number?: string
+  source_imei?: string
+  imei1?: string
+  imei_2?: string
 }
 
 interface LedgerPayment {
@@ -247,6 +254,7 @@ export default function Debtors() {
       ...item,
       service_date: item.service_date || '',
       outstanding: Number(item.balance || item.outstanding || 0),
+      imei: resolveImei(item) || undefined,
     }))
     const generated = generateBillingText(
       selectedRow.client_name,
@@ -491,6 +499,7 @@ export default function Debtors() {
                                         ...item,
                                         service_date: item.service_date || '',
                                         outstanding: Number(item.balance || item.outstanding || 0),
+                                        imei: resolveImei(item) || undefined,
                                       }))
                                       const generated = generateBillingText(
                                         r.client_name,
@@ -514,6 +523,7 @@ export default function Debtors() {
                                         ...item,
                                         service_date: item.service_date || '',
                                         outstanding: Number(item.balance || item.outstanding || 0),
+                                        imei: resolveImei(item) || undefined,
                                       }))
                                       const generated = generateBillingText(
                                         r.client_name,
@@ -559,7 +569,7 @@ export default function Debtors() {
                                         <thead className="bg-gray-50 border-b">
                                           <tr>
                                             <th className="px-2 py-2 text-left">Date</th>
-                                            <th className="px-2 py-2 text-left">Service</th>
+                                            <th className="px-2 py-2 text-left">Service / Device</th>
                                             <th className="px-2 py-2 text-left">Status</th>
                                             <th className="px-2 py-2 text-right">Amount</th>
                                             <th className="px-2 py-2 text-right">Paid</th>
@@ -570,7 +580,10 @@ export default function Debtors() {
                                           {debtorServices.items.map((item) => (
                                             <tr key={item.id} className="border-b">
                                               <td className="px-2 py-2">{String(item.service_date || '').slice(0, 10)}</td>
-                                              <td className="px-2 py-2">{item.service_name}</td>
+                                              <td className="px-2 py-2">
+                                                <div className="font-medium">{item.service_name}</div>
+                                                <div className="text-[11px] text-gray-500">IMEI: {resolveImei(item) || '—'}</div>
+                                              </td>
                                               <td className="px-2 py-2">{item.payment_status}</td>
                                               <td className="px-2 py-2 text-right">{formatCurrency(Number(item.amount_charged || 0), currency)}</td>
                                               <td className="px-2 py-2 text-right">{formatCurrency(Number(item.paid_amount || 0), currency)}</td>
@@ -589,7 +602,10 @@ export default function Debtors() {
                                     <div className="max-h-44 overflow-y-auto space-y-1 text-xs">
                                       {(expandedLedger?.items || []).map((item) => (
                                         <div key={item.id} className="flex justify-between border-b border-gray-100 pb-1">
-                                          <span>{item.service_name}</span>
+                                          <span>
+                                            <span className="block">{item.service_name}</span>
+                                            <span className="block text-[11px] text-gray-500">IMEI: {resolveImei(item) || '—'}</span>
+                                          </span>
                                           <span className="font-medium text-red-600">{formatCurrency(Number(item.balance || item.outstanding || 0), currency)}</span>
                                         </div>
                                       ))}

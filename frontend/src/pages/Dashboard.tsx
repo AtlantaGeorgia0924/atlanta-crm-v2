@@ -121,6 +121,7 @@ interface KpiCardProps {
   hint?: string
   icon: LucideIcon
   tone?: 'neutral' | 'gold' | 'green' | 'blue' | 'purple'
+  sensitive?: boolean
 }
 
 type InventoryBucket = 'iPhones' | 'Samsung' | 'Google Pixel' | 'Accessories'
@@ -133,16 +134,18 @@ const toneMap: Record<NonNullable<KpiCardProps['tone']>, string> = {
   purple: 'bg-violet-50 border-violet-200 text-violet-800',
 }
 
-function KpiCard({ title, value, hint, icon: Icon, tone = 'neutral' }: KpiCardProps) {
+function KpiCard({ title, value, hint, icon: Icon, tone = 'neutral', sensitive = false }: KpiCardProps) {
   return (
-    <div className={`rounded-2xl border p-4 shadow-sm min-h-[118px] ${toneMap[tone]}`}>
+    <div className={`group rounded-2xl border p-4 shadow-sm min-h-[118px] ${toneMap[tone]}`}>
       <div className="flex items-start justify-between gap-3">
         <p className="text-xs font-semibold uppercase tracking-wide opacity-80">{title}</p>
         <div className="rounded-lg bg-black/5 p-2">
           <Icon size={16} />
         </div>
       </div>
-      <p className="mt-3 text-2xl font-bold leading-none">{value}</p>
+      <p className={`mt-3 text-2xl font-bold leading-none transition-opacity duration-200 ${sensitive ? 'opacity-0 group-hover:opacity-100' : 'opacity-100'}`}>
+        {value}
+      </p>
       {hint ? <p className="mt-2 text-xs opacity-80">{hint}</p> : null}
     </div>
   )
@@ -453,10 +456,10 @@ export default function Dashboard() {
         { title: 'Low Stock Count', value: lowStockItems.length, icon: ShieldAlert, tone: 'green' },
       ]
     : [
-        { title: 'Total Sales', value: formatCurrency(totalSales, 'NGN'), icon: Landmark, tone: 'gold' },
-        { title: 'Total Collected', value: formatCurrency(totalCollected, 'NGN'), icon: Wallet, tone: 'green' },
-        { title: 'Outstanding Balance', value: formatCurrency(outstanding, 'NGN'), icon: ShieldAlert, tone: 'blue' },
-        { title: 'Inventory Value', value: formatCurrency(inventoryValue, 'NGN'), icon: Boxes, tone: 'purple' },
+        { title: 'Total Sales', value: formatCurrency(totalSales, 'NGN'), icon: Landmark, tone: 'gold', sensitive: true },
+        { title: 'Total Collected', value: formatCurrency(totalCollected, 'NGN'), icon: Wallet, tone: 'green', sensitive: true },
+        { title: 'Outstanding Balance', value: formatCurrency(outstanding, 'NGN'), icon: ShieldAlert, tone: 'blue', sensitive: true },
+        { title: 'Inventory Value', value: formatCurrency(inventoryValue, 'NGN'), icon: Boxes, tone: 'purple', sensitive: true },
       ]
 
   const row2Cards: KpiCardProps[] = [
@@ -509,6 +512,7 @@ export default function Dashboard() {
             value={formatCurrency(netProfit, 'NGN')}
             icon={Wallet}
             tone="green"
+            sensitive={true}
           />
         </div>
       ) : null}

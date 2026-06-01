@@ -39,6 +39,19 @@ def _normalize_search_term(value: Optional[str]) -> str:
     return re.sub(r"\s+", " ", text)
 
 
+def resolve_imei(row: dict) -> str:
+    value = (
+        row.get("imei")
+        or row.get("device_imei")
+        or row.get("imei_number")
+        or row.get("source_imei")
+        or row.get("imei1")
+        or row.get("imei_2")
+        or ""
+    )
+    return str(value or "").strip()
+
+
 def _service_job_columns(sb) -> set[str]:
     global _SERVICE_JOB_COLUMNS_CACHE
     if _SERVICE_JOB_COLUMNS_CACHE is not None:
@@ -138,7 +151,7 @@ def _inventory_search_service_ids(sb, term: str) -> list[str]:
     wildcard = "%" + "%".join(term.split()) + "%"
 
     inventory_columns = _inventory_item_columns(sb)
-    search_fields = ["item_name", "imei", "sku", "supplier", "unlock_method"]
+    search_fields = ["item_name", "imei", "imei1", "imei_2", "sku", "supplier", "unlock_method"]
     clauses = [f"{field}.ilike.{wildcard}" for field in search_fields if field in inventory_columns]
     if not clauses:
         return []
@@ -224,7 +237,14 @@ def _apply_service_search_filters(sb, query, raw_search: Optional[str]):
         "invoice_id",
         "invoice_reference",
         "imei",
+        "device_imei",
+        "imei_number",
+        "source_imei",
+        "imei1",
+        "imei_2",
         "serial_number",
+        "serial_no",
+        "device_serial",
         "device_model",
         "model",
         "condition",
@@ -346,6 +366,13 @@ def _serialize_billing_row(row: dict, *, is_admin: bool = True) -> dict:
     serialized["last_payment_at"] = row.get("last_payment_at")
     serialized["assigned_staff_id"] = row.get("assigned_staff_id")
     serialized["assigned_staff_name"] = row.get("assigned_staff_name")
+    serialized["imei"] = resolve_imei(row) or None
+    serialized["serial_number"] = (
+        row.get("serial_number")
+        or row.get("serial_no")
+        or row.get("device_serial")
+    )
+    serialized["location"] = row.get("location")
     return serialized if is_admin else _mask_financial_fields_for_staff(serialized)
 
 
@@ -595,6 +622,7 @@ class BillingCreate(BaseModel):
     serial_number: Optional[str] = None
     condition: Optional[str] = None
     lock_status: Optional[str] = None
+    location: Optional[str] = None
     unlock_method: Optional[str] = None
 
 
@@ -619,6 +647,7 @@ class BillingUpdate(BaseModel):
     serial_number: Optional[str] = None
     condition: Optional[str] = None
     lock_status: Optional[str] = None
+    location: Optional[str] = None
     unlock_method: Optional[str] = None
 
 
@@ -893,7 +922,7 @@ def _open_client_invoices(sb, client_name: str, phone_number: Optional[str] = No
     try:
         query = (
             sb.table("service_jobs")
-            .select("id,client_name,service_name,description,service_date,due_date,amount_charged,paid_amount,payment_status,is_return,notes,phone_number,created_at")
+            .select("id,client_name,service_name,description,service_date,due_date,amount_charged,paid_amount,payment_status,is_return,notes,phone_number,created_at,invoice_id,imei,device_imei,imei_number,source_imei,imei1,imei_2,serial_number")
             .in_("payment_status", ["UNPAID", "PART PAYMENT", "PARTIAL"])
             .order("service_date")
             .order("created_at")
@@ -903,7 +932,7 @@ def _open_client_invoices(sb, client_name: str, phone_number: Optional[str] = No
     except Exception:
         query = (
             sb.table("service_jobs")
-            .select("id,client_name,service_name,description,service_date,due_date,amount_charged,paid_amount,payment_status,is_return,notes,created_at")
+            .select("id,client_name,service_name,description,service_date,due_date,amount_charged,paid_amount,payment_status,is_return,notes,created_at,invoice_id,imei,device_imei,imei_number,source_imei,imei1,imei_2,serial_number")
             .in_("payment_status", ["UNPAID", "PART PAYMENT", "PARTIAL"])
             .order("service_date")
             .order("created_at")
@@ -936,7 +965,7 @@ def _open_client_invoices(sb, client_name: str, phone_number: Optional[str] = No
                 "notes": row.get("notes"),
                 "phone_number": row.get("phone_number") or row.get("phone"),
                 "invoice_id": row.get("invoice_id"),
-                "imei": row.get("imei"),
+                "imei": resolve_imei(row) or None,
                 "serial_number": row.get("serial_number"),
             }
         )
@@ -949,7 +978,7 @@ def _all_client_services(sb, client_name: str, phone_number: Optional[str] = Non
     try:
         query = (
             sb.table("service_jobs")
-            .select("id,client_name,phone_number,service_name,description,service_date,created_at,amount_charged,paid_amount,payment_status,is_return,notes,invoice_id,imei,serial_number")
+            .select("id,client_name,phone_number,service_name,description,service_date,created_at,amount_charged,paid_amount,payment_status,is_return,notes,invoice_id,imei,device_imei,imei_number,source_imei,imei1,imei_2,serial_number")
             .order("service_date", desc=True)
             .order("created_at", desc=True)
             .limit(2000)
@@ -983,7 +1012,7 @@ def _all_client_services(sb, client_name: str, phone_number: Optional[str] = Non
                 "payment_status": _normalize_payment_status(row.get("payment_status")),
                 "is_return": bool(row.get("is_return")),
                 "invoice_id": row.get("invoice_id"),
-                "imei": row.get("imei"),
+                "imei": resolve_imei(row) or None,
                 "serial_number": row.get("serial_number"),
                 "phone_number": row.get("phone_number"),
                 "notes": row.get("notes"),
@@ -1076,7 +1105,7 @@ def list_debtor_services(
                     str(row.get("service_name") or ""),
                     str(row.get("description") or ""),
                     str(row.get("invoice_id") or ""),
-                    str(row.get("imei") or ""),
+                    str(resolve_imei(row) or ""),
                     str(row.get("serial_number") or ""),
                     str(row.get("id") or ""),
                 ]
@@ -1433,6 +1462,7 @@ def create_billing(payload: BillingCreate, _user=Depends(get_current_user)):
         "serial_number": data.get("serial_number"),
         "condition": data.get("condition"),
         "lock_status": data.get("lock_status"),
+        "location": data.get("location"),
         "unlock_method": data.get("unlock_method"),
         "created_by": str(_user.id),
         "created_by_name": actor_name,

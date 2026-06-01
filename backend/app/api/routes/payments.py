@@ -13,7 +13,7 @@ from app.core.payments_engine import (
     reverse_invoice_payment,
 )
 
-router = APIRouter(dependencies=[Depends(require_admin)])
+router = APIRouter()
 
 
 def _log_payment_audit(sb, *, action: str, service_job_id: str, performed_by: str, detail: dict | None = None) -> bool:
@@ -184,6 +184,7 @@ def apply_payment(payload: PaymentCreate, _user=Depends(get_current_user)):
 @router.post("/reverse", status_code=201)
 def reverse_payment(payload: PaymentReverse, _user=Depends(get_current_user)):
     """Reverse an applied payment amount and persist reversal transaction."""
+    require_admin(_user)
     if not str(payload.idempotency_key or "").strip():
         raise HTTPException(422, "idempotency_key is required")
 

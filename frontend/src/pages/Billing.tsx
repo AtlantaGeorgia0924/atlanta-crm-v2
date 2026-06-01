@@ -31,6 +31,7 @@ interface BillingRow {
   serial_number?: string
   condition?: string
   lock_status?: string
+  location?: string
   quantity: number
   total_amount: number
   amount_charged?: number
@@ -94,6 +95,7 @@ interface FormValues {
   serial_number?: string
   condition?: string
   lock_status?: string
+  location?: string
   payment_status?: string
   description: string
   quantity: number
@@ -466,6 +468,7 @@ export default function Billing() {
         serial_number: values.serial_number?.trim() || undefined,
         condition: values.condition?.trim() || undefined,
         lock_status: values.lock_status?.trim() || undefined,
+        location: values.location?.trim() || undefined,
         payment_status: values.payment_status?.trim() || undefined,
         quantity: Number.isFinite(quantity) && quantity > 0 ? quantity : 1,
         unit_price: unitPrice,
@@ -643,6 +646,7 @@ export default function Billing() {
         serial_number: details?.serial_number ?? '',
         condition: details?.condition ?? '',
         lock_status: details?.lock_status ?? '',
+        location: details?.location ?? '',
         payment_status: String(details?.payment_status || details?.status || row.payment_status || row.status || '').toUpperCase(),
         description: details?.description ?? '',
         quantity,
@@ -1025,6 +1029,7 @@ export default function Billing() {
       serial_number: '',
       condition: '',
       lock_status: '',
+      location: '',
       payment_status: 'UNPAID',
       quantity: 1,
       unit_price: 0,
@@ -1633,6 +1638,10 @@ export default function Billing() {
           <div>
             <label className="form-label">Lock Status</label>
             <input className="form-input" {...register('lock_status')} placeholder="e.g. Unlocked" />
+          </div>
+          <div>
+            <label className="form-label">Location</label>
+            <input className="form-input" {...register('location')} placeholder="e.g. Lagos" />
           </div>
           <div>
             <label className="form-label">Quantity</label>
