@@ -34,8 +34,10 @@ interface StockItem {
   id: string
   item_name: string
   imei?: string
+  serial_number?: string
   sku: string
   category: string
+  description?: string
   quantity: number
   unit: string
   unit_cost: number
@@ -47,6 +49,7 @@ interface StockItem {
   storage?: string
   battery_health?: number
   color?: string
+  location?: string
   payment_status?: string
   product_status?: string
   sold_out?: boolean
@@ -159,6 +162,31 @@ interface InventorySaleHistoryRow {
 
 const CART_STORAGE_KEY = 'inventory-cart'
 
+const DEFAULT_PRODUCT_FORM_VALUES: FormValues = {
+  item_name: '',
+  imei: '',
+  sku: '',
+  category: '',
+  description: '',
+  quantity: 1,
+  unit: 'pcs',
+  unit_cost: 0,
+  unit_price: undefined,
+  reorder_level: 0,
+  supplier: '',
+  supplier_phone: '',
+  supplier_contact: '',
+  storage: '',
+  battery_health: undefined,
+  color: '',
+  location: '',
+  product_status: 'AVAILABLE',
+  condition: '',
+  lock_status: '',
+  previously_locked: false,
+  unlock_method: '',
+}
+
 export default function Inventory() {
   const qc = useQueryClient()
   const [search, setSearch] = useState('')
@@ -189,6 +217,7 @@ export default function Inventory() {
   const [expandedModelGroups, setExpandedModelGroups] = useState<Set<string>>(new Set())
   const [actionMenuItemId, setActionMenuItemId] = useState<string | null>(null)
   const [isRefreshing, setIsRefreshing] = useState(false)
+  const [loadingEditItemId, setLoadingEditItemId] = useState<string | null>(null)
   const [cart, setCart] = useState<CartItem[]>(() => {
     try {
       const parsed = JSON.parse(localStorage.getItem(CART_STORAGE_KEY) || '[]')
@@ -345,7 +374,7 @@ export default function Inventory() {
       qc.invalidateQueries({ queryKey: ['inventory'] })
       qc.invalidateQueries({ queryKey: ['inventory-groups'] })
       qc.invalidateQueries({ queryKey: ['dashboard'] })
-      setShowForm(false); setEditRow(null); reset()
+      setShowForm(false); setEditRow(null); reset(DEFAULT_PRODUCT_FORM_VALUES)
       setSupplierQuery('')
     },
     onError: (e: any) => toast.error(e?.response?.data?.detail ?? 'Save failed'),
@@ -449,19 +478,45 @@ export default function Inventory() {
     onError: (e: any) => toast.error(e?.response?.data?.detail ?? 'Reversal failed'),
   })
 
-  const openEdit = (row: StockItem) => {
-    setEditRow(row)
-    setCreateMode('single')
-    reset({
-      ...row,
-      product_status: row.product_status || row.payment_status || 'AVAILABLE',
-      condition: row.condition || '',
-      lock_status: row.lock_status || '',
-      previously_locked: row.previously_locked ?? false,
-      unlock_method: row.unlock_method || '',
-    })
-    setSupplierQuery(row.supplier || '')
-    setShowForm(true)
+  const openEdit = async (row: StockItem) => {
+    setLoadingEditItemId(row.id)
+    try {
+      const details = await api.get<StockItem>(`/inventory/${row.id}`).then((response) => response.data)
+      const product = details ?? row
+
+      setEditRow(product)
+      setCreateMode('single')
+      reset({
+        item_name: product.item_name || '',
+        imei: product.imei || '',
+        sku: product.sku || '',
+        category: product.category || '',
+        description: product.description || '',
+        quantity: Number(product.quantity ?? 0),
+        unit: product.unit || 'pcs',
+        unit_cost: Number(product.unit_cost ?? 0),
+        unit_price: Number.isFinite(Number(product.unit_price)) ? Number(product.unit_price) : undefined,
+        reorder_level: Number(product.reorder_level ?? 0),
+        supplier: product.supplier || '',
+        supplier_phone: product.supplier_phone || '',
+        supplier_contact: product.supplier_contact || '',
+        storage: product.storage || '',
+        battery_health: Number.isFinite(Number(product.battery_health)) ? Number(product.battery_health) : undefined,
+        color: product.color || '',
+        location: product.location || '',
+        product_status: product.product_status || product.payment_status || 'AVAILABLE',
+        condition: product.condition || '',
+        lock_status: product.lock_status || '',
+        previously_locked: product.previously_locked ?? false,
+        unlock_method: product.unlock_method || '',
+      })
+      setSupplierQuery(product.supplier || '')
+      setShowForm(true)
+    } catch (e: any) {
+      toast.error(e?.response?.data?.detail ?? 'Unable to load product details')
+    } finally {
+      setLoadingEditItemId(null)
+    }
   }
 
   const openSell = (row: StockItem) => {
@@ -716,9 +771,10 @@ export default function Inventory() {
       key: 'attributes',
       header: 'Attributes',
       render: (r: StockItem) => (
-        <span className="text-xs text-gray-600">
-          {r.storage || 'N/A'}, {formatBatteryHealth(r.battery_health)}, {r.color || 'N/A'}
-        </span>
+        <div className="leading-tight text-xs text-gray-600">
+          <div>{r.storage || 'N/A'}, {formatBatteryHealth(r.battery_health)}, {r.color || 'N/A'}</div>
+          <div>{r.condition || 'N/A'}, {r.lock_status || 'N/A'}, {r.location || 'N/A'}</div>
+        </div>
       ),
     },
     {
@@ -740,7 +796,9 @@ export default function Inventory() {
               <button type="button" className="block w-full px-3 py-2 text-left text-xs hover:bg-[#fff9e7]" onClick={() => { setActionMenuItemId(null); addToCart(r) }}>Add To Cart</button>
               <button type="button" className="block w-full px-3 py-2 text-left text-xs hover:bg-[#fff9e7]" onClick={() => { setActionMenuItemId(null); openSalesHistory(r) }}>Sales History</button>
               <button type="button" className="block w-full px-3 py-2 text-left text-xs hover:bg-[#fff9e7]" onClick={() => { setActionMenuItemId(null); openHistory(r) }}>Transaction History</button>
-              <button type="button" className="block w-full px-3 py-2 text-left text-xs hover:bg-[#fff9e7]" onClick={() => { setActionMenuItemId(null); openEdit(r) }}>Edit</button>
+              <button type="button" className="block w-full px-3 py-2 text-left text-xs hover:bg-[#fff9e7]" onClick={() => { setActionMenuItemId(null); void openEdit(r) }}>
+                {loadingEditItemId === r.id ? 'Loading…' : 'Edit'}
+              </button>
               <button type="button" className="block w-full px-3 py-2 text-left text-xs text-red-600 hover:bg-red-50" onClick={() => { setActionMenuItemId(null); if (confirm('Remove item?')) deleteMutation.mutate(r.id) }}>Delete</button>
             </div>
           )}
@@ -770,7 +828,7 @@ export default function Inventory() {
             onClick={() => {
               setEditRow(null)
               setCreateMode('single')
-              reset({ quantity: 1, unit: 'pcs', unit_cost: 0, reorder_level: 0, product_status: 'AVAILABLE', previously_locked: false })
+              reset(DEFAULT_PRODUCT_FORM_VALUES)
               setSupplierQuery('')
               setShowForm(true)
             }}
@@ -924,13 +982,13 @@ export default function Inventory() {
       <Modal
         title={editRow ? 'Edit Product' : 'Add Product'}
         open={showForm}
-        onClose={() => { setShowForm(false); reset(); setSupplierQuery('') }}
+        onClose={() => { setShowForm(false); reset(DEFAULT_PRODUCT_FORM_VALUES); setSupplierQuery('') }}
         size="lg"
         bodyClassName="overflow-y-auto max-h-[70vh]"
         footer={
           (editRow || createMode === 'single') ? (
             <div className="flex justify-end gap-2 pt-3 border-t">
-              <button type="button" className="btn-secondary" onClick={() => { setShowForm(false); reset(); setSupplierQuery('') }}>Cancel</button>
+              <button type="button" className="btn-secondary" onClick={() => { setShowForm(false); reset(DEFAULT_PRODUCT_FORM_VALUES); setSupplierQuery('') }}>Cancel</button>
               <button type="submit" form="product-form" className="btn-primary" disabled={saveMutation.isPending}>
                 {saveMutation.isPending ? 'Saving…' : 'Save'}
               </button>

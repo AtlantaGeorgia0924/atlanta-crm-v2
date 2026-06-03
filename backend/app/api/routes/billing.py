@@ -372,6 +372,8 @@ def _serialize_billing_row(row: dict, *, is_admin: bool = True) -> dict:
         or row.get("serial_no")
         or row.get("device_serial")
     )
+    serialized["condition"] = row.get("condition")
+    serialized["lock_status"] = row.get("lock_status")
     serialized["location"] = row.get("location")
     serialized["storage"] = row.get("storage")
     serialized["color"] = row.get("color")
@@ -695,47 +697,44 @@ def list_billing(
     if not is_admin and _staff_scope_enabled(sb):
         query = query.eq("created_by", str(_user.id))
 
-    query, has_search = _apply_service_search_filters(sb, query, search)
+    query, _has_search = _apply_service_search_filters(sb, query, search)
 
-    if not has_search:
-        normalized_status_input = (payment_status or status or "").strip()
-        if normalized_status_input:
-            normalized = normalized_status_input.upper()
-            if normalized in {"PARTIAL", "PART PAYMENT"}:
-                query = query.in_("payment_status", ["PARTIAL", "PART PAYMENT"])
-            else:
-                query = query.eq("payment_status", normalized)
-        if client_id:
-            query = query.eq("client_id", client_id)
-        if created_by:
-            query = query.eq("created_by", created_by)
-        if edited_by:
-            query = query.eq("last_edited_by", edited_by)
-        if assigned_staff:
-            query = query.eq("assigned_staff_id", assigned_staff)
+    normalized_status_input = (payment_status or status or "").strip()
+    if normalized_status_input:
+        normalized = normalized_status_input.upper()
+        if normalized in {"PARTIAL", "PART PAYMENT"}:
+            query = query.in_("payment_status", ["PARTIAL", "PART PAYMENT"])
+        else:
+            query = query.eq("payment_status", normalized)
+    if client_id:
+        query = query.eq("client_id", client_id)
+    if created_by:
+        query = query.eq("created_by", created_by)
+    if edited_by:
+        query = query.eq("last_edited_by", edited_by)
+    if assigned_staff:
+        query = query.eq("assigned_staff_id", assigned_staff)
 
-    # Search defaults to global (all dates). Date filters apply only when not searching.
     effective_from = from_date or date_from
     effective_to = to_date or date_to
-    if effective_from and not has_search:
+    if effective_from:
         query = query.gte("service_date", _iso_date_or_none(effective_from))
-    if effective_to and not has_search:
+    if effective_to:
         query = query.lte("service_date", _iso_date_or_none(effective_to))
     if min_amount is not None:
         query = query.gte("amount_charged", min_amount)
     if max_amount is not None:
         query = query.lte("amount_charged", max_amount)
-    if not has_search:
-        effective_is_return = is_return if is_return is not None else returned
-        if effective_is_return is not None:
-            query = query.eq("is_return", effective_is_return)
+    effective_is_return = is_return if is_return is not None else returned
+    if effective_is_return is not None:
+        query = query.eq("is_return", effective_is_return)
 
-        if paid_state:
-            normalized_paid = paid_state.strip().lower()
-            if normalized_paid == "paid":
-                query = query.eq("payment_status", "PAID")
-            elif normalized_paid in {"unpaid", "not_paid"}:
-                query = query.neq("payment_status", "PAID")
+    if paid_state:
+        normalized_paid = paid_state.strip().lower()
+        if normalized_paid == "paid":
+            query = query.eq("payment_status", "PAID")
+        elif normalized_paid in {"unpaid", "not_paid"}:
+            query = query.neq("payment_status", "PAID")
 
     result = query.execute()
     rows = [_serialize_billing_row(row, is_admin=is_admin) for row in (result.data or [])]
@@ -789,46 +788,43 @@ def list_billing_grouped(
     if not is_admin and _staff_scope_enabled(sb):
         query = query.eq("created_by", str(_user.id))
 
-    query, has_search = _apply_service_search_filters(sb, query, search)
+    query, _has_search = _apply_service_search_filters(sb, query, search)
 
-    if not has_search:
-        normalized_status_input = (payment_status or status or "").strip()
-        if normalized_status_input:
-            normalized = normalized_status_input.upper()
-            if normalized in {"PARTIAL", "PART PAYMENT"}:
-                query = query.in_("payment_status", ["PARTIAL", "PART PAYMENT"])
-            else:
-                query = query.eq("payment_status", normalized)
-        if client_id:
-            query = query.eq("client_id", client_id)
-        if created_by:
-            query = query.eq("created_by", created_by)
-        if edited_by:
-            query = query.eq("last_edited_by", edited_by)
-        if assigned_staff:
-            query = query.eq("assigned_staff_id", assigned_staff)
+    normalized_status_input = (payment_status or status or "").strip()
+    if normalized_status_input:
+        normalized = normalized_status_input.upper()
+        if normalized in {"PARTIAL", "PART PAYMENT"}:
+            query = query.in_("payment_status", ["PARTIAL", "PART PAYMENT"])
+        else:
+            query = query.eq("payment_status", normalized)
+    if client_id:
+        query = query.eq("client_id", client_id)
+    if created_by:
+        query = query.eq("created_by", created_by)
+    if edited_by:
+        query = query.eq("last_edited_by", edited_by)
+    if assigned_staff:
+        query = query.eq("assigned_staff_id", assigned_staff)
 
-    # Search defaults to global (all dates). Date filters apply only when not searching.
     effective_from = from_date or date_from
     effective_to = to_date or date_to
-    if effective_from and not has_search:
+    if effective_from:
         query = query.gte("service_date", _iso_date_or_none(effective_from))
-    if effective_to and not has_search:
+    if effective_to:
         query = query.lte("service_date", _iso_date_or_none(effective_to))
     if min_amount is not None:
         query = query.gte("amount_charged", min_amount)
     if max_amount is not None:
         query = query.lte("amount_charged", max_amount)
-    if not has_search:
-        effective_is_return = is_return if is_return is not None else returned
-        if effective_is_return is not None:
-            query = query.eq("is_return", effective_is_return)
-        if paid_state:
-            normalized_paid = paid_state.strip().lower()
-            if normalized_paid == "paid":
-                query = query.eq("payment_status", "PAID")
-            elif normalized_paid in {"unpaid", "not_paid"}:
-                query = query.neq("payment_status", "PAID")
+    effective_is_return = is_return if is_return is not None else returned
+    if effective_is_return is not None:
+        query = query.eq("is_return", effective_is_return)
+    if paid_state:
+        normalized_paid = paid_state.strip().lower()
+        if normalized_paid == "paid":
+            query = query.eq("payment_status", "PAID")
+        elif normalized_paid in {"unpaid", "not_paid"}:
+            query = query.neq("payment_status", "PAID")
     result = query.execute()
     rows = result.data or []
 

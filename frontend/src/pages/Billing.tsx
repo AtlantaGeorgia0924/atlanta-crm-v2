@@ -301,17 +301,18 @@ export default function Billing() {
 
   const [searchInput, setSearchInput] = useState(search)
   const normalizedSearch = search.trim()
-  const isRangeMode = !normalizedSearch && !!rangeFrom && !!rangeTo && rangeFrom !== rangeTo
-  const effectiveFrom = normalizedSearch ? undefined : (isRangeMode ? rangeFrom : selectedDate)
-  const effectiveTo = normalizedSearch ? undefined : (isRangeMode ? rangeTo : selectedDate)
-  const effectiveStatusFilter = normalizedSearch ? '' : statusFilter
-  const effectiveReturned = normalizedSearch ? '' : returned
-  const effectivePaidState = normalizedSearch ? '' : paidState
-  const effectiveCreatedBy = normalizedSearch ? '' : createdBy
-  const effectiveEditedBy = normalizedSearch ? '' : editedBy
-  const effectiveAssignedStaff = normalizedSearch ? '' : assignedStaff
-  const effectiveMinAmount = normalizedSearch ? '' : minAmount
-  const effectiveMaxAmount = normalizedSearch ? '' : maxAmount
+  const hasSearch = normalizedSearch.length > 0
+  const isRangeMode = !!rangeFrom && !!rangeTo && rangeFrom !== rangeTo
+  const effectiveFrom = isRangeMode ? rangeFrom : selectedDate
+  const effectiveTo = isRangeMode ? rangeTo : selectedDate
+  const effectiveStatusFilter = statusFilter
+  const effectiveReturned = returned
+  const effectivePaidState = paidState
+  const effectiveCreatedBy = createdBy
+  const effectiveEditedBy = editedBy
+  const effectiveAssignedStaff = assignedStaff
+  const effectiveMinAmount = minAmount
+  const effectiveMaxAmount = maxAmount
 
   const { register, handleSubmit, reset, setValue, formState: { errors } } = useForm<FormValues>()
 
@@ -354,25 +355,82 @@ export default function Billing() {
     setSearchParams(next, { replace: true })
   }
 
+  const groupedQueryParams = useMemo(
+    () => ({
+      page,
+      page_size: hasSearch ? 500 : 200,
+      payment_status: effectiveStatusFilter || undefined,
+      search: search || undefined,
+      from_date: effectiveFrom || undefined,
+      to_date: effectiveTo || undefined,
+      min_amount: effectiveMinAmount || undefined,
+      max_amount: effectiveMaxAmount || undefined,
+      is_return: effectiveReturned === '' ? undefined : effectiveReturned === 'true',
+      paid_state: effectivePaidState || undefined,
+      created_by: effectiveCreatedBy || undefined,
+      edited_by: effectiveEditedBy || undefined,
+      assigned_staff: effectiveAssignedStaff || undefined,
+    }),
+    [
+      page,
+      hasSearch,
+      effectiveStatusFilter,
+      search,
+      effectiveFrom,
+      effectiveTo,
+      effectiveMinAmount,
+      effectiveMaxAmount,
+      effectiveReturned,
+      effectivePaidState,
+      effectiveCreatedBy,
+      effectiveEditedBy,
+      effectiveAssignedStaff,
+    ]
+  )
+
+  const summaryQueryParams = useMemo(
+    () => ({
+      page: 1,
+      page_size: 500,
+      payment_status: effectiveStatusFilter || undefined,
+      from_date: effectiveFrom || undefined,
+      to_date: effectiveTo || undefined,
+      min_amount: effectiveMinAmount || undefined,
+      max_amount: effectiveMaxAmount || undefined,
+      is_return: effectiveReturned === '' ? undefined : effectiveReturned === 'true',
+      paid_state: effectivePaidState || undefined,
+      created_by: effectiveCreatedBy || undefined,
+      edited_by: effectiveEditedBy || undefined,
+      assigned_staff: effectiveAssignedStaff || undefined,
+    }),
+    [
+      effectiveStatusFilter,
+      effectiveFrom,
+      effectiveTo,
+      effectiveMinAmount,
+      effectiveMaxAmount,
+      effectiveReturned,
+      effectivePaidState,
+      effectiveCreatedBy,
+      effectiveEditedBy,
+      effectiveAssignedStaff,
+    ]
+  )
+
   const { data: groupedData, isLoading } = useQuery<GroupedResponse>({
-    queryKey: ['billing-grouped', Object.fromEntries(searchParams.entries())],
+    queryKey: ['billing-grouped', groupedQueryParams],
     queryFn: () =>
       api.get('/billing/grouped', {
-        params: {
-          page,
-          page_size: normalizedSearch ? 500 : 200,
-          payment_status: effectiveStatusFilter || undefined,
-          search: search || undefined,
-          from_date: effectiveFrom,
-          to_date: effectiveTo,
-          min_amount: effectiveMinAmount || undefined,
-          max_amount: effectiveMaxAmount || undefined,
-          is_return: effectiveReturned === '' ? undefined : effectiveReturned === 'true',
-          paid_state: effectivePaidState || undefined,
-          created_by: effectiveCreatedBy || undefined,
-          edited_by: effectiveEditedBy || undefined,
-          assigned_staff: effectiveAssignedStaff || undefined,
-        },
+        params: groupedQueryParams,
+      }).then((r) => r.data),
+    placeholderData: (prev) => prev,
+  })
+
+  const { data: summaryGroupedData } = useQuery<GroupedResponse>({
+    queryKey: ['billing-grouped-summary', summaryQueryParams],
+    queryFn: () =>
+      api.get('/billing/grouped', {
+        params: summaryQueryParams,
       }).then((r) => r.data),
     placeholderData: (prev) => prev,
   })
@@ -685,6 +743,7 @@ export default function Billing() {
   }
 
   const grouped: BillingGroup[] = useMemo(() => groupedData?.groups ?? [], [groupedData])
+  const summaryGroups: BillingGroup[] = useMemo(() => summaryGroupedData?.groups ?? grouped, [summaryGroupedData, grouped])
 
   const handleInvoiceFormKeyDown = (e: React.KeyboardEvent<HTMLFormElement>) => {
     if (e.key !== 'Enter' || e.shiftKey) return
@@ -716,9 +775,9 @@ export default function Billing() {
 
   const flatRows: FlatBillingEntry[] = useMemo(() => {
     const entries: FlatBillingEntry[] = []
-    const groupsToRender = isRangeMode ? grouped : grouped.slice(0, 1)
+    const groupsToRender = hasSearch || isRangeMode ? grouped : grouped.slice(0, 1)
     for (const group of groupsToRender) {
-      if (isRangeMode) {
+      if (hasSearch || isRangeMode) {
         entries.push({ kind: 'separator', key: `sep-${group.service_date}`, group })
       }
       for (const row of group.items) {
@@ -726,17 +785,20 @@ export default function Billing() {
       }
     }
     return entries
-  }, [grouped, isRangeMode])
+  }, [grouped, hasSearch, isRangeMode])
+
+  const summaryRows = useMemo(
+    () => summaryGroups.flatMap((group) => group.items || []),
+    [summaryGroups]
+  )
 
   const activeDebtorsCount = useMemo(() => {
     const names = new Set<string>()
-    for (const entry of flatRows) {
-      if (entry.kind === 'item') {
-        names.add(String(entry.row.client_name || '').trim().toUpperCase())
-      }
+    for (const row of summaryRows) {
+      names.add(String(row.client_name || '').trim().toUpperCase())
     }
     return names.size
-  }, [flatRows])
+  }, [summaryRows])
 
   useEffect(() => {
     setVisibleCount(140)
@@ -797,14 +859,14 @@ export default function Billing() {
 
   const totalSummary = useMemo(() => {
     let totalAmount = 0, totalPaid = 0, totalOutstanding = 0, jobs = 0
-    for (const g of grouped) {
+    for (const g of summaryGroups) {
       totalAmount += Number(g.summary.total_amount || 0)
       totalPaid += Number(g.summary.total_paid || 0)
       totalOutstanding += Number(g.summary.total_outstanding || 0)
       jobs += Number(g.summary.job_count || 0)
     }
     return { totalAmount, totalPaid, totalOutstanding, jobs }
-  }, [grouped])
+  }, [summaryGroups])
 
   const activeRange = useMemo(() => {
     if (!isRangeMode) return null
@@ -989,10 +1051,7 @@ export default function Billing() {
   }
 
   const hasActiveFilters = !!(search || rangeFrom || rangeTo || statusFilter || paidState || minAmount || maxAmount || returned || createdBy || editedBy || assignedStaff)
-  const allRows = useMemo(
-    () => flatRows.filter((entry): entry is Extract<FlatBillingEntry, { kind: 'item' }> => entry.kind === 'item').map((entry) => entry.row),
-    [flatRows]
-  )
+  const allRows = useMemo(() => summaryRows, [summaryRows])
 
   const todayJobs = useMemo(
     () => allRows.filter((row) => String(row.service_date || row.invoice_date || '').slice(0, 10) === todayISO).length,
