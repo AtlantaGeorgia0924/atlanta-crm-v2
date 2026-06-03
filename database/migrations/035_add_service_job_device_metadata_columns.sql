@@ -1,5 +1,7 @@
 -- Add device metadata fields to service_jobs so billing invoices can persist inventory item details.
 ALTER TABLE service_jobs
+    ADD COLUMN IF NOT EXISTS condition TEXT,
+    ADD COLUMN IF NOT EXISTS lock_status TEXT,
     ADD COLUMN IF NOT EXISTS storage TEXT,
     ADD COLUMN IF NOT EXISTS color TEXT,
     ADD COLUMN IF NOT EXISTS battery_health NUMERIC(5,2);

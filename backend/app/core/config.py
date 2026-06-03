@@ -53,6 +53,10 @@ def _valid_supabase_key(value: str, expected_role: str | None = None) -> bool:
     return False
 
 
+def _normalize_origin(value: str) -> str:
+    return str(value or "").strip().rstrip("/")
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=Path(__file__).resolve().parents[2] / ".env", extra="ignore")
 
@@ -64,14 +68,30 @@ class Settings(BaseSettings):
     # ...existing code...
 
     # App
-    ALLOWED_ORIGINS: str = "http://localhost:5173,https://your-vercel-app.vercel.app"
-    ALLOWED_ORIGIN_REGEX: str = r"https?://(localhost|127\.0\.0\.1)(:\d+)?|https://([a-zA-Z0-9-]+\.)*vercel\.app"
+    ALLOWED_ORIGINS: str = "http://localhost:5173,http://127.0.0.1:5173"
+    ALLOWED_ORIGIN_REGEX: str = (
+        r"(^https?://("
+        r"localhost|127\.0\.0\.1|0\.0\.0\.0|"
+        r"10(?:\.\d{1,3}){3}|"
+        r"192\.168(?:\.\d{1,3}){2}|"
+        r"172\.(?:1[6-9]|2\d|3[01])(?:\.\d{1,3}){2}"
+        r")(:\d+)?$)"
+        r"|(^https://([a-zA-Z0-9-]+\.)*(vercel\.app|netlify\.app|onrender\.com)$)"
+    )
     ENV: str = "development"
     REDIS_URL: str = ""
 
     @property
     def origins(self) -> list[str]:
-        return [o.strip() for o in self.ALLOWED_ORIGINS.split(",")]
+        origins: list[str] = []
+        seen: set[str] = set()
+        for raw in str(self.ALLOWED_ORIGINS or "").split(","):
+            normalized = _normalize_origin(raw)
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            origins.append(normalized)
+        return origins
 
     def validate_required_env(self, production: bool | None = None) -> list[EnvValidationIssue]:
         """Validate required configuration without exposing secret values."""

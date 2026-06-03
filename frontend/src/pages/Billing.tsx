@@ -23,6 +23,7 @@ import { useAuthStore } from '@/store/authStore'
 
 interface BillingRow {
   id: string
+  client_id?: string
   client_name: string
   phone_number?: string
   service_name: string
@@ -37,6 +38,7 @@ interface BillingRow {
   battery_health?: number
   quantity: number
   total_amount: number
+  unit_price?: number
   amount_charged?: number
   amount_paid: number
   paid_amount?: number
@@ -44,7 +46,9 @@ interface BillingRow {
   status: string
   payment_status?: string
   invoice_date?: string
+  due_date?: string
   service_date?: string
+  service_expense?: number
   notes?: string
   created_by?: string
   created_by_name?: string
@@ -111,6 +115,33 @@ interface FormValues {
   invoice_date: string
   due_date: string
   notes: string
+}
+
+function buildDefaultInvoiceFormValues(): FormValues {
+  return {
+    client_id: '',
+    client_name: '',
+    client_phone: '',
+    service_name: '',
+    device_model: '',
+    description: '',
+    imei: '',
+    serial_number: '',
+    condition: '',
+    lock_status: '',
+    location: '',
+    storage: '',
+    color: '',
+    battery_health: undefined,
+    payment_status: 'UNPAID',
+    quantity: 1,
+    unit_price: 0,
+    amount_paid: 0,
+    service_expense: 0,
+    invoice_date: new Date().toISOString().slice(0, 10),
+    due_date: '',
+    notes: '',
+  }
 }
 
 interface ClientSuggestion {
@@ -213,8 +244,9 @@ function operationStatusClass(status: string): string {
 }
 
 function parseApiError(error: any, fallback: string): string {
-  const detail = error?.response?.data?.detail
-  const message = error?.response?.data?.message
+  const errorData = error?.response?.data
+  const detail = errorData?.detail
+  const message = errorData?.message || errorData?.error?.message || errorData?.error_description
   if (Array.isArray(detail) && detail.length > 0) {
     const first = detail[0]
     const loc = Array.isArray(first?.loc) ? first.loc.join('.') : ''
@@ -222,6 +254,11 @@ function parseApiError(error: any, fallback: string): string {
     return loc ? `${loc}: ${msg}` : msg
   }
   if (typeof detail === 'string' && detail.trim()) return detail
+  if (detail && typeof detail === 'object') {
+    if (typeof detail.message === 'string' && detail.message.trim()) return detail.message
+    const firstEntry = Object.entries(detail).find(([, value]) => value != null && String(value).trim() !== '')
+    if (firstEntry) return `${firstEntry[0]}: ${String(firstEntry[1])}`
+  }
   if (typeof message === 'string' && message.trim()) return message
   if (error?.response?.status === 403) return 'Permission denied for this action'
   if (error?.response?.status === 404) return 'Invoice was not found or may have been removed'
@@ -314,7 +351,9 @@ export default function Billing() {
   const effectiveMinAmount = minAmount
   const effectiveMaxAmount = maxAmount
 
-  const { register, handleSubmit, reset, setValue, formState: { errors } } = useForm<FormValues>()
+  const { register, handleSubmit, reset, setValue, formState: { errors } } = useForm<FormValues>({
+    defaultValues: buildDefaultInvoiceFormValues(),
+  })
 
   useEffect(() => { setSearchInput(search) }, [search])
 
@@ -482,16 +521,18 @@ export default function Billing() {
 
   const saveMutation = useMutation({
     mutationFn: async (values: FormValues) => {
+      const isEditing = !!editRow
+      const canEditFinancials = !isEditing || isAdmin
       let clientId = selectedClientId || values.client_id || ''
 
-      if (!editRow && !clientId) {
+      if (!isEditing && !clientId) {
         const maybeExisting = suggestions.find(
           (s) => s.name.toLowerCase() === String(values.client_name || '').trim().toLowerCase()
         )
         if (maybeExisting) clientId = maybeExisting.id
       }
 
-      if (!editRow && !clientId && values.client_name?.trim() && values.client_phone?.trim()) {
+      if (!isEditing && !clientId && values.client_name?.trim() && values.client_phone?.trim()) {
         const createClientRes = await api.post('/clients', {
           client_name: values.client_name,
           phone_number: values.client_phone,
@@ -508,14 +549,8 @@ export default function Billing() {
       const amountPaid = Number(values.amount_paid)
       const serviceExpense = Number(values.service_expense)
 
-      if (!Number.isFinite(unitPrice) || unitPrice <= 0) {
-        throw new Error('Unit Price must be greater than zero')
-      }
       if (!Number.isFinite(quantity) || quantity <= 0) {
         throw new Error('Quantity must be greater than zero')
-      }
-      if (!Number.isFinite(amountPaid) || amountPaid < 0) {
-        throw new Error('Amount paid cannot be negative')
       }
 
       const normalizedClientName = String(values.client_name || '').trim()
@@ -524,15 +559,25 @@ export default function Billing() {
         throw new Error('Client Name and Service Name are required')
       }
 
-      const computedTotal = quantity * unitPrice
-      if (amountPaid > computedTotal) {
-        throw new Error('Paid amount cannot exceed total amount')
+      if (canEditFinancials) {
+        if (!Number.isFinite(unitPrice) || unitPrice <= 0) {
+          throw new Error('Unit Price must be greater than zero')
+        }
+        if (!Number.isFinite(amountPaid) || amountPaid < 0) {
+          throw new Error('Amount paid cannot be negative')
+        }
+        const computedTotal = quantity * unitPrice
+        if (amountPaid > computedTotal) {
+          throw new Error('Paid amount cannot exceed total amount')
+        }
       }
 
       const payload = {
-        ...values,
+        client_id: clientId || undefined,
         client_name: normalizedClientName,
+        client_phone: values.client_phone?.trim() || undefined,
         service_name: normalizedServiceName,
+        description: values.description?.trim() || undefined,
         device_model: values.device_model?.trim() || undefined,
         imei: values.imei?.trim() || undefined,
         serial_number: values.serial_number?.trim() || undefined,
@@ -542,27 +587,21 @@ export default function Billing() {
         storage: values.storage?.trim() || undefined,
         color: values.color?.trim() || undefined,
         battery_health: Number.isFinite(Number(values.battery_health)) ? Number(values.battery_health) : undefined,
-        payment_status: values.payment_status?.trim() || undefined,
         quantity: Number.isFinite(quantity) && quantity > 0 ? quantity : 1,
-        unit_price: unitPrice,
-        amount_paid: Number.isFinite(amountPaid) && amountPaid >= 0 ? amountPaid : 0,
-        service_expense: Number.isFinite(serviceExpense) && serviceExpense >= 0 ? serviceExpense : 0,
         invoice_date: values.invoice_date?.trim() ? values.invoice_date : undefined,
         due_date: values.due_date?.trim() ? values.due_date : undefined,
         notes: values.notes?.trim() ? values.notes : undefined,
-        client_id: clientId || undefined,
-      }
-      const finalPayload = { ...payload }
-
-      // Staff can edit operational fields but not financial fields.
-      if (editRow && !isAdmin) {
-        delete (finalPayload as any).unit_price
-        delete (finalPayload as any).amount_paid
-        delete (finalPayload as any).service_expense
-        delete (finalPayload as any).payment_status
+        ...(canEditFinancials
+          ? {
+              unit_price: unitPrice,
+              amount_paid: Number.isFinite(amountPaid) && amountPaid >= 0 ? amountPaid : 0,
+              service_expense: Number.isFinite(serviceExpense) && serviceExpense >= 0 ? serviceExpense : 0,
+              payment_status: values.payment_status?.trim() || undefined,
+            }
+          : {}),
       }
 
-      return editRow ? api.put(`/billing/${editRow.id}`, finalPayload) : api.post('/billing', payload)
+      return editRow ? api.put(`/billing/${editRow.id}`, payload) : api.post('/billing', payload)
     },
     retry: 1,
     onSuccess: (res) => {
@@ -707,10 +746,15 @@ export default function Billing() {
       const details = await api.get(`/billing/${row.id}`).then((r) => r.data)
       const quantity = Number(details?.quantity ?? row.quantity ?? 1) || 1
       const totalAmount = Number(details?.total_amount ?? details?.amount_charged ?? row.total_amount ?? 0)
-      const unitPrice = Number(details?.unit_price ?? (quantity ? totalAmount / quantity : 0))
+      const rawUnitPrice = Number(details?.unit_price ?? row.unit_price ?? NaN)
+      const derivedUnitPrice = quantity ? totalAmount / quantity : totalAmount
+      const unitPrice = Number.isFinite(rawUnitPrice) && rawUnitPrice > 0 ? rawUnitPrice : derivedUnitPrice
       const amountPaid = Number(details?.amount_paid ?? details?.paid_amount ?? row.amount_paid ?? 0)
+      const clientId = String(details?.client_id ?? row.client_id ?? '').trim()
 
       reset({
+        ...buildDefaultInvoiceFormValues(),
+        client_id: clientId,
         client_name: details?.client_name ?? row.client_name,
         client_phone: details?.phone_number ?? row.phone_number ?? '',
         service_name: details?.service_name ?? row.service_name,
@@ -733,6 +777,7 @@ export default function Billing() {
         due_date: String(details?.due_date || '').slice(0, 10),
         notes: details?.notes ?? '',
       } as FormValues)
+      setSelectedClientId(clientId)
       setClientSearch(details?.client_name ?? row.client_name)
       setShowForm(true)
     } catch (e: any) {
@@ -949,7 +994,7 @@ export default function Billing() {
     setClientSearch('')
     setShowClientDropdown(false)
     setExpandedRows(new Set())
-    reset()
+    reset(buildDefaultInvoiceFormValues())
   }
 
   const toggleRow = (id: string) =>
@@ -1052,6 +1097,7 @@ export default function Billing() {
 
   const hasActiveFilters = !!(search || rangeFrom || rangeTo || statusFilter || paidState || minAmount || maxAmount || returned || createdBy || editedBy || assignedStaff)
   const allRows = useMemo(() => summaryRows, [summaryRows])
+  const isFinancialEditLocked = !!editRow && !isAdmin
 
   const todayJobs = useMemo(
     () => allRows.filter((row) => String(row.service_date || row.invoice_date || '').slice(0, 10) === todayISO).length,
@@ -1096,29 +1142,7 @@ export default function Billing() {
     setClientSearch('')
     setSelectedClientId('')
     setShowClientDropdown(false)
-    reset({
-      client_name: '',
-      client_phone: '',
-      service_name: '',
-      device_model: '',
-      description: '',
-      imei: '',
-      serial_number: '',
-      condition: '',
-      lock_status: '',
-      location: '',
-      storage: '',
-      color: '',
-      battery_health: undefined,
-      payment_status: 'UNPAID',
-      quantity: 1,
-      unit_price: 0,
-      amount_paid: 0,
-      service_expense: 0,
-      invoice_date: new Date().toISOString().slice(0, 10),
-      due_date: '',
-      notes: '',
-    } as FormValues)
+    reset(buildDefaultInvoiceFormValues())
     setShowForm(true)
   }
 
@@ -1744,12 +1768,13 @@ export default function Billing() {
           <div>
             <label className="form-label">Unit Price</label>
             <input type="number" step="0.01" min="0.01" className="form-input"
+              disabled={isFinancialEditLocked}
               {...register('unit_price', { valueAsNumber: true, required: 'Required', min: { value: 0.01, message: 'Must be > 0' } })} />
             {errors.unit_price && <p className="text-xs text-red-500">{errors.unit_price.message as string}</p>}
           </div>
           <div>
             <label className="form-label">Amount Paid</label>
-            <input type="number" step="0.01" className="form-input" {...register('amount_paid', { valueAsNumber: true })} />
+            <input type="number" step="0.01" className="form-input" disabled={isFinancialEditLocked} {...register('amount_paid', { valueAsNumber: true })} />
           </div>
           {isAdmin && (
             <div>
@@ -1764,7 +1789,7 @@ export default function Billing() {
           )}
           <div>
             <label className="form-label">Service Expense</label>
-            <input type="number" step="0.01" className="form-input" {...register('service_expense', { valueAsNumber: true })} />
+            <input type="number" step="0.01" className="form-input" disabled={isFinancialEditLocked} {...register('service_expense', { valueAsNumber: true })} />
           </div>
           <div>
             <label className="form-label">Invoice Date</label>

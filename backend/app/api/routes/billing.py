@@ -334,13 +334,15 @@ def _serialize_billing_row(row: dict, *, is_admin: bool = True) -> dict:
     total = to_number(row.get("amount_charged"))
     paid = to_number(row.get("paid_amount"))
     outstanding = compute_outstanding(total, paid)
+    quantity = to_number(row.get("quantity")) or 1
+    unit_price = total / quantity if quantity else total
     service_expense = to_number(row.get("service_expense"))
     if service_expense == 0:
         service_expense = to_number(row.get("service_expense_amount")) or to_number(row.get("expense_amount"))
     status_value = _normalize_payment_status(row.get("payment_status") or compute_payment_status(total, paid))
 
     serialized = dict(row)
-    serialized["unit_price"] = total
+    serialized["unit_price"] = unit_price
     serialized["total_amount"] = total
     serialized["amount_paid"] = paid
     serialized["balance"] = outstanding
@@ -351,7 +353,7 @@ def _serialize_billing_row(row: dict, *, is_admin: bool = True) -> dict:
     serialized["invoice_date"] = row.get("service_date")
     serialized["service_name"] = _best_service_name(row)
     serialized["description"] = row.get("description") or row.get("service_name")
-    serialized["quantity"] = to_number(row.get("quantity")) or 1
+    serialized["quantity"] = quantity
     serialized["created_by"] = row.get("created_by")
     serialized["created_by_name"] = row.get("created_by_name")
     serialized["created_by_role"] = row.get("created_by_role")
@@ -635,6 +637,7 @@ class BillingCreate(BaseModel):
 
 
 class BillingUpdate(BaseModel):
+    client_id: Optional[str] = None
     client_name: Optional[str] = None
     service_name: Optional[str] = None
     description: Optional[str] = None
@@ -1556,12 +1559,35 @@ def update_billing(billing_id: str, payload: BillingUpdate, _user=Depends(get_cu
         data["payment_status"] = requested_status
     if "amount_paid" in data:
         data["paid_amount"] = data.pop("amount_paid")
+    if "service_expense" in data:
+        data["service_expense_amount"] = data.pop("service_expense")
     if "client_phone" in data:
         data["phone_number"] = data.pop("client_phone")
     if "invoice_date" in data:
         data["service_date"] = data.pop("invoice_date")
     if "payment_date" in data:
         data["paid_date"] = data.pop("payment_date")
+
+    for text_field in (
+        "client_id",
+        "client_name",
+        "service_name",
+        "description",
+        "notes",
+        "phone_number",
+        "device_model",
+        "imei",
+        "serial_number",
+        "condition",
+        "lock_status",
+        "location",
+        "storage",
+        "color",
+        "unlock_method",
+    ):
+        if text_field in data:
+            text_value = str(data.get(text_field) or "").strip()
+            data[text_field] = text_value or None
 
     for date_field in ("service_date", "due_date", "paid_date"):
         if date_field in data:
@@ -1616,6 +1642,15 @@ def update_billing(billing_id: str, payload: BillingUpdate, _user=Depends(get_cu
     data["last_edited_at"] = now_iso
 
     service_columns = _service_job_columns(sb)
+    effective_client_name = str(data.get("client_name") or existing_before.get("client_name") or "").strip()
+    effective_phone = str(data.get("phone_number") or existing_before.get("phone_number") or "").strip()
+    if effective_client_name:
+        try:
+            client_row = _upsert_client_phone(sb, effective_client_name, effective_phone)
+            if "client_id" in service_columns and not data.get("client_id"):
+                data["client_id"] = client_row.get("id")
+        except Exception:
+            pass
     data = {k: v for k, v in data.items() if k in service_columns}
     if not data:
         raise HTTPException(status_code=400, detail="No valid fields to update")
